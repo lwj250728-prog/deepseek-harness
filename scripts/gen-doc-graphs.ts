@@ -355,6 +355,13 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Folds revisioned objective state from the session log and keeps live continuation activation process-local.',
   },
   {
+    key: 'cognitivePipeline',
+    pkg: 'cognition/cognitive-pipeline',
+    title: 'Prediction-error-driven cognition pipeline',
+    mode: 'core',
+    note: 'Owns the SAR experience store and the hot/cold dual-loop engines: calibrated prediction with OOD routing, feedback correction, and sandbox-gated utility-space taxonomy rebuilds.',
+  },
+  {
     key: 'e2b',
     pkg: 'e2b',
     title: 'E2B sandbox lifecycle owner',

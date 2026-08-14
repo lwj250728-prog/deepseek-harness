@@ -1924,6 +1924,76 @@
       "doc": "docs/subsystems/feedback.md",
       "symbol": "MessageFeedbackDeleteResult",
       "source": "packages/feedback/message-feedback/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "SarTriplet",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "Prediction",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "TempStrategy",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "PredictInput",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "OutcomeUtility",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "Experience",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "CalibrationBucket",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "Cluster",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "TaxonomyState",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "PredictResult",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "FeedbackInput",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "FeedbackResult",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "RebuildResult",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "InspectResult",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
     }
   ]
 }

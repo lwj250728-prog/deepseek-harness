@@ -140,7 +140,8 @@
         "./packages/util/*/src/invariant.ts",
         "./packages/mcp/*/src/invariant.ts",
         "./packages/identity/*/src/invariant.ts",
-        "./packages/test-support/*/src/invariant.ts"
+        "./packages/test-support/*/src/invariant.ts",
+        "./packages/cognition/*/src/invariant.ts"
       ],
       // host/client package names prefix the group dir (dsh-client-<dir>), so
       // the generic dsh-*/invariant list above cannot map them; strip the
@@ -271,6 +272,7 @@
         "./packages/mcp/*/src",
         "./packages/identity/*/src",
         "./packages/test-support/*/src",
+        "./packages/cognition/*/src",
         "./packages/host/*/src",
         "./packages/client/*/src"
       ]

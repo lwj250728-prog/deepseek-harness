@@ -106,6 +106,7 @@ export const SERVICE_PAGE: Record<string, string> = {
   web: 'web.md',
   workflowEngine: 'workflow.md',
   workspaceRegistry: 'workspace.md',
+  cognitivePipeline: 'cognitive-pipeline.md',
 }
 
 /**
@@ -486,6 +487,20 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   TypertPackageRecord: 'invariants.md',
   TypertSchemaFilter: 'invariants.md',
   TypertSchemaRecord: 'invariants.md',
+  CognitivePipelineService: 'cognitive-pipeline.md',
+  PipelineCallContext: 'cognitive-pipeline.md',
+  RememberInput: 'cognitive-pipeline.md',
+  SarTriplet: 'cognitive-pipeline.md',
+  PredictInput: 'cognitive-pipeline.md',
+  PredictResult: 'cognitive-pipeline.md',
+  FeedbackInput: 'cognitive-pipeline.md',
+  FeedbackResult: 'cognitive-pipeline.md',
+  RebuildResult: 'cognitive-pipeline.md',
+  InspectResult: 'cognitive-pipeline.md',
+  Cluster: 'cognitive-pipeline.md',
+  CalibrationBucket: 'cognitive-pipeline.md',
+  TaxonomyState: 'cognitive-pipeline.md',
+  TempStrategy: 'cognitive-pipeline.md',
 }
 
 /** TypeScript lib and pinned framework types with no repository-owned data page. */

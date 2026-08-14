@@ -32,6 +32,8 @@
     "@deepseek-ai/dsh-client-ui-cordis": "workspace:^",
     "@deepseek-ai/dsh-command-compact": "workspace:^",
     "@deepseek-ai/dsh-command-goal": "workspace:^",
+    "@deepseek-ai/dsh-cognitive-orchestration": "workspace:^",
+    "@deepseek-ai/dsh-cognitive-pipeline": "workspace:^",
     "@deepseek-ai/dsh-compaction-basic": "workspace:^",
     "@deepseek-ai/dsh-compaction-tool-result-pruner": "workspace:^",
     "@deepseek-ai/dsh-goal": "workspace:^",

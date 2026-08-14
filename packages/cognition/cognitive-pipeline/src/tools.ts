@@ -1,0 +1,333 @@
+/**
+ * Model-facing tools over the cognitive pipeline: `remember_experience`,
+ * `predict_outcome`, `report_outcome`, `rebuild_taxonomy`, and
+ * `inspect_memory`. Every tool returns one canonical JSON value; `output.render`
+ * mirrors it into model-facing text.
+ * @module @deepseek-ai/dsh-cognitive-pipeline/tools
+ */
+
+import type { Context } from '@deepseek-ai/cordis'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { CognitivePipelineService } from './service.ts'
+import type { PipelineCallContext } from './service.ts'
+import type { PredictInput, RebuildResult } from './types.ts'
+
+/** Build the model-call context from the executing agent's session. */
+function callContext(exec: ToolRunContext): PipelineCallContext {
+  return exec.agent === undefined ? {} : { sessionId: exec.agent.session.id }
+}
+
+/** One canonical text renderer shared by all tools. */
+function renderJson(_args: unknown, value: unknown): { type: 'text'; text: string }[] {
+  return [{ type: 'text', text: JSON.stringify(value) }]
+}
+
+/** Register the five pipeline tools.
+ * @param ctx - context with the tool registry.
+ * @param service - the pipeline service backing the tools.
+ */
+export function registerPipelineTools(ctx: Context, service: CognitivePipelineService): void {
+  ctx.tools.register(defineTool({
+    name: 'remember_experience',
+    description: 'Encode one raw experience (a past situation, the action taken, and its outcome) into the '
+      + 'cognitive pipeline SAR memory. The pipeline extracts situation/action/outcome, scores the outcome '
+      + 'utility (material gain, emotional valence, energy cost 0-10), and vectorizes both the action and the '
+      + 'outcome for later retrieval and utility-space clustering. Call this when the user shares a completed '
+      + 'experience that should inform future predictions.',
+    parameters: {
+      raw_text: {
+        type: 'string',
+        required: true,
+        description: 'The raw experience text describing situation, action, and result.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          exp_id: { type: 'string', required: true },
+          situation: { type: 'string', required: true },
+          action: { type: 'string', required: true },
+          outcome: { type: 'string', required: true },
+          outcome_utility: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            properties: {
+              material_gain: { type: 'number', required: true },
+              emotional_valence: { type: 'number', required: true },
+              energy_cost: { type: 'number', required: true },
+            },
+          },
+        },
+      },
+      render: renderJson,
+    },
+    async execute(args, exec) {
+      const { expId, sar } = await service.remember({ rawText: args.raw_text }, {
+        ...callContext(exec),
+        signal: exec.signal,
+      })
+      return {
+        exp_id: expId,
+        situation: sar.situation,
+        action: sar.action,
+        outcome: sar.outcome,
+        outcome_utility: {
+          material_gain: sar.outcomeUtility.materialGain,
+          emotional_valence: sar.outcomeUtility.emotionalValence,
+          energy_cost: sar.outcomeUtility.energyCost,
+        },
+      }
+    },
+    presentCall: args => ({ card: 'generic', title: 'Remember experience', kind: 'other', rawInput: args.raw_text }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'predict_outcome',
+    description: 'Hot-loop prediction: given a situation and a proposed action, retrieve similar past actions, '
+      + 'detect distribution shift (OOD), and produce a calibrated success probability with an 80% confidence '
+      + 'interval. Novel actions trigger a scratchpad trial strategy instead of reusing old categories. The '
+      + 'returned prediction_id must be reported back through report_outcome once the actual result is known '
+      + 'so the pipeline can learn from the error.',
+    parameters: {
+      situation: {
+        type: 'string',
+        required: true,
+        description: 'The current situation context.',
+      },
+      action: {
+        type: 'string',
+        required: true,
+        description: 'The proposed action to predict the outcome of.',
+      },
+      context: {
+        type: 'string',
+        description: 'Optional extra context folded into the calibration prompt.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          prediction_id: { type: 'string', required: true },
+          advice: { type: 'string', required: true },
+          raw_probability: { type: 'number', required: true },
+          calibrated_probability: { type: 'number', required: true },
+          confidence_interval_low: { type: 'number', required: true },
+          confidence_interval_high: { type: 'number', required: true },
+          is_novel: { type: 'boolean', required: true },
+          ood_signal: {
+            type: 'string',
+            required: true,
+            enum: ['none', 'low-similarity', 'flat-top', 'high-strangeness'],
+          },
+          top_hit_count: { type: 'number', required: true },
+          used_temp_strategy: { type: 'boolean', required: true },
+          cluster_id: {
+            required: true,
+            oneOf: [{ type: 'number' }, { type: 'null' }],
+          },
+        },
+      },
+      render: renderJson,
+    },
+    async execute(args, exec) {
+      const input: PredictInput = {
+        situation: args.situation,
+        action: args.action,
+        ...args.context === undefined || args.context.length === 0 ? {} : { context: args.context },
+      }
+      const result = await service.predict(input, {
+        ...callContext(exec),
+        signal: exec.signal,
+      })
+      return {
+        prediction_id: result.predictionId,
+        advice: result.advice,
+        raw_probability: result.rawProbability,
+        calibrated_probability: result.calibratedProbability,
+        confidence_interval_low: result.confidenceLow,
+        confidence_interval_high: result.confidenceHigh,
+        is_novel: result.isNovel,
+        ood_signal: result.oodSignal,
+        top_hit_count: result.topHitCount,
+        used_temp_strategy: result.usedTempStrategy,
+        cluster_id: result.clusterId,
+      }
+    },
+    presentCall: args => ({ card: 'generic', title: 'Predict outcome', kind: 'other', rawInput: args.action }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'report_outcome',
+    description: 'Feedback callback: report the actual outcome of a previous predict_outcome call. The pipeline '
+      + 'computes the prediction error, updates lifetime calibration statistics, feeds the scratchpad when a '
+      + 'trial strategy was used, and triggers an emergency local taxonomy repair when the error is extreme. '
+      + 'Pass outcome_quality (0-10) when the actual outcome quality is known; otherwise the pipeline extracts '
+      + 'it from the outcome text.',
+    parameters: {
+      prediction_id: {
+        type: 'string',
+        required: true,
+        description: 'The prediction_id returned by predict_outcome.',
+      },
+      actual_outcome: {
+        type: 'string',
+        required: true,
+        description: 'The observed result text.',
+      },
+      outcome_quality: {
+        type: 'number',
+        description: 'Optional actual outcome quality 0-10 (5 = neutral).',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          status: { type: 'string', required: true, enum: ['logged'] },
+          prediction_error: { type: 'number', required: true },
+          trigger_rebuild: { type: 'boolean', required: true },
+          rebuild_reason: {
+            required: true,
+            oneOf: [{ type: 'string' }, { type: 'null' }],
+          },
+        },
+      },
+      render: renderJson,
+    },
+    async execute(args, exec) {
+      const result = await service.report({
+        predictionId: args.prediction_id,
+        actualOutcome: args.actual_outcome,
+        ...args.outcome_quality === undefined ? {} : { outcomeQuality: args.outcome_quality },
+      }, {
+        ...callContext(exec),
+        signal: exec.signal,
+      })
+      return {
+        status: result.status,
+        prediction_error: result.predictionError,
+        trigger_rebuild: result.triggerRebuild,
+        rebuild_reason: result.rebuildReason,
+      }
+    },
+    presentCall: args => ({ card: 'generic', title: 'Report outcome', kind: 'other', rawInput: args.prediction_id }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'rebuild_taxonomy',
+    description: 'Cold-loop taxonomy rebuild: sample decay-weighted high-error experiences, re-cluster them in '
+      + 'utility space, anchor new clusters with evidence (≥3 distinct experience ids, backend-verified), '
+      + 'backtest the proposal on the newest slice, and write it back only when it cuts validation error by at '
+      + 'least 15%. Use scope "global" for a full rebuild or "local" to repair only the worst cluster. The '
+      + 'resulting taxonomy summary is injected into the session system prompt.',
+    parameters: {
+      scope: {
+        type: 'string',
+        enum: ['local', 'global'],
+        description: 'Rebuild scope; default global.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          scope: { type: 'string', required: true, enum: ['local', 'global'] },
+          accepted: { type: 'boolean', required: true },
+          old_error: {
+            required: true,
+            oneOf: [{ type: 'number' }, { type: 'null' }],
+          },
+          new_error: {
+            required: true,
+            oneOf: [{ type: 'number' }, { type: 'null' }],
+          },
+          delta_error: {
+            required: true,
+            oneOf: [{ type: 'number' }, { type: 'null' }],
+          },
+          cluster_count: { type: 'number', required: true },
+          rejected_clusters: { type: 'number', required: true },
+          sample_count: { type: 'number', required: true },
+          reason: { type: 'string', required: true },
+          taxonomy_version: { type: 'number', required: true },
+        },
+      },
+      render: renderJson,
+    },
+    async execute(args, exec) {
+      const result: RebuildResult = await service.rebuild(args.scope ?? 'global', {
+        ...callContext(exec),
+        signal: exec.signal,
+      })
+      return {
+        scope: result.scope,
+        accepted: result.accepted,
+        old_error: result.oldError,
+        new_error: result.newError,
+        delta_error: result.deltaError,
+        cluster_count: result.clusterCount,
+        rejected_clusters: result.rejectedClusters,
+        sample_count: result.sampleCount,
+        reason: result.reason,
+        taxonomy_version: result.taxonomyVersion,
+      }
+    },
+    presentCall: args => ({ card: 'generic', title: `Rebuild taxonomy (${args.scope ?? 'global'})`, kind: 'other' }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'inspect_memory',
+    description: 'Read the cognitive pipeline state: stored experience and prediction counts, clusters, '
+      + 'calibration buckets, active scratchpad strategies, the current taxonomy summary, and the most recent '
+      + 'resolved predictions. Use it to understand what the pipeline has learned and how calibrated it is.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          experience_count: { type: 'number', required: true },
+          prediction_count: { type: 'number', required: true },
+          resolved_prediction_count: { type: 'number', required: true },
+          cluster_count: { type: 'number', required: true },
+          active_temp_strategy_count: { type: 'number', required: true },
+          taxonomy: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            properties: {
+              version: { type: 'number', required: true },
+              summary_short: { type: 'string', required: true },
+              updated_at: { type: 'number', required: true },
+            },
+          },
+        },
+      },
+      render: renderJson,
+    },
+    execute(_args, _exec) {
+      const result = service.inspect()
+      return Promise.resolve({
+        experience_count: result.experienceCount,
+        prediction_count: result.predictionCount,
+        resolved_prediction_count: result.resolvedPredictionCount,
+        cluster_count: result.clusterCount,
+        active_temp_strategy_count: result.activeTempStrategyCount,
+        taxonomy: {
+          version: result.taxonomy.version,
+          summary_short: result.taxonomy.summaryShort,
+          updated_at: result.taxonomy.updatedAt,
+        },
+      })
+    },
+    presentCall: () => ({ card: 'generic', title: 'Inspect cognitive memory', kind: 'read' }),
+  }))
+}

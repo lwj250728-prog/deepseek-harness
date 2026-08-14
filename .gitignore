@@ -38,3 +38,11 @@ apps/web/dist/
 worktrees/
 .agents/worktrees/
 .typert-*/
+
+# runtime user data (never commit)
+data/.credentials.yaml
+data/.anonymous-user-id
+data/settings.yaml
+data/sessions/
+data/storages/
+logs/

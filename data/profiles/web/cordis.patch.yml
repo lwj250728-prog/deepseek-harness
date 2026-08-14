@@ -1,0 +1,39 @@
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+
+# DCA-PED cognitive pipeline (SAR memory + hot/cold dual-loop learning).
+# The pipeline mounts the `ctx.cognitivePipeline` service, five model-facing
+# tools (remember_experience, predict_outcome, report_outcome,
+# rebuild_taxonomy, inspect_memory), and the dynamic `cognition:taxonomy`
+# system-prompt section. It degrades to deterministic math when no LLM route
+# is configured; set provider/model to enable SAR extraction, OOD review,
+# calibration, and reconstruction assists.
+- insert:
+    - id: cognitive-pipeline
+      name: '@deepseek-ai/dsh-cognitive-pipeline'
+      config:
+        root: !!js dshHomePath('cognitive-pipeline')
+        # Reuse the harness's own LLM route (credentials: DEEPSEEK_API_KEY in
+        # data/.credentials.yaml); SAR extraction, OOD review, calibration,
+        # and reconstruction then run model-assisted.
+        provider: deepseek-official
+        model: deepseek-v4-flash
+
+    # Task-level cognition orchestration: wraps the spawn provider so child
+    # prompts receive related SAR experience and settled outcomes are written
+    # back. Must load after its delegate (subagent-spawn-in-process).
+    - id: cognitive-orchestration
+      name: '@deepseek-ai/dsh-cognitive-orchestration'
+      config:
+        delegate: spawn
+        providerName: cognitive
+        policyEnabled: true
+
+    # A second subagent tool delegating through the cognitive wrapper, kept
+    # separate from the preset-owned `subagent` tool.
+    - id: tool-subagent-cognitive
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: cognitive
+        toolName: subagent_cognitive

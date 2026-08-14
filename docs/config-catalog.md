@@ -465,6 +465,99 @@ export interface Config {
 
 Source: [`packages/code-runtime/code-runtime-worker-thread/src/index.ts:25`](../packages/code-runtime/code-runtime-worker-thread/src/index.ts)
 
+<a id="deepseek-aidsh-cognitive-orchestration"></a>
+
+## `@deepseek-ai/dsh-cognitive-orchestration`
+
+Requires: `subagents` · `cognitivePipeline`
+
+```ts config-catalog
+/** Plugin configuration mirrors the orchestrator configuration. */
+export type Config = Partial<OrchestrationConfig>
+
+/** Orchestration configuration (all defaults conservative). */
+export interface OrchestrationConfig {
+  /** Delegate provider name to wrap (e.g. `spawn` or `fork`). */
+  readonly delegate: string
+  /** Registry name of the wrapper provider. */
+  readonly providerName: string
+  /** How many related experiences to inject at most. */
+  readonly topK: number
+  /** Minimum action-vector similarity to consider a memory related. */
+  readonly minSimilarity: number
+  /** Whether inject/record decisions are predicted and calibrated. */
+  readonly policyEnabled: boolean
+  /** Probability at/above which a policy prediction approves the action. */
+  readonly policyDecisionThreshold: number
+}
+```
+
+Source: [`packages/cognition/cognitive-orchestration/src/index.ts:31`](../packages/cognition/cognitive-orchestration/src/index.ts)
+
+<a id="deepseek-aidsh-cognitive-pipeline"></a>
+
+## `@deepseek-ai/dsh-cognitive-pipeline`
+
+Requires: `llm` · `tools` · `systemPrompt`
+
+```ts config-catalog
+/** Plugin configuration (all fields optional; engine defaults apply). */
+export interface CognitivePipelineConfig {
+  /** Store directory; default `<dshHome>/cognitive-pipeline`. */
+  root?: string
+  /** Explicit LLM provider route; must be paired with `model`. */
+  provider?: string
+  /** Explicit LLM model id; must be paired with `provider`. */
+  model?: string
+  /** False disables tool registration while keeping the service loadable. */
+  enabled?: boolean
+  /** Hot-loop retrieval depth (default 10). */
+  topK?: number
+  /** OOD low-similarity threshold (default 0.65). */
+  oodSimThreshold?: number
+  /** OOD flat-top spread threshold (default 0.1). */
+  oodFlatThreshold?: number
+  /** OOD strangeness-index threshold (default 1.5). */
+  oodSiThreshold?: number
+  /** Scratchpad TTL in milliseconds (default 24h). */
+  tempStrategyTtlMs?: number
+  /** Scratchpad graduation hit count (default 3). */
+  tempStrategyHitThreshold?: number
+  /** Scratchpad graduation positive ratio (default 0.667). */
+  tempStrategyPositiveRatio?: number
+  /** Scratchpad fuzzy-match cosine (default 0.5). */
+  tempStrategyMatchThreshold?: number
+  /** Layer-2 shrinkage alpha (default 50). */
+  shrinkageAlpha?: number
+  /** Minimum 80%-interval width (default 0.2). */
+  minConfidenceIntervalWidth?: number
+  /** Cold-loop time-decay lambda per day (default 0.01). */
+  decayLambda?: number
+  /** Cold-loop minimum decay weight (default 0.1). */
+  minDecayWeight?: number
+  /** Cold-loop prediction-error inclusion threshold (default 0.3). */
+  predictionErrorThreshold?: number
+  /** Cold-loop max sample ratio of the population (default 0.15). */
+  maxSampleRatio?: number
+  /** Evidence hard-constraint minimum count (default 3). */
+  evidenceMinCount?: number
+  /** Evidence hard-constraint max pairwise cosine distance (default 0.85). */
+  evidenceMaxDistance?: number
+  /** Sandbox acceptance: required error reduction ratio (default 0.15). */
+  sandboxImprovement?: number
+  /** Validation slice ratio of the sampled set (default 0.2). */
+  validationRatio?: number
+  /** Agglomerative merge cosine threshold (default 0.4). */
+  clusterMergeCosine?: number
+  /** Cluster-membership cosine threshold (default 0.3). */
+  clusterMatchCosine?: number
+  /** Feedback error at/above which an emergency local rebuild fires (default 0.8). */
+  emergencyErrorThreshold?: number
+}
+```
+
+Source: [`packages/cognition/cognitive-pipeline/src/service.ts:41`](../packages/cognition/cognitive-pipeline/src/service.ts)
+
 <a id="deepseek-aidsh-compaction-basic"></a>
 
 ## `@deepseek-ai/dsh-compaction-basic`
