@@ -1,0 +1,39 @@
+# @deepseek-ai/dsh-mobile-gateway bundle patch: one row mounting the mobile
+# access gateway inside the `dsh --profile web` process. Applied as a profile
+# layer (after the base + web-app bundles); the profile's own
+# `cordis.patch.yml` or `$DSH_HOME/cordis.patch.yml` overrides the row's
+# `config` by id — the usual place to put your `users` (tokens) and ports.
+#
+# Security posture: the gateway is a SECOND listening socket (default
+# 0.0.0.0:4080) in front of the loopback DSH web server (127.0.0.1:<webPort>).
+# DSH itself keeps binding loopback only — the `--host 0.0.0.0` refusal in
+# `dsh --profile web` stays intact — and every /api request the gateway
+# forwards carries a rewritten `Host`/`Origin` of `127.0.0.1:<webPort>`, so the
+# browser-trust fence accepts it exactly as a local request. With an empty
+# `users` list the gateway denies every login (deny-all default).
+- insert:
+    - id: mobile-gateway
+      name: '@deepseek-ai/dsh-mobile-gateway'
+      inject: [webServer]
+      config:
+        # Listen address for phone access. 0.0.0.0 exposes the AUTHENTICATED
+        # gateway to your LAN (not DSH itself); keep the firewall tight.
+        bind: 0.0.0.0
+        port: 4080
+        # Forward target: the loopback DSH web server, resolved from the
+        # webServer service so `--port 0` and non-default ports stay correct.
+        targetHost: 127.0.0.1
+        targetPort: !!js ctx.webServer.port
+        # Whitelist of named phone users. Empty = deny everything. Put your
+        # real users in the profile layer instead of here.
+        users: []
+        # Session lifetime for a logged-in phone, in seconds (default 7 days).
+        sessionTtlSeconds: 604800
+        # Optional stable HMAC secret so sessions survive a restart. When
+        # omitted, a fresh random secret is minted per process (all phones
+        # must log in again after a restart).
+        secret: ''
+        # Optional TLS termination: PEM files. Set both to serve https:// so
+        # the PWA install prompt and service worker work over the network.
+        tlsKeyPath: ''
+        tlsCertPath: ''

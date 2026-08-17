@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/setup_title"
+            android:textColor="#e8edf6"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="DeepSeek Harness 手机访问"
+            android:textColor="#8b97ad"
+            android:textSize="14sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:text="@string/label_base_url"
+            android:textColor="#8b97ad"
+            android:textSize="13sp" />
+
+        <EditText
+            android:id="@+id/input_base_url"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:hint="@string/hint_base_url"
+            android:inputType="textUri"
+            android:textColor="#e8edf6"
+            android:textColorHint="#5a6478" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="@string/label_user"
+            android:textColor="#8b97ad"
+            android:textSize="13sp" />
+
+        <EditText
+            android:id="@+id/input_user"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:hint="@string/hint_user"
+            android:inputType="text"
+            android:textColor="#e8edf6"
+            android:textColorHint="#5a6478" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="@string/label_token"
+            android:textColor="#8b97ad"
+            android:textSize="13sp" />
+
+        <EditText
+            android:id="@+id/input_token"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:hint="@string/hint_token"
+            android:inputType="textPassword"
+            android:textColor="#e8edf6"
+            android:textColorHint="#5a6478" />
+
+        <CheckBox
+            android:id="@+id/input_trust_ssl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/label_trust_ssl"
+            android:textColor="#8b97ad"
+            android:textSize="13sp" />
+
+        <Button
+            android:id="@+id/btn_save"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="26dp"
+            android:text="@string/btn_save"
+            android:textSize="15sp" />
+    </LinearLayout>
+</ScrollView>

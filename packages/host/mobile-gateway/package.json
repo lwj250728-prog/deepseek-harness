@@ -1,0 +1,83 @@
+{
+  "name": "@deepseek-ai/dsh-mobile-gateway",
+  "description": "Mobile access gateway for the DSH Web GUI: an authenticated reverse proxy (HTTP + WebSocket) with per-user tokens, a signed-session login, a mobile login page, and a PWA app shell, plus a standalone runner",
+  "version": "0.1.0-rc.5",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/deepseek-ai/deepseek-harness.git",
+    "directory": "packages/host/mobile-gateway"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./standalone": {
+      "types": "./lib/types/standalone.d.ts",
+      "default": "./lib/standalone.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/invariant.js",
+    "lib/standalone.js",
+    "lib/types/**/*.d.ts",
+    "static",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md"
+  ],
+  "bin": {
+    "dsh-mobile-gateway": "lib/standalone.js"
+  },
+  "scripts": {
+    "build": "tsc -b . && node scripts/copy-lib.mjs",
+    "typecheck": "tsc -b .",
+    "test": "vitest run"
+  },
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "mobile",
+    "gateway",
+    "reverse-proxy",
+    "websocket",
+    "pwa"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-host-webserver": "workspace:^",
+    "@deepseek-ai/schemastery": "workspace:^"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "workspace:^",
+    "@deepseek-ai/dsh-invariants": "workspace:^"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "workspace:^",
+    "@deepseek-ai/dsh-invariants": "workspace:^",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.5.0",
+    "vitest": "^4.0.0",
+    "ws": "^8.0.0"
+  }
+}

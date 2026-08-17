@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DSH Mobile</string>
+    <string name="setup_title">DSH Mobile 设置</string>
+    <string name="label_base_url">网关地址</string>
+    <string name="hint_base_url">http://192.168.1.10:4080</string>
+    <string name="label_user">用户名（可选）</string>
+    <string name="hint_user">demo-phone</string>
+    <string name="label_token">访问令牌</string>
+    <string name="hint_token">由网关管理员发放</string>
+    <string name="label_trust_ssl">信任自签名证书（HTTPS 网关专用）</string>
+    <string name="btn_save">保存并进入</string>
+    <string name="switch_account">切换账号</string>
+</resources>
