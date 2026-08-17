@@ -48,7 +48,7 @@ Write-Host "==> frpc: $frpcExe"
 serverAddr = "$ServerIp"
 serverPort = $ServerPort
 auth.token = "$Token"
-log.to = "$WorkDir\frpc.log"
+log.to = '$WorkDir\frpc.log'
 log.level = "info"
 
 [[proxies]]
