@@ -99,16 +99,39 @@ ensure_pnpm() {
   if command -v pnpm >/dev/null 2>&1; then
     return
   fi
+  # 1) corepack shims. On distro-packaged Node the shim dir (/usr/bin) is
+  # root-owned, so `corepack enable` fails without sudo; that is fine — the
+  # prepare step still caches pnpm, and `corepack pnpm` runs it directly.
   if command -v corepack >/dev/null 2>&1; then
     info "Installing pnpm 11.7.0 via corepack ..."
-    corepack enable 2>/dev/null || true
-    corepack prepare pnpm@11.7.0 --activate 2>/dev/null || true
+    corepack enable >/dev/null 2>&1 || true
+    corepack prepare pnpm@11.7.0 --activate >/dev/null 2>&1 || true
     if command -v pnpm >/dev/null 2>&1; then return; fi
+    if corepack pnpm --version >/dev/null 2>&1; then
+      info "Using a session shim that runs pnpm through corepack ..."
+      mkdir -p "$HOME/.local/bin"
+      cat > "$HOME/.local/bin/pnpm" <<'EOF'
+#!/usr/bin/env sh
+exec corepack pnpm "$@"
+EOF
+      chmod +x "$HOME/.local/bin/pnpm"
+      export PATH="$HOME/.local/bin:$PATH"
+      return
+    fi
   fi
+  # 2) user-level npm global install. The global bin directory is often NOT
+  # on PATH (npm prefix like ~/.npm-global), so resolve it and prepend it.
   command -v npm >/dev/null 2>&1 || die "Neither pnpm nor npm is available. Install Node.js first."
   info "Installing pnpm via npm ..."
-  npm install -g pnpm@11.7.0
-  command -v pnpm >/dev/null 2>&1 || die "pnpm installation failed; check your npm global bin directory."
+  npm install -g pnpm@11.7.0 --no-fund --no-audit
+  NPM_GLOBAL_BIN="$(npm prefix -g 2>/dev/null)/bin"
+  if [ -n "$NPM_GLOBAL_BIN" ] && [ -x "$NPM_GLOBAL_BIN/pnpm" ]; then
+    export PATH="$NPM_GLOBAL_BIN:$PATH"
+  fi
+  if ! command -v pnpm >/dev/null 2>&1; then
+    die "pnpm is installed but its global bin directory is not on PATH. Add '$(npm prefix -g)/bin' to your PATH (e.g. in ~/.bashrc), or run 'sudo corepack enable' once, then re-run this script."
+  fi
+  pnpm --version >/dev/null 2>&1 || die "pnpm is on PATH but not runnable; check the node it resolves to."
 }
 
 is_repo_checkout() {
@@ -132,7 +155,10 @@ if is_repo_checkout; then
   info "Source mode: using the deepseek-harness checkout at $SCRIPT_DIR"
   ensure_pnpm
 
-  if [ "$SKIP_INSTALL" -eq 0 ] && [ ! -d "$SCRIPT_DIR/node_modules" ]; then
+  # node_modules may exist from a plain `npm install` (no pnpm .pnpm layout);
+  # pnpm install then repairs it, so require the pnpm store marker.
+  if [ "$SKIP_INSTALL" -eq 0 ] \
+    && { [ ! -d "$SCRIPT_DIR/node_modules" ] || [ ! -d "$SCRIPT_DIR/node_modules/.pnpm" ]; }; then
     info "Running pnpm install (first run) ..."
     (cd "$SCRIPT_DIR" && pnpm install)
   fi
