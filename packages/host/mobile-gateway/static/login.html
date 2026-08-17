@@ -91,9 +91,9 @@
     <form id="loginForm" method="post" action="/__mobile/login">
       <label class="en" for="user">用户名（可选，留空则仅用访问令牌）</label>
       <label class="zh" for="user">用户名（可选，留空则仅用访问令牌）</label>
-      <input id="user" name="user" autocomplete="username" placeholder="例如 alice" />
+      <input id="user" name="user" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="例如 alice" />
       <label for="token">访问令牌</label>
-      <input id="token" name="token" type="password" autocomplete="current-password"
+      <input id="token" name="token" type="password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false"
              placeholder="由网关管理员发放" required />
       <button type="submit" id="submit">登录</button>
     </form>
