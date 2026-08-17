@@ -24,7 +24,8 @@
 #            依次执行 pnpm install -> pnpm run build -> pnpm dsh web。
 #   npm 模式：把脚本单独复制到任意目录运行，等价于 npx @deepseek-ai/dsh web。
 #
-# 注意: 首次运行前执行 chmod +x start-dsh.sh。
+# 说明: 脚本在仓库中自带可执行位（100755）。若检出后没有执行权限
+# （例如 Windows 侧 clone 或某些镜像源），先执行: chmod +x start-dsh.sh。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
