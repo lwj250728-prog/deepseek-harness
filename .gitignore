@@ -46,3 +46,8 @@ data/settings.yaml
 data/sessions/
 data/storages/
 logs/
+
+# atomic-write temp artifacts and local plugin runtime data (never commit)
+**/*.tmpdir/
+**/*.tmp
+data/plugins/local-chat/data/

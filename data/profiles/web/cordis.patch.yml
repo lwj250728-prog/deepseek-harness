@@ -37,3 +37,28 @@
       config:
         provider: cognitive
         toolName: subagent_cognitive
+
+# ── Mobile access gateway (@deepseek-ai/dsh-mobile-gateway) ────────────────
+# Authenticated reverse proxy so named phone users can open the DSH Web GUI
+# from their phones. It listens on its OWN socket (0.0.0.0:4080) in front of
+# the loopback web server (127.0.0.1:<webPort>); DSH itself stays loopback.
+# Phone flow: open http://<this-machine-lan-ip>:4080 → 输入用户名+令牌 → 进入
+# DSH Web；可"添加到主屏幕"安装为 PWA。令牌管理见
+# packages/host/mobile-gateway/README.zh.md（换人/轮换：改 users 即可）。
+- insert:
+    - id: mobile-gateway
+      name: '@deepseek-ai/dsh-mobile-gateway'
+      inject: [webServer]
+      config:
+        bind: 0.0.0.0
+        port: 4080
+        targetHost: 127.0.0.1
+        targetPort: !!js ctx.webServer.port
+        sessionTtlSeconds: 604800
+        secret: ''
+        tlsKeyPath: ''
+        tlsCertPath: ''
+        users:
+          - name: demo-phone
+            # Replace before deploying: generate with `openssl rand -hex 24`
+            token: CHANGE_ME_openssl_rand_hex_24

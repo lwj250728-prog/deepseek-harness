@@ -1,0 +1,73 @@
+# The `self-minimal` agent preset: minimal efficiency, cognition kept.
+#
+# Built by deep-diving the shipped `minimal` preset
+# (apps/cli/config/agent-presets/minimal/agent.cordis.yml, 62 lines) and
+# re-composing it for self-improvement. Three deliberate changes from stock:
+#
+# 1. Persona WITHOUT `complete: true` — stock minimal's complete persona would
+#    suppress the dynamic `cognition:taxonomy` section (the pipeline's
+#    "当前活跃认知框架" summary). We keep a short persona plus that section:
+#    efficiency with the self-evolution hook. `includeRuntimeContext: false`
+#    stays, matching minimal's token diet.
+# 2. The cognitive-pipeline plugin is NOT mounted here on purpose: it is already
+#    mounted at the host plane via <dshHome>/profiles/web/cordis.patch.yml
+#    (provider/model route enabled), and its five tools register into the
+#    global tool layer visible to every agent. Mounting it again would
+#    double-register tools and collide on the service.
+# 3. Everything else mirrors stock minimal verbatim (persistent bash +
+#    str_replace_editor + bare fs-local), so mount behavior is proven.
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: You are a helpful software engineer assistant operating at minimal tool surface.
+    includeRuntimeContext: false
+
+# Persistent PTY + bash, entry-local realm — verbatim from stock minimal.
+- id: persistent-shell
+  name: cordis:group
+  group: true
+  isolate:
+    terminals: true
+  config:
+    - id: pty
+      name: '@deepseek-ai/dsh-terminal'
+
+    - id: terminal-bash
+      name: '@deepseek-ai/dsh-terminal-bash'
+      config:
+        timeoutMs: 300000
+
+    - id: persistent-bash
+      name: '@deepseek-ai/dsh-tool-bash-persistent'
+      config:
+        timeoutMs: 300000
+        description: |-
+          Run commands in a bash shell
+          * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
+          * You don't have access to the internet via this tool.
+          * You do have access to a mirror of common linux and python packages via apt and pip.
+          * State is persistent across command calls and discussions with the user.
+          * To inspect a particular line range of a file, e.g. lines 10-25, try 'sed -n 10,25p /path/to/the/file'.
+          * Please avoid commands that may produce a very large amount of output.
+          * Please run long lived commands in the background, e.g. 'sleep 10 &' or start a server in the background.
+
+# Bare local filesystem, entry-local realm — verbatim from stock minimal.
+# SECURITY NOTE: this shadows the host's sandboxed fs provider (sandboxMode
+# undefined = unsandboxed). For the sandboxed variant, delete this group and
+# let str_replace_editor resolve the host fs service instead.
+- id: filesystem
+  name: cordis:group
+  group: true
+  isolate:
+    fs: true
+  config:
+    - id: fs-local
+      name: '@deepseek-ai/dsh-fs-local'
+      config:
+        cwd: !!js process.env.DSH_CWD ?? process.cwd()
+
+    - id: str-replace-editor
+      name: '@deepseek-ai/dsh-tool-str-replace-editor'
+      config:
+        maxOutputChars: 16000

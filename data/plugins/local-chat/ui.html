@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>local-chat</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: system-ui, "Microsoft YaHei", sans-serif;
+    background: #0f1117; color: #e6e8ee; height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    padding: 10px 16px; background: #171a23; border-bottom: 1px solid #262b38;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 15px; margin: 0; margin-right: auto; color: #8ab4ff; }
+  .pill { background: #1e2430; border-radius: 999px; padding: 3px 10px; font-size: 12px; color: #9aa4b5; }
+  #me { color: #7ee787; font-weight: 600; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #sidebar {
+    width: 240px; background: #13161f; border-right: 1px solid #262b38;
+    overflow-y: auto; padding: 10px; font-size: 13px;
+  }
+  #sidebar h3 { font-size: 12px; color: #6b7486; margin: 12px 0 6px; text-transform: uppercase; letter-spacing: .5px; }
+  .side-item { padding: 5px 8px; border-radius: 6px; cursor: pointer; color: #c6cdd9; }
+  .side-item:hover { background: #1e2430; }
+  .side-item .on { color: #7ee787; }
+  .side-item .off { color: #565e70; }
+  #chat {
+    flex: 1; display: flex; flex-direction: column; min-width: 0;
+  }
+  #messages { flex: 1; overflow-y: auto; padding: 14px 18px; display: flex; flex-direction: column; gap: 6px; }
+  .msg { max-width: 70%; padding: 7px 11px; border-radius: 10px; font-size: 14px; line-height: 1.5; word-break: break-word; }
+  .msg.mine { align-self: flex-end; background: #1a5fb4; }
+  .msg.theirs { align-self: flex-start; background: #232a38; }
+  .msg .meta { font-size: 11px; color: #8b94a6; margin-bottom: 2px; }
+  .msg .text { white-space: pre-wrap; }
+  .sys { align-self: center; font-size: 12px; color: #6b7486; background: #171a23; padding: 3px 10px; border-radius: 999px; }
+  #inputbar { display: flex; gap: 8px; padding: 10px 14px; background: #171a23; border-top: 1px solid #262b38; }
+  #input { flex: 1; background: #1e2430; border: 1px solid #2c3342; color: #e6e8ee; border-radius: 8px; padding: 9px 12px; font-size: 14px; outline: none; }
+  #input:focus { border-color: #3d4a63; }
+  button { background: #1a5fb4; color: #fff; border: none; border-radius: 8px; padding: 0 16px; font-size: 14px; cursor: pointer; }
+  button:hover { background: #226dc9; }
+  button.secondary { background: #2a3242; }
+  #login {
+    position: fixed; inset: 0; background: #0f1117; display: flex; align-items: center; justify-content: center; z-index: 10;
+  }
+  .card { background: #171a23; border: 1px solid #262b38; border-radius: 12px; padding: 28px; width: 320px; }
+  .card h2 { margin: 0 0 18px; font-size: 18px; }
+  .card input { width: 100%; margin-bottom: 10px; background: #1e2430; border: 1px solid #2c3342; color: #e6e8ee; border-radius: 8px; padding: 9px 12px; font-size: 14px; outline: none; }
+  .card .row { display: flex; gap: 8px; }
+  .card .row button { flex: 1; padding: 9px 0; }
+  .card .hint { font-size: 12px; color: #6b7486; margin-top: 10px; }
+  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #3a2d20; border: 1px solid #6b4a20; color: #ffd9a0; padding: 8px 16px; border-radius: 8px; font-size: 13px; display: none; }
+  #dlg { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; align-items: center; justify-content: center; z-index: 20; }
+  #dlg .card { width: 340px; }
+  .row2 { display: flex; gap: 8px; margin-top: 6px; }
+  @media (max-width: 640px) {
+    #sidebar { display: none; }
+    header { padding: 8px 10px; gap: 6px; }
+    header button { padding: 0 10px; font-size: 13px; }
+    #messages { padding: 10px 12px; }
+    #input { font-size: 16px; } /* 防 iOS 聚焦缩放 */
+    .msg { max-width: 85%; }
+  }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <div class="card">
+    <h2>local-chat</h2>
+    <input id="u" placeholder="用户名" autocomplete="username">
+    <input id="p" type="password" placeholder="密码" autocomplete="current-password">
+    <div class="row">
+      <button id="btnLogin">登录</button>
+      <button id="btnRegister" class="secondary">注册</button>
+    </div>
+    <div class="hint">仅本机 127.0.0.1 访问 · 私聊/群聊 · 离线消息自动补收</div>
+  </div>
+</div>
+
+<div id="dlg"><div class="card">
+  <h2 id="dlgTitle">操作</h2>
+  <div id="dlgBody"></div>
+  <div class="row2">
+    <button id="dlgOk" class="secondary">确定</button>
+    <button id="dlgCancel" class="secondary">取消</button>
+  </div>
+</div></div>
+
+<header>
+  <h1>local-chat</h1>
+  <span class="pill" id="me">未登录</span>
+  <button id="btnGroup" class="secondary">建群</button>
+  <button id="btnJoin" class="secondary">加群</button>
+  <button id="btnRefresh" class="secondary">刷新</button>
+  <button id="btnLogout" class="secondary">退出</button>
+</header>
+
+<main>
+  <div id="sidebar">
+    <h3>用户</h3>
+    <div id="userList"></div>
+    <h3>我的群</h3>
+    <div id="groupList"></div>
+  </div>
+  <div id="chat">
+    <div id="messages"></div>
+    <div id="inputbar">
+      <input id="input" placeholder="输入消息，回车发送…">
+      <button id="send">发送</button>
+    </div>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict'
+const $ = id => document.getElementById(id)
+let token = null, me = null, es = null, groups = []
+
+function toast(text) {
+  const t = $('toast'); t.textContent = text; t.style.display = 'block'
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 2600)
+}
+
+async function api(obj) {
+  const res = await fetch('/api', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(token ? { token, ...obj } : obj),
+  })
+  return res.json()
+}
+
+function fmtTime(ts) {
+  const d = new Date(ts), p = n => String(n).padStart(2, '0')
+  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds())
+}
+
+function addMsg(m) {
+  const box = $('messages')
+  const div = document.createElement('div')
+  if (m.type === 'sys') {
+    div.className = 'sys'; div.textContent = m.text
+  } else {
+    div.className = 'msg ' + (m.from === me ? 'mine' : 'theirs')
+    const meta = document.createElement('div')
+    meta.className = 'meta'
+    meta.textContent = fmtTime(m.ts) + '  ' + (m.kind === 'dm' ? m.from : ('[群:' + m.groupName + '] ' + m.from))
+    const text = document.createElement('div')
+    text.className = 'text'; text.textContent = m.text
+    div.append(meta, text)
+  }
+  box.append(div)
+  box.scrollTop = box.scrollHeight
+}
+
+function renderUsers(list) {
+  $('userList').innerHTML = list.map(u =>
+    '<div class="side-item">' + esc(u.username) + ' <span class="' + (u.online ? 'on' : 'off') + '">' + (u.online ? '●' : '○') + '</span></div>'
+  ).join('') || '<div class="side-item off">（暂无用户）</div>'
+}
+
+function renderGroups() {
+  $('groupList').innerHTML = groups.map(g =>
+    '<div class="side-item" data-gid="' + g.gid + '">' + esc(g.name) + ' <span class="off">' + g.members + '人</span></div>'
+  ).join('') || '<div class="side-item off">（尚未加群）</div>'
+  document.querySelectorAll('#groupList .side-item').forEach(el => {
+    el.onclick = () => toast('群 ' + groups.find(g => g.gid === el.dataset.gid).name + ' · 用 /gmsg 语法发送')
+  })
+}
+
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) }
+
+function connectSSE() {
+  if (es) es.close()
+  es = new EventSource('/events?token=' + encodeURIComponent(token))
+  es.onmessage = ev => {
+    let m; try { m = JSON.parse(ev.data) } catch { return }
+    if (m.type === 'msg' || m.type === 'sys') addMsg(m)
+    else if (m.type === 'presence') refreshUsers()
+  }
+  es.onerror = () => { /* 断线自动重连（EventSource 内建） */ }
+}
+
+async function refreshUsers() {
+  const r = await api({ type: 'list_users' }).catch(() => null)
+  if (r && r.users) renderUsers(r.users)
+}
+
+async function refreshGroups() {
+  const r = await api({ type: 'list_groups' }).catch(() => null)
+  if (r && r.groups) { groups = r.groups; renderGroups() }
+}
+
+async function enter(name) {
+  me = name
+  $('me').textContent = name
+  $('login').style.display = 'none'
+  connectSSE()
+  await refreshUsers()
+  await refreshGroups()
+}
+
+async function login() {
+  const r = await api({ type: 'login', username: $('u').value.trim(), password: $('p').value })
+  if (r.type === 'error') return toast(r.message)
+  token = r.token
+  await enter(r.username)
+}
+
+async function register() {
+  const r = await api({ type: 'register', username: $('u').value.trim(), password: $('p').value })
+  toast(r.message || (r.type === 'error' ? r.message : '注册成功'))
+}
+
+function dlg(title, bodyHtml) {
+  $('dlgTitle').textContent = title
+  $('dlgBody').innerHTML = bodyHtml
+  $('dlg').style.display = 'flex'
+  return new Promise(resolve => {
+    $('dlgOk').onclick = () => { $('dlg').style.display = 'none'; resolve(true) }
+    $('dlgCancel').onclick = () => { $('dlg').style.display = 'none'; resolve(false) }
+  })
+}
+
+$('btnLogin').onclick = login
+$('btnRegister').onclick = register
+$('btnLogout').onclick = async () => {
+  await api({ type: 'logout' }); if (es) es.close(); location.reload()
+}
+$('btnRefresh').onclick = () => { refreshUsers(); refreshGroups() }
+$('btnGroup').onclick = async () => {
+  const ok = await dlg('建群', '<input id="gname" placeholder="群名"><input id="gmembers" placeholder="成员（逗号分隔，可选）">')
+  if (!ok) return
+  const name = $('gname').value.trim()
+  if (!name) return toast('群名不能为空')
+  const members = $('gmembers').value.split(/[,，]/).map(s => s.trim()).filter(Boolean)
+  const r = await api({ type: 'create_group', name, members })
+  toast(r.message || (r.type === 'error' ? r.message : '群已创建'))
+  if (r.gid) refreshGroups()
+}
+$('btnJoin').onclick = async () => {
+  const ok = await dlg('加群', '<input id="jgid" placeholder="群id（/groups 查看）">')
+  if (!ok) return
+  const gid = $('jgid').value.trim()
+  if (!gid) return toast('群id不能为空')
+  const r = await api({ type: 'join_group', gid })
+  toast(r.message || (r.type === 'error' ? r.message : '已加群'))
+  refreshGroups()
+}
+
+$('btnLogin').disabled = false
+
+function sendMsg() {
+  const input = $('input'), text = input.value.trim()
+  if (!text || !token) return
+  if (text.startsWith('/')) {
+    const parts = text.slice(1).split(/\s+/)
+    const cmd = parts[0], rest = parts.slice(1)
+    if (cmd === 'gmsg' && rest.length >= 2) {
+      api({ type: 'group_msg', gid: rest[0], text: rest.slice(1).join(' ') }).then(r => { if (r.type === 'error') toast(r.message) })
+    } else if (cmd === 'msg' && rest.length >= 2) {
+      api({ type: 'dm', to: rest[0], text: rest.slice(1).join(' ') }).then(r => { if (r.type === 'error') toast(r.message) })
+    } else if (cmd === 'groups') {
+      api({ type: 'list_groups' }).then(r => {
+        if (r.groups) {
+          toast(r.groups.length ? '群: ' + r.groups.map(g => g.gid + '·' + g.name).join('；') : '暂无群')
+          groups = r.groups; renderGroups()
+        }
+      })
+    } else if (cmd === 'users') {
+      api({ type: 'list_users' }).then(r => { if (r.users) { renderUsers(r.users); toast('已刷新用户列表') } })
+    } else {
+      toast('支持 /msg /gmsg /groups /users')
+    }
+  } else {
+    toast('请用 /msg <用户> <文本> 发送私聊，或 /gmsg <群id> <文本> 发群消息')
+  }
+  input.value = ''
+}
+$('send').onclick = sendMsg
+$('input').addEventListener('keydown', e => { if (e.key === 'Enter') sendMsg() })
+$('p').addEventListener('keydown', e => { if (e.key === 'Enter') login() })
+$('u').addEventListener('keydown', e => { if (e.key === 'Enter') $('p').focus() })
+
+// 进入即显示登录层
+$('login').style.display = 'flex'
+</script>
+</body>
+</html>
