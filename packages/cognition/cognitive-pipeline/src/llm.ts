@@ -19,12 +19,14 @@ import type {
   GenerateOptions,
   Message,
 } from '@deepseek-ai/dsh-llm'
-import type { AccumulationDecision, Experience, OutcomeUtility, SarTriplet } from './types.ts'
+import type { AccumulationDecision, DeriveReferenceDecision, Experience, OutcomeUtility, SarTriplet } from './types.ts'
 import {
   ACCUMULATE_SYSTEM_PROMPT,
   CALIBRATION_SYSTEM_PROMPT,
+  DERIVE_REFERENCE_SYSTEM_PROMPT,
   frameAccumulateInput,
   frameCalibrationInput,
+  frameDeriveReferenceInput,
   frameOodInput,
   frameReconstructInput,
   frameSarInput,
@@ -645,5 +647,66 @@ export async function evaluateAccumulation(
   } catch (error) {
     ctx.logger.warn(`cognitive-pipeline: accumulation gate degraded to fallback: ${String(error)}`)
     return accumulationFallback()
+  }
+}
+
+/** Deterministic template-6 fallback: reject derivation (no route → no reference). */
+export function deriveReferenceFallback(): DeriveReferenceDecision {
+  return { shouldDerive: false, sar: null }
+}
+
+/**
+ * Template 6: derive a reference experience from the commonalities of similar
+ * history — an online generalization for cold start. The LLM route extracts
+ * the shared situation/action/outcome/utility pattern; without a route it
+ * deterministically rejects.
+ * @param ctx - plugin context for the LLM call.
+ * @param route - explicit model route.
+ * @param query - the current situation/action to anchor the derivation.
+ * @param similar - the retrieved similar history hits.
+ * @param options - call context (session/signal/maxTokens).
+ * @returns the derivation decision with the reference SAR when derived.
+ */
+export async function deriveReference(
+  ctx: Context,
+  route: CognitiveLlmRoute,
+  query: { situation: string; action: string },
+  similar: readonly { expId: string; text: string; similarity: number }[],
+  options: CallOptions,
+): Promise<DeriveReferenceDecision> {
+  if (!hasExplicitRoute(route)) return deriveReferenceFallback()
+  try {
+    const parsed = asObject(await callJson(ctx, route, DERIVE_REFERENCE_SYSTEM_PROMPT, frameDeriveReferenceInput(query, similar), {
+      ...options,
+      maxTokens: 500,
+    }), 'derive-reference')
+    const shouldDerive = parsed.should_derive === true
+    if (!shouldDerive) return deriveReferenceFallback()
+    const situation = parsed.situation
+    const action = parsed.action
+    const outcome = parsed.outcome
+    const materialGain = Number(parsed.material_gain)
+    const emotionalValence = Number(parsed.emotional_valence)
+    const energyCost = Number(parsed.energy_cost)
+    if (typeof situation !== 'string' || typeof action !== 'string' || typeof outcome !== 'string'
+      || !Number.isFinite(materialGain) || !Number.isFinite(emotionalValence) || !Number.isFinite(energyCost)) {
+      throw new CognitivePipelineError('cognitive-pipeline: derive-reference output missing SAR fields', 'DERIVE_REFERENCE_SCHEMA_FAILED')
+    }
+    return {
+      shouldDerive: true,
+      sar: {
+        situation,
+        action,
+        outcome,
+        utility: {
+          materialGain: clampUtility(materialGain),
+          emotionalValence: clampUtility(emotionalValence),
+          energyCost: clampUtility(energyCost),
+        },
+      },
+    }
+  } catch (error) {
+    ctx.logger.warn(`cognitive-pipeline: derive-reference degraded to fallback: ${String(error)}`)
+    return deriveReferenceFallback()
   }
 }

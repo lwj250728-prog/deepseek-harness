@@ -214,3 +214,38 @@ export function cognitionPrefix(taxonomy: TaxonomyState | null): string {
     '- 所有概率输出均经过样本量收缩与校准，请用户参考区间而非点估计。',
   ].join('\n')
 }
+
+/** Template 6: derive a reference experience from the commonalities of similar
+ * history — an online generalization for cold start. */
+export const DERIVE_REFERENCE_SYSTEM_PROMPT = [
+  '你是认知管线的"经验归纳官"。现在提供给你一段当前情境/拟行动，以及若干条相似的历史经验。',
+  '【归纳任务】：',
+  '1. 挖掘这些相似历史经验的【共同模式】：它们在什么典型情境下、采取了什么典型行动、得到了什么典型结果与效用。',
+  '2. 基于共同模式，合成一条【参考经验】：一条能代表"这类情境通常如何解决"的通用经验，供未来检索使用。',
+  '【生成规则】：',
+  '- 参考经验的每个字段必须来自提供的相似经验，禁止凭空编造超出共同模式的细节。',
+  '- 如果相似经验过少或彼此矛盾（找不到共同模式），应明确拒绝（should_derive 为 false）。',
+  '- 参考经验的效用取相似经验的典型区间（material_gain / emotional_valence / energy_cost，0-10，5 为中性）。',
+  '【输出JSON格式】：',
+  '{',
+  '  "should_derive": true,',
+  '  "situation": "string（典型情境模式）",',
+  '  "action": "string（典型行动策略）",',
+  '  "outcome": "string（典型结果）",',
+  '  "material_gain": 0-10,',
+  '  "emotional_valence": 0-10,',
+  '  "energy_cost": 0-10',
+  '}',
+].join('\n')
+
+/** Frame template-6 input with the query and its similar history. */
+export function frameDeriveReferenceInput(
+  query: { situation: string; action: string },
+  similar: readonly { expId: string; text: string; similarity: number }[],
+): string {
+  return `【当前情境】：${query.situation}\n【拟采取行动】：${query.action}\n\n`
+    + (similar.length === 0
+      ? '【相似历史经验】：（无——没有足够相似经验时请拒绝派生）'
+      : '【相似历史经验】（按相似度排序）：\n'
+        + similar.map(hit => `- [${hit.expId}] (相似度 ${hit.similarity.toFixed(2)}) ${hit.text}`).join('\n'))
+}

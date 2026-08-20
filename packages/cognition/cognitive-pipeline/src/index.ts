@@ -35,8 +35,15 @@ export type { CognitivePipelineConfig } from './service.ts'
 export * from './types.ts'
 export * from './vectorizer.ts'
 
-/** Reconstruct one completed turn into candidate accumulation material. */
-function reconstructTurn(session: Session, endEvent: SessionEvent<'turn/end'>): TurnEpisode {
+/** Reconstruct one completed turn into candidate accumulation material.
+ * Reads the turn's events back from the session ledger: the genuine user
+ * request (source kind 'user') becomes the situation, tool calls become the
+ * action, the final assistant text and the end reason become the outcome.
+ * @param session - the session whose ledger holds the turn's events.
+ * @param endEvent - the turn/end event that closes the turn.
+ * @returns the reconstructed episode.
+ */
+export function reconstructTurn(session: Session, endEvent: SessionEvent<'turn/end'>): TurnEpisode {
   const turn = (endEvent.data as { turn: number }).turn
   const events = session.events
   const texts: string[] = []
@@ -46,12 +53,17 @@ function reconstructTurn(session: Session, endEvent: SessionEvent<'turn/end'>): 
   let failed = false
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index] as SessionEvent
-    if (event.type === 'turn/start' && (event.data as { turn: number }).turn === turn) break
+    if (event.type === 'turn/start' && event.data.turn === turn) break
     const data = event.data as Record<string, unknown>
     switch (event.type) {
       case 'user/message': {
-        const message = data.message as { content?: readonly { type: string; text?: string }[] } | undefined
-        const text = message?.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join(' ')
+        // The user/message payload IS the message ({ content, source }), not a
+        // { message } wrapper. Only the genuine user request (source kind
+        // 'user') feeds the situation; injected reference blocks are noise.
+        const source = data.source as { kind?: string } | undefined
+        if (source?.kind !== 'user') break
+        const content = data.content as readonly { type: string; text?: string }[] | undefined
+        const text = content?.filter(block => block.type === 'text').map(block => block.text ?? '').join(' ')
         if (text !== undefined && text.trim().length > 0) texts.push(text)
         break
       }
@@ -68,7 +80,10 @@ function reconstructTurn(session: Session, endEvent: SessionEvent<'turn/end'>): 
         break
       }
       case 'tool/result': {
-        if (data.isError === true) failed = true
+        // Failure lives on the result message's content blocks, not on the
+        // event payload itself.
+        const message = data.message as { content?: readonly { isError?: boolean }[] } | undefined
+        if (message?.content?.some(block => block.isError === true) === true || data.error !== undefined) failed = true
         break
       }
       default:
@@ -117,7 +132,7 @@ export async function apply(ctx: Context, config: CognitivePipelineConfig = {}):
       if (reason !== 'completed' && reason !== 'error') return
       const episode = reconstructTurn(session, event)
       if (episode.situation.trim().length === 0) return
-      void service.accumulateTurn(episode).catch((error) => {
+      void service.accumulateTurn(episode).catch((error: unknown) => {
         ctx.logger.warn(`cognitive-pipeline: automatic accumulation failed: ${String(error)}`)
       })
     })

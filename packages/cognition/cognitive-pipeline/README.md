@@ -20,6 +20,7 @@ This package implements the DCA-PED design documents — `01-计划书.md` (tech
 - **五层校准 (five-layer calibration)** — frequency-prior prompt injection, sample-size shrinkage `P_cal = (k/(k+50))·P_raw + (50/(k+50))·0.5`, minimum-width 80% confidence interval, adversarial risk-factor listing, and lifetime bucket correction against empirical accuracy. The prior counts only experiences with a net-positive or net-negative utility score; neutral 5/5/5 experiences are excluded from both counts.
 - **临时工作区 (episodic scratchpad)** — OOD actions create `temp_strategies` with a 24 h TTL; matching reuses them; ≥3 hits with ≥66.7% positive feedback graduate them into the next rebuild as label seeds.
 - **模拟经验 (simulated experiences)** — `simulate_experience` generates a retrieval-only, unverified candidate via the LLM route when real testing is costly or impossible. It shapes no cluster until real feedback verifies it under the **evidence-replacement model**: a decisive single feedback fast-tracks to provisional, cumulative evidence upgrades to verified, contradiction at provisional rolls back, and unverified simulations expire after the fallback TTL. This mirrors human reality monitoring — mental rehearsal advises but does not become memory until the real thing is done.
+- **参考经验 (reference experiences)** — `reference_experience` is the second cold-start source: instead of simulating a hypothetical outcome, it retrieves the most similar real history, asks the LLM route to extract their **shared pattern** ("这类情境通常如何解决"), and writes that generalization as a retrieval-only simulated candidate with the same evidence-replacement lifecycle. It generalizes from what already happened rather than guessing what might; a derivation is rejected deterministically (no LLM call) when no anchor survives the filters (dissimilar below `referenceMinSimilarity`, or only simulated experiences present), so a reference is never fabricated from nothing.
 - **冷环路 (cold loop)** — `rebuild_taxonomy`: decay-weighted sampling `W = e^(−λ·Δt)` of high-error experiences **plus proven successes** (utility score ≥ `successUtilityThreshold`), agglomerative clustering on **outcome utility vectors** (utility-first, not semantic), LLM causal anchoring with a hard ≥3-evidence constraint (backend-verified pairwise distance ≤ 0.85, hallucinated clusters rejected; the deterministic fallback groups pass the *same* evidence gate before write-back — a rejected cluster is never resurrected), and a sandbox backtest on the newest 20%. The reconstruction prompt anchors on **situation–strategy recurrence patterns**, so premise differentiation (e.g. the same action under a novice-teaching premise vs an expert-direct premise) **emerges from accumulation** without any hardcoded actor/environment fields — a pattern needs ≥3 in-sample instances to form its own cluster. The reconstruct route is stochastic, so a draw that yields nothing verified is retried up to `reconstructRetries` extra times. Acceptance measures the **continuous material-gain axis** — the taxonomy's predicted utility versus each experience's real gain (normalized to [0,1]) — aligning the acceptance metric with the pipeline's first-principle `|calibrated − observed|` error rather than a 0/1 polarity bucket. Acceptance has **two regimes**: a first build (no stored clusters) compares against the empty-view baseRate baseline and is accepted when it is not measured worse (`Δerr ≤ 0`), because the 15% margin is statistically meaningless on a young store's 2-3 sample validation slice and would block cold start; iteration keeps the `Δerr ≤ −0.15` bar against the existing taxonomy. When the labeled validation slice falls below `minValidationCount` the rebuild **defers** with a diagnosable reason instead of rejecting on merit. Experiences with a real material-gain label (resolved ones after feedback-backfill) participate in the denominator; unverified simulated experiences never enter the sample — only verified or provisional samples may shape clusters. Each accepted cluster carries a `success`/`risk` polarity and a **situation centroid derived from its evidence experiences** (not from every outcome-similar member, which would dilute premise-differentiated centroids into a mixture), and the taxonomy rules are annotated with it. Structured LLM template calls (SAR/OOD/calibration/reconstruction) explicitly request `reasoningEffort: off` — chain-of-thought would consume the small token budgets and starve the JSON answer.
 - **动态认知摘要** — an accepted rebuild compresses into a taxonomy summary injected into the session system prompt (附录B), so the model's hot-loop advice reflects what the pipeline has learned.
 
@@ -38,10 +39,11 @@ Compose the plugin (it is already wired into the `web` profile):
     provider: deepseek
     model: deepseek-v4-flash
 ```
-The model can then use the six tools:
+The model can then use the seven tools:
 
 - `remember_experience` — encode a raw experience into SAR memory (utility fields are required; a partial extraction degrades to the fallback instead of a fake neutral score).
 - `simulate_experience` — generate a retrieval-only simulated experience via the LLM route when real testing is costly or impossible.
+- `reference_experience` — generalize the common pattern of the most similar history into a retrieval-only reference candidate (cold-start online generalization); rejected when no similar anchor exists.
 - `predict_outcome` — calibrated prediction with an 80% interval; returns a `prediction_id` and, when the situation matches a proven success cluster, a `success_reference` strategy.
 - `report_outcome` — feed the actual outcome back with a **required** `outcome_quality` (0–10), which updates calibration stats, folds the quality back into the bound experience's utility label, drives simulated-experience verification, and may trigger an emergency local repair.
 - `rebuild_taxonomy` — run the cold loop (`scope: local | global`).
@@ -54,6 +56,7 @@ Loading the plugin provides `ctx.cognitivePipeline`:
 ```ts ignore-check
 ctx.cognitivePipeline.remember({ rawText })                       // → { expId, sar }
 ctx.cognitivePipeline.simulate({ situation, action })            // → { expId, sar } (simulated)
+ctx.cognitivePipeline.deriveReference({ situation, action })     // → { expId, sar } (simulated) | null
 ctx.cognitivePipeline.predict({ situation, action, context? })   // → PredictResult
 ctx.cognitivePipeline.report({ predictionId, actualOutcome, outcomeQuality }) // → FeedbackResult
 ctx.cognitivePipeline.rebuild('local' | 'global')                // → RebuildResult
@@ -104,6 +107,8 @@ All fields optional; engine defaults follow the design documents.
 | `simulationPermanentThreshold` | `2` | Cumulative evidence score needed for permanent verified |
 | `simulationTtlMs` | `2_592_000_000` | Fallback TTL (30 days) after which an unverified simulation expires |
 | `autoAccumulate` | `false` | Automatically accumulate completed turns as experiences when the LLM route judges them worth it (pure chat never reaches the gate) |
+| `referenceTopK` | `5` | How many similar history hits anchor one reference derivation |
+| `referenceMinSimilarity` | `0.3` | Minimum dual-axis similarity for a history hit to anchor a reference derivation (below it, or with only simulated hits, the derivation rejects without an LLM call) |
 
 ## Deterministic degradation
 
@@ -118,11 +123,11 @@ Failures are logged at `warn`; the pipeline never throws for model outages.
 
 ## Model Experience
 
-### The six model-facing tools
+### The seven model-facing tools
 
 #### What the model sees
 
-`remember_experience`, `simulate_experience`, `predict_outcome`, `report_outcome`, `rebuild_taxonomy`, and `inspect_memory` register with the tool registry (`ctx.tools.register` + `defineTool`); their schemas flow into the system-prompt tool catalog automatically, each tool returns one canonical JSON value mirrored into model-facing text by `output.render`, and the tool descriptions defined in `src/tools.ts` are the only static prompt text this package owns (surfaced in the generated [tool catalog](../../../docs/tool-catalog.md)).
+`remember_experience`, `simulate_experience`, `reference_experience`, `predict_outcome`, `report_outcome`, `rebuild_taxonomy`, and `inspect_memory` register with the tool registry (`ctx.tools.register` + `defineTool`); their schemas flow into the system-prompt tool catalog automatically, each tool returns one canonical JSON value mirrored into model-facing text by `output.render`, and the tool descriptions defined in `src/tools.ts` are the only static prompt text this package owns (surfaced in the generated [tool catalog](../../../docs/tool-catalog.md)).
 
 #### Token effect
 

@@ -15,7 +15,7 @@ import { ColdEngine } from './cold-engine.ts'
 import type { ColdEngineConfig } from './cold-engine.ts'
 import { HotEngine } from './hot-engine.ts'
 import type { HotEngineConfig } from './hot-engine.ts'
-import { CognitivePipelineError, evaluateAccumulation, extractSar, resolveRoute } from './llm.ts'
+import { CognitivePipelineError, deriveReference, evaluateAccumulation, extractSar, resolveRoute } from './llm.ts'
 import type { CognitiveLlmRoute } from './llm.ts'
 import { cognitionPrefix } from './prompts.ts'
 import { CognitiveStore } from './store.ts'
@@ -348,6 +348,84 @@ export class CognitivePipelineService extends Service {
       evidenceScore: 0,
     }
     this.store.addExperience(exp)
+    await this.store.flush()
+    return { expId, sar }
+  }
+
+  /** How many similar history hits anchor one reference derivation. */
+  private readonly referenceTopK = 5
+
+  /** Minimum dual-axis similarity for a history hit to anchor a reference. */
+  private readonly referenceMinSimilarity = 0.3
+
+  /**
+   * Derive a reference experience from the commonalities of similar history
+   * (cold-start online generalization). Retrieves the top similar experiences
+   * for the query, asks the LLM route to extract their shared pattern, and
+   * writes the result as a retrieval-only simulated candidate that the
+   * evidence-replacement lifecycle verifies against real feedback — the same
+   * lifecycle as {@link simulate}.
+   * @param input - the current situation/action to anchor the derivation.
+   * @param call - optional session/signal context.
+   * @returns the reference experience id and SAR when derived, or null.
+   */
+  async deriveReference(
+    input: { situation: string; action: string },
+    call?: PipelineCallContext,
+  ): Promise<{ expId: string; sar: SarTriplet } | null> {
+    if (input.situation.trim().length === 0 || input.action.trim().length === 0) {
+      throw new CognitivePipelineError(
+        'cognitive-pipeline: situation and action must not be empty',
+        'EMPTY_DERIVE_REFERENCE_INPUT',
+      )
+    }
+    const queryVector = actionVector(input.action, [])
+    const similar = this.store.experiencesSnapshot()
+      .filter(exp => !exp.simulated)
+      .map(exp => ({
+        expId: exp.expId,
+        text: `${exp.sar.situation}。${exp.sar.action}。${exp.sar.outcome}`,
+        similarity: Math.max(
+          cosine(queryVector, exp.actionVector),
+          cosine(queryVector, actionVector(exp.sar.situation, [])),
+        ),
+      }))
+      .filter(hit => hit.similarity >= this.referenceMinSimilarity)
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, this.referenceTopK)
+    // No anchors, no generalization: a reference must come from the
+    // commonalities of existing history, so an empty hit list rejects
+    // deterministically without spending an LLM call (同 accumulateTurn 预过滤).
+    if (similar.length === 0) return null
+    const decision = await deriveReference(this.ctx, this.resolved.route, input, similar, {
+      sessionId: call?.sessionId,
+      signal: call?.signal,
+    })
+    if (!decision.shouldDerive || decision.sar === null) return null
+    const sar: SarTriplet = {
+      situation: decision.sar.situation,
+      action: decision.sar.action,
+      outcome: decision.sar.outcome,
+      actionKeywords: [...new Set(tokenize(decision.sar.action))].slice(0, 8),
+      outcomeUtility: { ...decision.sar.utility },
+    }
+    const expId = this.store.nextExpId()
+    this.store.addExperience({
+      expId,
+      sar,
+      actionVector: actionVector(sar.action, sar.actionKeywords),
+      outcomeVector: outcomeVector(sar.outcomeUtility, sar.outcome),
+      clusterId: null,
+      strategyLabel: null,
+      timestamp: Date.now(),
+      predictionError: null,
+      cumulativeError: 0,
+      hitCount: 0,
+      positiveCount: 0,
+      simulated: true,
+      verification: 'unverified',
+      evidenceScore: 0,
+    })
     await this.store.flush()
     return { expId, sar }
   }

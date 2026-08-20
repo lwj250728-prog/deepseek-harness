@@ -20,6 +20,7 @@
 - **五层校准 (five-layer calibration)** — 频次先验注入、样本量收缩 `P_cal = (k/(k+50))·P_raw + (50/(k+50))·0.5`、最小宽度 80% 置信区间、对抗性风险因素列举、以及对照经验准确率的终身校准桶修正。先验只统计净效用为正或为负的经验；中性 5/5/5 经验不计入任何一边。
 - **临时工作区 (episodic scratchpad)** — OOD 行动创建带 24 小时 TTL 的 `temp_strategies`；命中即复用；命中 ≥3 次且正反馈率 ≥66.7% 时晋升为下轮重建的标签种子。
 - **模拟经验 (simulated experiences)** — `simulate_experience` 在真实测试成本高或不可行时，经 LLM 路由生成仅检索、未验证的候选经验。在真实反馈按**证据替代模型**验证前不塑造任何簇：一次决定性反馈快速晋升为临时 verified，累计证据升级为永久 verified，临时态遇矛盾回滚，未验证模拟在兜底 TTL 后过期。这镜像人类的现实监控——心理预演只提供建议，真做过后才成为记忆。
+- **参考经验 (reference experiences)** — `reference_experience` 是第二个冷启动来源：不推演假设结果，而是检索最相似的既有历史，请 LLM 路由归纳其**共同模式**（"这类情境通常如何解决"），并把该泛化写为仅检索的模拟候选，走与 `simulate_experience` 相同的证据替代生命周期。它从已发生的事泛化而非猜测可能发生的事；当没有锚点通过过滤器（低于 `referenceMinSimilarity`，或仅有模拟经验）时，派生被确定性拒绝（不调用 LLM）——参考经验绝不无中生有。
 - **冷环路 (cold loop)** — `rebuild_taxonomy`：时间衰减加权采样 `W = e^(−λ·Δt)`（≤15% 样本量，另有 32 条下限）**叠加已证实的成功经验**（效用分 ≥ `successUtilityThreshold`），在**结果效用向量**上做层次凝聚聚类（效用优先于语义），LLM 因果锚定并施加 ≥3 条证据的硬约束（后端核验两两距离 ≤ 0.85，幻觉簇被驳回；确定性回退分组在写回前必须通过**同一道**证据闸门——被驳回的簇绝不会被复活），对最新 20% 做沙盒回测。重构提示词锚定**情境-策略配对的重现模式**，因此前提分化（例如同一行动在"新手教学"前提 vs "资深直推"前提下的不同策略）**随经验累积自动涌现**，无需任何硬编码的行动者/环境字段——一个模式需在训练切片内累积 ≥3 条实例才能自成簇。重构路由是随机的，产出无验证簇的抽样会按 `reconstructRetries` 有界重试。验收度量**连续 materialGain 轴**——分类法预测的效用对每条经验真实收益（归一化到 [0,1]）——使验收度量对齐流水线第一性原理的 `|calibrated − observed|` 误差，而非 0/1 极性分桶。验收分**两个区间**：首次建簇（无已存簇）以空视图 baseRate 基线为参照，只要未被测得"更差"（`Δerr ≤ 0`）即被接受——因为 15% 余量在年轻 store 的 2-3 条验证切片上统计上无意义、只会阻塞冷启动；迭代保持相对既有分类的 `Δerr ≤ −0.15` 门槛。当带标签的验证切片低于 `minValidationCount` 时，重建**暂缓**并给出可诊断的原因，而非按优劣拒绝。携带真实 materialGain 标签的经验（反馈回填后的已反馈经验）参与分母；未验证模拟经验永不进入采样——只有 verified 或 provisional 样本可塑造簇。每个被验收的簇携带 `success`/`risk` 极性，以及**由证据经验推导的情境质心**（而非全部结果相似成员——那会把前提分化簇的质心稀释成混合物），分类法规则也带有极性标注。结构化 LLM 模板调用（SAR/OOD/校准/重构）显式请求 `reasoningEffort: off`——思维链会耗尽小型 token 预算并饿死 JSON 答案。
 - **动态认知摘要** — 通过验收的重建会压缩为分类法摘要注入会话 System Prompt（附录B），使热环路建议反映流水线已学到的规律。
 
@@ -39,10 +40,11 @@
     model: deepseek-v4-flash
 ```
 
-模型即可使用六个工具：
+模型即可使用七个工具：
 
 - `remember_experience` — 把原始经历编码进 SAR 记忆（效用字段必填；提取不完整时降级为兜底，而非伪造中性分）。
 - `simulate_experience` — 在真实测试成本高或不可行时，经 LLM 路由生成仅检索的模拟经验。
+- `reference_experience` — 把最相似历史经验的共同模式泛化为仅检索的参考候选（冷启动在线泛化）；无相似锚点时拒绝派生。
 - `predict_outcome` — 带 80% 区间的校准预测；返回 `prediction_id`，当情境命中已证实的成功簇时附带 `success_reference` 策略。
 - `report_outcome` — 回填实际结果并**必须提供** `outcome_quality`（0–10），更新校准统计、把质量回填为绑定经验的效用标签、驱动模拟经验验证，极端误差触发紧急局部修补。
 - `rebuild_taxonomy` — 运行冷环路（`scope: local | global`）。
@@ -55,6 +57,7 @@
 ```ts ignore-check
 ctx.cognitivePipeline.remember({ rawText })                       // → { expId, sar }
 ctx.cognitivePipeline.simulate({ situation, action })            // → { expId, sar } (simulated)
+ctx.cognitivePipeline.deriveReference({ situation, action })     // → { expId, sar } (simulated) | null
 ctx.cognitivePipeline.predict({ situation, action, context? })   // → PredictResult
 ctx.cognitivePipeline.report({ predictionId, actualOutcome, outcomeQuality }) // → FeedbackResult
 ctx.cognitivePipeline.rebuild('local' | 'global')                // → RebuildResult
@@ -105,6 +108,8 @@ ctx.cognitivePipeline.store                                      // → Cognitiv
 | `simulationPermanentThreshold` | `2` | 永久 verified 所需的累计证据分 |
 | `simulationTtlMs` | `2_592_000_000` | 未验证模拟过期的兜底 TTL（30 天） |
 | `autoAccumulate` | `false` | 完成的轮次自动沉淀为经验，由 LLM 路由判断是否值得（纯聊天不进入门） |
+| `referenceTopK` | `5` | 一次参考派生锚定的相似历史命中数 |
+| `referenceMinSimilarity` | `0.3` | 历史命中作为参考派生锚点所需的最小双轴相似度；低于此值（或仅有模拟命中）时派生不调用 LLM 直接拒绝 |
 
 ## 确定性降级
 
@@ -119,11 +124,11 @@ ctx.cognitivePipeline.store                                      // → Cognitiv
 
 ## Model Experience
 
-### 六个模型工具
+### 七个模型工具
 
 #### What the model sees
 
-`remember_experience`、`simulate_experience`、`predict_outcome`、`report_outcome`、`rebuild_taxonomy`、`inspect_memory` 通过 `ctx.tools.register` + `defineTool` 注册，其 schema 自动进入 System Prompt 工具目录；每个工具返回一个规范 JSON 值，由 `output.render` 镜像为模型可见文本；定义于 `src/tools.ts` 的工具描述是本包唯一的静态提示词文本（在生成的 [tool catalog](../../../docs/tool-catalog.md) 中展示）。
+`remember_experience`、`simulate_experience`、`reference_experience`、`predict_outcome`、`report_outcome`、`rebuild_taxonomy`、`inspect_memory` 通过 `ctx.tools.register` + `defineTool` 注册，其 schema 自动进入 System Prompt 工具目录；每个工具返回一个规范 JSON 值，由 `output.render` 镜像为模型可见文本；定义于 `src/tools.ts` 的工具描述是本包唯一的静态提示词文本（在生成的 [tool catalog](../../../docs/tool-catalog.md) 中展示）。
 
 #### Token effect
 

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { executeTool, pipelineHarness, stubAgent } from './helpers.ts'
 import { frameCalibrationInput } from '../src/prompts.ts'
+import { reconstructTurn } from '../src/index.ts'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { CallId, createMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
 const SAR_A = JSON.stringify({
   situation: '清晨天气晴朗',
@@ -165,14 +169,45 @@ describe('cognitive pipeline integration', () => {
     }
   })
 
+  it('exposes reference_experience as a model tool', async () => {
+    const derive = JSON.stringify({
+      should_derive: true,
+      situation: '清晨天气好时',
+      action: '坚持晨跑',
+      outcome: '精力充沛',
+      material_gain: 7,
+      emotional_valence: 6,
+      energy_cost: 4,
+    })
+    const { ctx, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm' },
+      [SAR_A, derive],
+    )
+    try {
+      const { agent } = stubAgent('ref-tool-agent')
+      ctx.agents.register(agent)
+      await ctx.cognitivePipeline.remember({ rawText: '清晨天气晴朗。晨跑五公里。精力充沛一整天。' })
+      const derived = await executeTool(ctx, 'reference_experience', {
+        situation: '清晨',
+        action: '晨跑五公里',
+      }, agent) as Record<string, unknown>
+      expect(derived.exp_id).toBe('exp_2')
+      expect(derived.simulated).toBe(true)
+      expect(derived.situation).toBe('清晨天气好时')
+      expect(derived.action).toBe('坚持晨跑')
+    } finally {
+      await teardown()
+    }
+  })
+
   it('unregisters tools and the prompt section on dispose', async () => {
     const harness = await pipelineHarness()
     try {
-      for (const name of ['remember_experience', 'simulate_experience', 'predict_outcome', 'report_outcome', 'rebuild_taxonomy', 'inspect_memory']) {
+      for (const name of ['remember_experience', 'simulate_experience', 'reference_experience', 'predict_outcome', 'report_outcome', 'rebuild_taxonomy', 'inspect_memory']) {
         expect(harness.ctx.tools.get(name)?.name).toBe(name)
       }
       await harness.fiber.dispose()
-      for (const name of ['remember_experience', 'simulate_experience', 'predict_outcome', 'report_outcome', 'rebuild_taxonomy', 'inspect_memory']) {
+      for (const name of ['remember_experience', 'simulate_experience', 'reference_experience', 'predict_outcome', 'report_outcome', 'rebuild_taxonomy', 'inspect_memory']) {
         expect(harness.ctx.tools.get(name)).toBeUndefined()
       }
       const assembled = await harness.ctx.systemPrompt.assemble()
@@ -245,6 +280,89 @@ describe('cognitive pipeline integration', () => {
       // q=9 → decisiveness 0.8 ≥ fast-track 0.5 → provisional.
       expect(after?.verification).toBe('provisional')
       expect(after?.evidenceScore).toBeGreaterThan(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('derives a reference experience from similar history as a retrieval-only simulated candidate', async () => {
+    const derive = JSON.stringify({
+      should_derive: true,
+      situation: '清晨天气好时',
+      action: '坚持晨跑作为固定习惯',
+      outcome: '一整天精力充沛',
+      material_gain: 8,
+      emotional_valence: 7,
+      energy_cost: 3,
+    })
+    const { ctx, adapter, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm' },
+      [SAR_A, SAR_A, SAR_A, derive],
+    )
+    try {
+      for (let index = 0; index < 3; index += 1) {
+        await ctx.cognitivePipeline.remember({ rawText: '清晨天气晴朗。晨跑五公里。精力充沛一整天。' })
+      }
+      const result = await ctx.cognitivePipeline.deriveReference({ situation: '清晨', action: '晨跑五公里' })
+      expect(result).not.toBeNull()
+      const stored = ctx.cognitivePipeline.store.getExperience(result!.expId)
+      expect(stored?.simulated).toBe(true)
+      expect(stored?.verification).toBe('unverified')
+      expect(stored?.evidenceScore).toBe(0)
+      expect(stored?.sar.situation).toBe('清晨天气好时')
+      expect(stored?.sar.outcomeUtility).toEqual({ materialGain: 8, emotionalValence: 7, energyCost: 3 })
+      // The derivation input carries the retrieved similar anchors (the LLM
+      // route only sees similar history, not the raw query).
+      const framed = JSON.stringify(adapter?.lastOptions?.messages)
+      expect(framed).toContain('相似度 0.85')
+      expect(framed).toContain('晨跑五公里')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('rejects a reference derivation when no similar anchor survives the filters', async () => {
+    // A night experience is dissimilar (cosine 0) and simulated experiences are
+    // never anchors, so the deterministic guard rejects without an LLM call.
+    const { ctx, adapter, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm' },
+      [SAR_B, SAR_A],
+    )
+    try {
+      await ctx.cognitivePipeline.remember({ rawText: '深夜疲惫。熬夜刷剧。次日状态极差。' })
+      await ctx.cognitivePipeline.simulate({ situation: '清晨', action: '晨跑五公里' })
+      const before = ctx.cognitivePipeline.store.experiencesSnapshot().length
+      const result = await ctx.cognitivePipeline.deriveReference({ situation: '清晨', action: '晨跑五公里' })
+      expect(result).toBeNull()
+      expect(ctx.cognitivePipeline.store.experiencesSnapshot().length).toBe(before)
+      expect(adapter?.consumed).toBe(2)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('derives nothing when the LLM route declines (should_derive false)', async () => {
+    const { ctx, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm' },
+      [SAR_A, JSON.stringify({ should_derive: false })],
+    )
+    try {
+      await ctx.cognitivePipeline.remember({ rawText: '清晨天气晴朗。晨跑五公里。精力充沛一整天。' })
+      const before = ctx.cognitivePipeline.store.experiencesSnapshot().length
+      const result = await ctx.cognitivePipeline.deriveReference({ situation: '清晨', action: '晨跑五公里' })
+      expect(result).toBeNull()
+      expect(ctx.cognitivePipeline.store.experiencesSnapshot().length).toBe(before)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('falls back to a deterministic rejection without an LLM route', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      await ctx.cognitivePipeline.remember({ rawText: '清晨天气晴朗。晨跑五公里。精力充沛一整天。' })
+      const result = await ctx.cognitivePipeline.deriveReference({ situation: '清晨', action: '晨跑五公里' })
+      expect(result).toBeNull()
     } finally {
       await teardown()
     }
@@ -363,5 +481,74 @@ describe('cognitive pipeline integration', () => {
     } finally {
       await teardown()
     }
+  })
+
+  it('reconstructs a turn from the session ledger (user request, tool calls, failure, end reason)', () => {
+    const session = Session.create(SessionId('reconstruct-test'))
+    session.append('turn/start', { turn: 1 })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: '把最新的认知流水线同步到 SAR 仓库并推送' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    // An injected reference block (plugin source) must NOT pollute the situation.
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: '【认知经验参考】相关历史经验…' }],
+      source: { kind: 'plugin', plugin: 'cognitive-inject' },
+    }), { surfaceOp: 'append' })
+    session.append('tool/call', { turn: 1, step: 1, callId: CallId('call-1'), name: 'pwsh', arguments: '{}' })
+    session.append('tool/result', {
+      turn: 1,
+      step: 1,
+      message: createToolResultMessage({ callId: CallId('call-1'), content: [{ type: 'text', text: 'ok' }], isError: false }),
+    }, { surfaceOp: 'append' })
+    session.append('tool/call', { turn: 1, step: 2, callId: CallId('call-2'), name: 'git', arguments: '{}' })
+    session.append('tool/result', {
+      turn: 1,
+      step: 2,
+      message: createToolResultMessage({ callId: CallId('call-2'), content: [{ type: 'text', text: 'failed' }], isError: true }),
+    }, { surfaceOp: 'append' })
+    session.append('assistant/message', {
+      turn: 1,
+      step: 2,
+      message: createMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: '推送成功，SAR 仓库已更新' }],
+        source: { kind: 'model', provider: 'mock', model: 'mock' },
+      }),
+    }, { surfaceOp: 'append' })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+    const endEvent = session.events.findLast(event => event.type === 'turn/end') as SessionEvent<'turn/end'>
+    const episode = reconstructTurn(session, endEvent)
+    expect(episode.turnId).toBe(1)
+    expect(episode.situation).toContain('同步到 SAR 仓库')
+    expect(episode.situation).not.toContain('认知经验参考')
+    expect(episode.action).toContain('调用 pwsh')
+    expect(episode.action).toContain('调用 git')
+    expect(episode.toolCallCount).toBe(2)
+    expect(episode.failed).toBe(true)
+    expect(episode.outcome).toContain('推送成功')
+    expect(episode.outcome).toContain('轮次结束')
+  })
+
+  it('reconstructs an empty situation for a turn without a user request', () => {
+    const session = Session.create(SessionId('reconstruct-empty'))
+    session.append('turn/start', { turn: 1 })
+    session.append('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: createMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: '回复' }],
+        source: { kind: 'model', provider: 'mock', model: 'mock' },
+      }),
+    }, { surfaceOp: 'append' })
+    session.append('turn/end', { turn: 1, reason: { kind: 'error', error: { message: 'boom', code: 'X' } } })
+    const endEvent = session.events.findLast(event => event.type === 'turn/end') as SessionEvent<'turn/end'>
+    const episode = reconstructTurn(session, endEvent)
+    expect(episode.situation.trim()).toBe('')
+    expect(episode.failed).toBe(false)
+    expect(episode.toolCallCount).toBe(0)
+    expect(episode.outcome).toContain('轮次结束（error）')
   })
 })

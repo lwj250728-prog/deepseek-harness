@@ -138,6 +138,63 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
   }))
 
   ctx.tools.register(defineTool({
+    name: 'reference_experience',
+    description: 'Derive a reference experience from the commonalities of similar history (cold-start online '
+      + 'generalization): given the current situation and proposed action, retrieve the most similar past '
+      + 'experiences, ask the LLM route to extract their shared pattern, and write it as a retrieval-only '
+      + 'simulated candidate. It shapes no cluster until real feedback through report_outcome verifies it (the '
+      + 'same evidence-replacement lifecycle as simulate_experience). Use this when the store has only a few '
+      + 'similar experiences and a generalized "how these situations usually resolve" reference would help '
+      + 'prediction.',
+    parameters: {
+      situation: {
+        type: 'string',
+        required: true,
+        description: 'The current situation to anchor the reference derivation.',
+      },
+      action: {
+        type: 'string',
+        required: true,
+        description: 'The proposed action whose similar-history pattern to generalize.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          exp_id: { type: 'string', required: true },
+          situation: { type: 'string', required: true },
+          action: { type: 'string', required: true },
+          outcome: { type: 'string', required: true },
+          simulated: { type: 'boolean', required: true },
+        },
+      },
+      render: renderJson,
+    },
+    async execute(args, exec) {
+      const result = await service.deriveReference({
+        situation: args.situation,
+        action: args.action,
+      }, {
+        ...callContext(exec),
+        signal: exec.signal,
+      })
+      if (result === null) {
+        throw new Error('reference_experience: no common pattern derivable from similar history')
+      }
+      return {
+        exp_id: result.expId,
+        situation: result.sar.situation,
+        action: result.sar.action,
+        outcome: result.sar.outcome,
+        simulated: true,
+      }
+    },
+    presentCall: args => ({ card: 'generic', title: 'Derive reference experience', kind: 'other', rawInput: args.action }),
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'predict_outcome',
     description: 'Hot-loop prediction: given a situation and a proposed action, retrieve similar past actions, '
       + 'detect distribution shift (OOD), and produce a calibrated success probability with an 80% confidence '
