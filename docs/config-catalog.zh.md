@@ -1,4 +1,4 @@
-<!-- 英文源文件由 scripts/gen-config-catalog.ts 生成；本中文文件是通过双语配对维护的经评审对侧。
+﻿<!-- 英文源文件由 scripts/gen-config-catalog.ts 生成；本中文文件是通过双语配对维护的经评审对侧。
 - `@deepseek-ai/dsh-typert-registry`（[`packages/typert/registry/src/index.ts`](../packages/typert/registry/src/index.ts)）
 - `@deepseek-ai/dsh-typert-protocol`（[`packages/typert/protocol/src/index.ts`](../packages/typert/protocol/src/index.ts)）
 - `@deepseek-ai/dsh-typert-registry`（[`packages/typert/registry/src/index.ts`](../packages/typert/registry/src/index.ts)）
@@ -471,6 +471,32 @@ export interface Config {
 
 来源：[`packages/code-runtime/code-runtime-worker-thread/src/index.ts:25`](../packages/code-runtime/code-runtime-worker-thread/src/index.ts)
 
+<a id="deepseek-aidsh-cognitive-inject"></a>
+
+## `@deepseek-ai/dsh-cognitive-inject`
+
+依赖：`agents` · `cognitivePipeline` · `tools`
+
+```ts config-catalog
+/** Plugin configuration (all fields optional; conservative defaults). */
+export interface Config {
+  /** How many related experiences to inject at most (default 1). */
+  topK?: number
+  /** Minimum situation-vector similarity to consider a memory related (default 0.4). */
+  minSimilarity?: number
+  /** After a failed step, multiply minSimilarity by this factor (default 0.6). */
+  failureThresholdFactor?: number
+  /** After a failed step, how many experiences to inject at most (default 3). */
+  failureTopK?: number
+  /** How many trailing message blocks feed the situation extraction (default 4). */
+  contextDepth?: number
+  /** False disables injection while keeping the listener mounted (default true). */
+  enabled?: boolean
+}
+```
+
+来源：[`packages/context/cognitive-inject/src/index.ts:34`](../packages/context/cognitive-inject/src/index.ts)
+
 <a id="deepseek-aidsh-cognitive-orchestration"></a>
 
 ## `@deepseek-ai/dsh-cognitive-orchestration`
@@ -537,12 +563,28 @@ export interface CognitivePipelineConfig {
   shrinkageAlpha?: number
   /** Minimum 80%-interval width (default 0.2). */
   minConfidenceIntervalWidth?: number
+  /** Situation-cosine threshold for matching a success-cluster reference (default 0.4). */
+  successReferenceThreshold?: number
+  /** Situation-centroid cosine below which the taxonomy is considered uncovered (default 0.3). */
+  coverageThreshold?: number
+  /** Routing margin below which a known-path prediction is SAR-ized as a retrieval failure (default 0.1). */
+  retrievalFailureMargin?: number
   /** Cold-loop time-decay lambda per day (default 0.01). */
   decayLambda?: number
   /** Cold-loop minimum decay weight (default 0.1). */
   minDecayWeight?: number
   /** Cold-loop prediction-error inclusion threshold (default 0.3). */
   predictionErrorThreshold?: number
+  /** Cold-loop utility-score threshold for including success experiences (default 3). */
+  successUtilityThreshold?: number
+  /** Minimum labeled validation samples before a rebuild may be accepted (default 3). */
+  minValidationCount?: number
+  /** Evidence weight at/above which one feedback fast-tracks a simulation to provisional verified (default 0.8). */
+  simulationFastTrackThreshold?: number
+  /** Cumulative evidence score needed for permanent verified (default 2). */
+  simulationPermanentThreshold?: number
+  /** Fallback TTL in ms after which an unverified simulation expires (default 30 days). */
+  simulationTtlMs?: number
   /** Cold-loop max sample ratio of the population (default 0.15). */
   maxSampleRatio?: number
   /** Evidence hard-constraint minimum count (default 3). */
@@ -553,6 +595,8 @@ export interface CognitivePipelineConfig {
   sandboxImprovement?: number
   /** Validation slice ratio of the sampled set (default 0.2). */
   validationRatio?: number
+  /** Extra reconstruct draws when one stochastic LLM sample yields nothing verified (default 2). */
+  reconstructRetries?: number
   /** Agglomerative merge cosine threshold (default 0.4). */
   clusterMergeCosine?: number
   /** Cluster-membership cosine threshold (default 0.3). */

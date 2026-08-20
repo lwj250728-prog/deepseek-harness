@@ -19,6 +19,10 @@
         # and reconstruction then run model-assisted.
         provider: deepseek-official
         model: deepseek-v4-flash
+        # Automatic accumulation: every completed turn is judged by the LLM
+        # route and written as an experience when it deems the episode worth it
+        # (pure chat is filtered deterministically before any LLM call).
+        autoAccumulate: true
 
     # Task-level cognition orchestration: wraps the spawn provider so child
     # prompts receive related SAR experience and settled outcomes are written
@@ -56,9 +60,8 @@
         targetPort: !!js ctx.webServer.port
         sessionTtlSeconds: 604800
         secret: ''
-        tlsKeyPath: ''
-        tlsCertPath: ''
+        tlsKeyPath: 'D:\deepseek-harness-workspace\mobile-tls\key.pem'
+        tlsCertPath: 'D:\deepseek-harness-workspace\mobile-tls\cert.pem'
         users:
           - name: demo-phone
-            # Replace before deploying: generate with `openssl rand -hex 24`
-            token: CHANGE_ME_openssl_rand_hex_24
+            token: d2afd3b0b24f48e92a8f7295295e6985accc59de46e7c8c7

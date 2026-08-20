@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-18-sar-success-anchors-and-neutral-exclusion.md
+2026-08-18-sar-success-anchors-and-neutral-exclusion.md: 4c5374fcdea7e1f9c32c275a3f896278e9114b15
+2026-08-18-sar-success-anchors-and-neutral-exclusion.zh.md: 5aa8ad09a12d4c090df3bab74b50594f4a2235c0

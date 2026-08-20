@@ -1,8 +1,8 @@
 /**
  * Model-facing tools over the cognitive pipeline: `remember_experience`,
- * `predict_outcome`, `report_outcome`, `rebuild_taxonomy`, and
- * `inspect_memory`. Every tool returns one canonical JSON value; `output.render`
- * mirrors it into model-facing text.
+ * `simulate_experience`, `predict_outcome`, `report_outcome`,
+ * `rebuild_taxonomy`, and `inspect_memory`. Every tool returns one canonical
+ * JSON value; `output.render` mirrors it into model-facing text.
  * @module @deepseek-ai/dsh-cognitive-pipeline/tools
  */
 
@@ -23,7 +23,7 @@ function renderJson(_args: unknown, value: unknown): { type: 'text'; text: strin
   return [{ type: 'text', text: JSON.stringify(value) }]
 }
 
-/** Register the five pipeline tools.
+/** Register the six pipeline tools.
  * @param ctx - context with the tool registry.
  * @param service - the pipeline service backing the tools.
  */
@@ -86,10 +86,63 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
   }))
 
   ctx.tools.register(defineTool({
+    name: 'simulate_experience',
+    description: 'Generate a simulated experience via the LLM route: given a hypothetical situation and a proposed '
+      + 'action, produce a predicted outcome as a retrieval-only candidate. The simulation shapes no cluster until '
+      + 'real feedback through report_outcome verifies it (a decisive single feedback fast-tracks, cumulative '
+      + 'evidence upgrades, contradiction rolls back, and unverified simulations expire after the fallback TTL). '
+      + 'Use this when real testing is costly or impossible and a reasoned projection would help prediction.',
+    parameters: {
+      situation: {
+        type: 'string',
+        required: true,
+        description: 'The hypothetical situation to reason about.',
+      },
+      action: {
+        type: 'string',
+        required: true,
+        description: 'The proposed action whose outcome is to be simulated.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          exp_id: { type: 'string', required: true },
+          situation: { type: 'string', required: true },
+          action: { type: 'string', required: true },
+          outcome: { type: 'string', required: true },
+          simulated: { type: 'boolean', required: true },
+        },
+      },
+      render: renderJson,
+    },
+    async execute(args, exec) {
+      const { expId, sar } = await service.simulate({
+        situation: args.situation,
+        action: args.action,
+      }, {
+        ...callContext(exec),
+        signal: exec.signal,
+      })
+      return {
+        exp_id: expId,
+        situation: sar.situation,
+        action: sar.action,
+        outcome: sar.outcome,
+        simulated: true,
+      }
+    },
+    presentCall: args => ({ card: 'generic', title: 'Simulate experience', kind: 'other', rawInput: args.action }),
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'predict_outcome',
     description: 'Hot-loop prediction: given a situation and a proposed action, retrieve similar past actions, '
       + 'detect distribution shift (OOD), and produce a calibrated success probability with an 80% confidence '
-      + 'interval. Novel actions trigger a scratchpad trial strategy instead of reusing old categories. The '
+      + 'interval. Novel actions trigger a scratchpad trial strategy instead of reusing old categories. When the '
+      + 'situation matches a proven success cluster, success_reference returns that strategy to reuse. The '
       + 'returned prediction_id must be reported back through report_outcome once the actual result is known '
       + 'so the pipeline can learn from the error.',
     parameters: {
@@ -131,6 +184,60 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
             required: true,
             oneOf: [{ type: 'number' }, { type: 'null' }],
           },
+          success_reference: {
+            required: true,
+            oneOf: [
+              {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  cluster_id: { type: 'number', required: true },
+                  cluster_name: { type: 'string', required: true },
+                  decision_rule: { type: 'string', required: true },
+                  utility_range: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: true,
+                    properties: {
+                      low: { type: 'number', required: true },
+                      high: { type: 'number', required: true },
+                    },
+                  },
+                },
+              },
+              { type: 'null' },
+            ],
+          },
+          taxonomy_context: {
+            required: true,
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              coverage: {
+                type: 'string',
+                required: true,
+                enum: ['covered', 'gap', 'no-taxonomy'],
+              },
+              similarity: { type: 'number', required: true },
+              margin: { type: 'number', required: true },
+              cluster: {
+                required: true,
+                oneOf: [
+                  {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      cluster_id: { type: 'number', required: true },
+                      name: { type: 'string', required: true },
+                      decision_rule: { type: 'string', required: true },
+                      polarity: { type: 'string', required: true, enum: ['success', 'risk'] },
+                    },
+                  },
+                  { type: 'null' },
+                ],
+              },
+            },
+          },
         },
       },
       render: renderJson,
@@ -157,6 +264,23 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
         top_hit_count: result.topHitCount,
         used_temp_strategy: result.usedTempStrategy,
         cluster_id: result.clusterId,
+        success_reference: result.successReference === null ? null : {
+          cluster_id: result.successReference.clusterId,
+          cluster_name: result.successReference.clusterName,
+          decision_rule: result.successReference.decisionRule,
+          utility_range: { ...result.successReference.utilityRange },
+        },
+        taxonomy_context: {
+          coverage: result.taxonomyContext.coverage,
+          similarity: result.taxonomyContext.similarity,
+          margin: result.taxonomyContext.margin,
+          cluster: result.taxonomyContext.cluster === null ? null : {
+            cluster_id: result.taxonomyContext.cluster.clusterId,
+            name: result.taxonomyContext.cluster.name,
+            decision_rule: result.taxonomyContext.cluster.decisionRule,
+            polarity: result.taxonomyContext.cluster.polarity,
+          },
+        },
       }
     },
     presentCall: args => ({ card: 'generic', title: 'Predict outcome', kind: 'other', rawInput: args.action }),
@@ -167,8 +291,8 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
     description: 'Feedback callback: report the actual outcome of a previous predict_outcome call. The pipeline '
       + 'computes the prediction error, updates lifetime calibration statistics, feeds the scratchpad when a '
       + 'trial strategy was used, and triggers an emergency local taxonomy repair when the error is extreme. '
-      + 'Pass outcome_quality (0-10) when the actual outcome quality is known; otherwise the pipeline extracts '
-      + 'it from the outcome text.',
+      + 'outcome_quality (0-10) is required so every resolved prediction carries a real utility signal; a '
+      + 'neutral baseline is never inferred from the outcome text.',
     parameters: {
       prediction_id: {
         type: 'string',
@@ -182,7 +306,8 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
       },
       outcome_quality: {
         type: 'number',
-        description: 'Optional actual outcome quality 0-10 (5 = neutral).',
+        required: true,
+        description: 'Actual outcome quality 0-10 (5 = neutral). Required for a real utility signal.',
       },
     },
     output: {
@@ -205,7 +330,7 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
       const result = await service.report({
         predictionId: args.prediction_id,
         actualOutcome: args.actual_outcome,
-        ...args.outcome_quality === undefined ? {} : { outcomeQuality: args.outcome_quality },
+        outcomeQuality: args.outcome_quality,
       }, {
         ...callContext(exec),
         signal: exec.signal,
@@ -241,6 +366,7 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
         properties: {
           scope: { type: 'string', required: true, enum: ['local', 'global'] },
           accepted: { type: 'boolean', required: true },
+          deferred: { type: 'boolean', required: true },
           old_error: {
             required: true,
             oneOf: [{ type: 'number' }, { type: 'null' }],
@@ -270,6 +396,7 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
       return {
         scope: result.scope,
         accepted: result.accepted,
+        deferred: result.deferred,
         old_error: result.oldError,
         new_error: result.newError,
         delta_error: result.deltaError,

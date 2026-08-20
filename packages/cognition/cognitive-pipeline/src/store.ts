@@ -16,6 +16,7 @@ import type {
   TaxonomyState,
   TempStrategy,
 } from './types.ts'
+import { ACTION_VECTOR_DIM, actionVector } from './vectorizer.ts'
 
 /** How many calibration deciles the lifetime stats keep. */
 export const CALIBRATION_BUCKETS = 10
@@ -130,10 +131,12 @@ export class CognitiveStore {
     if (clusters !== '') {
       const parsed = JSON.parse(clusters) as unknown
       if (Array.isArray(parsed)) {
-        this.clusterList = parsed.filter((cluster): cluster is Cluster => {
-          if (typeof cluster !== 'object' || cluster === null) return false
-          return typeof (cluster as Cluster).clusterId === 'number'
-        })
+        this.clusterList = parsed
+          .filter((cluster): cluster is Record<string, unknown> => {
+            if (typeof cluster !== 'object' || cluster === null) return false
+            return typeof (cluster as Record<string, unknown>).clusterId === 'number'
+          })
+          .map(cluster => this.normalizeCluster(cluster))
         for (const cluster of this.clusterList) {
           this.nextClusterSeq = Math.max(this.nextClusterSeq, cluster.clusterId + 1)
         }
@@ -144,8 +147,37 @@ export class CognitiveStore {
       this.calibration = parsedCalibration
     }
     if (taxonomy !== '') {
-      const parsed = JSON.parse(taxonomy) as TaxonomyState
-      if (typeof parsed.version === 'number') this.taxonomyState = parsed
+      const parsed = JSON.parse(taxonomy) as unknown
+      if (typeof parsed === 'object' && parsed !== null && typeof (parsed as Record<string, unknown>).version === 'number') {
+        const rawRules = Array.isArray((parsed as Record<string, unknown>).rules)
+          ? (parsed as Record<string, unknown>).rules as unknown[]
+          : []
+        this.taxonomyState = {
+          ...parsed as unknown as TaxonomyState,
+          rules: rawRules
+            .filter((rule): rule is Record<string, unknown> => typeof rule === 'object' && rule !== null)
+            .map((rule) => {
+              const polarityRaw = rule.polarity
+              const hasPolarity = polarityRaw === 'success' || polarityRaw === 'risk'
+              const rangeLow = typeof rule.utilityRange === 'object' && rule.utilityRange !== null
+                ? Number((rule.utilityRange as Record<string, unknown>).low)
+                : 0
+              return {
+                condition: typeof rule.condition === 'string' ? rule.condition : '',
+                action: typeof rule.action === 'string' ? rule.action : '',
+                utilityRange: {
+                  low: Number.isFinite(rangeLow) ? rangeLow : 0,
+                  high: typeof rule.utilityRange === 'object' && rule.utilityRange !== null
+                    ? Number((rule.utilityRange as Record<string, unknown>).high)
+                    : 10,
+                },
+                polarity: hasPolarity
+                  ? polarityRaw
+                  : (Number.isFinite(rangeLow) && rangeLow >= 5 ? 'success' : 'risk'),
+              }
+            }),
+        }
+      }
     }
   }
 
@@ -213,6 +245,80 @@ export class CognitiveStore {
     return next
   }
 
+  /**
+   * Fold one real-feedback evidence weight into a simulated experience's
+   * verification state (the evidence-replacement model): a single decisive
+   * weight fast-tracks to provisional, cumulative evidence upgrades to
+   * verified, and a contradictory provisional feedback rolls back. Ordinary
+   * experiences are verified by construction and unaffected.
+   * @param expId - the experience id.
+   * @param weight - the feedback evidence weight in [0, 1].
+   * @param contradictory - whether the feedback contradicts the simulation.
+   * @param fastTrackThreshold - weight at/above which one feedback fast-tracks.
+   * @param permanentThreshold - cumulative evidence needed for permanent verified.
+   * @returns the updated experience.
+   */
+  applyFeedbackEvidence(
+    expId: string,
+    weight: number,
+    contradictory: boolean,
+    fastTrackThreshold: number,
+    permanentThreshold: number,
+  ): Experience {
+    const current = this.getExperience(expId)
+    if (current === undefined) {
+      throw new Error(`cognitive-pipeline: experience "${expId}" not found`)
+    }
+    if (!current.simulated || current.verification === 'verified') return current
+    if (contradictory && current.verification === 'provisional') {
+      // The observation window caught a contradiction: roll back to unverified
+      // and do not count the contradictory weight.
+      const rolled = { ...current, verification: 'unverified' as const, evidenceScore: 0 }
+      this.experiences.set(expId, rolled)
+      this.enqueueLines('experiences.jsonl', [...this.experiences.values()])
+      return rolled
+    }
+    const nextScore = current.evidenceScore + weight
+    // A single decisive feedback fast-tracks to provisional; cumulative
+    // evidence at or above the permanent threshold upgrades to verified.
+    const verification = nextScore >= permanentThreshold
+      ? 'verified' as const
+      : (weight >= fastTrackThreshold || current.verification === 'provisional')
+        ? 'provisional' as const
+        : 'unverified' as const
+    const next: Experience = {
+      ...current,
+      evidenceScore: nextScore,
+      verification,
+    }
+    this.experiences.set(expId, next)
+    this.enqueueLines('experiences.jsonl', [...this.experiences.values()])
+    return next
+  }
+
+  /**
+   * Expire simulated experiences that never earned real feedback within the
+   * fallback TTL. This is the backstop of the evidence-replacement model:
+   * verification and density are primary, the timeout guards the
+   * never-verified corner.
+   * @param now - the reference timestamp.
+   * @param ttlMs - the fallback TTL for unverified simulated experiences.
+   * @returns the expIds removed.
+   */
+  expireUnverifiedSimulated(now: number, ttlMs: number): string[] {
+    const expired: string[] = []
+    for (const exp of this.experiences.values()) {
+      if (exp.simulated && exp.verification === 'unverified' && now - exp.timestamp >= ttlMs) {
+        this.experiences.delete(exp.expId)
+        expired.push(exp.expId)
+      }
+    }
+    if (expired.length > 0) {
+      this.enqueueLines('experiences.jsonl', [...this.experiences.values()])
+    }
+    return expired
+  }
+
   // ── predictions ──────────────────────────────────────────────────────────
 
   /** Store one prediction and enqueue its persistence.
@@ -240,16 +346,21 @@ export class CognitiveStore {
 
   /**
    * Resolve one prediction with its actual outcome, propagating the absolute
-   * prediction error to the bound experience's cumulative error.
+   * prediction error to the bound experience's cumulative error. When the
+   * feedback carries a result-quality label, it is folded back into the bound
+   * experience's utility so "predicted wrong but quality known" experiences
+   * carry a real tag instead of staying neutral.
    * @param predictionId - the prediction to resolve.
    * @param actualOutcome - the observed outcome text.
    * @param predictionError - absolute error in [0, 1].
+   * @param outcomeQuality - optional result quality 0-10 to fold into the bound experience.
    * @returns the resolved prediction.
    */
   resolvePrediction(
     predictionId: string,
     actualOutcome: string,
     predictionError: number,
+    outcomeQuality?: number,
   ): Prediction {
     const current = this.predictions.get(predictionId)
     if (current === undefined) {
@@ -267,10 +378,21 @@ export class CognitiveStore {
     if (current.expId !== null) {
       const exp = this.experiences.get(current.expId)
       if (exp !== undefined) {
+        const utility = outcomeQuality === undefined
+          ? exp.sar.outcomeUtility
+          : {
+            ...exp.sar.outcomeUtility,
+            // The single quality axis maps to material gain; the emotional and
+            // cost axes are not conveyed by feedback and keep their recorded
+            // values. 5 + (q-5)*0.8: q=8 → 7, q=2 → 3 — a neutral 5/5/5 gains
+            // a real label after the first resolved prediction.
+            materialGain: clampLabel(5 + (outcomeQuality - 5) * 0.8),
+          }
         const next: Experience = {
           ...exp,
           predictionError,
           cumulativeError: exp.cumulativeError + predictionError,
+          sar: { ...exp.sar, outcomeUtility: utility },
         }
         this.experiences.set(exp.expId, next)
         this.enqueueLines('experiences.jsonl', [...this.experiences.values()])
@@ -471,6 +593,43 @@ export class CognitiveStore {
     this.nextPredictionSeq += 1
     return id
   }
+
+  /** Derive a normalized cluster view when the on-disk row predates the new
+   * polarity / situationCentroid fields: polarity from the expected utility
+   * range, centroid from the supporting experiences' situations.
+   * @param raw - the loaded, still-untrusted cluster row.
+   * @returns the cluster with both new fields present.
+   */
+  private normalizeCluster(raw: Record<string, unknown>): Cluster {
+    const polarityRaw = raw.polarity
+    const hasPolarity = polarityRaw === 'success' || polarityRaw === 'risk'
+    const centroidRaw = raw.situationCentroid
+    const hasCentroid = Array.isArray(centroidRaw) && centroidRaw.length > 0
+    if (hasPolarity && hasCentroid) {
+      return raw as unknown as Cluster
+    }
+    const evidenceIds = Array.isArray(raw.supportingEvidenceIds)
+      ? raw.supportingEvidenceIds.filter((id): id is string => typeof id === 'string')
+      : []
+    const members = evidenceIds
+      .map(id => this.experiences.get(id))
+      .filter((exp): exp is Experience => exp !== undefined)
+    const rangeLow = typeof raw.expectedUtilityRange === 'object' && raw.expectedUtilityRange !== null
+      ? Number((raw.expectedUtilityRange as Record<string, unknown>).low)
+      : 0
+    const polarity: 'success' | 'risk' = hasPolarity
+      ? polarityRaw
+      : (Number.isFinite(rangeLow) && rangeLow >= 5 ? 'success' : 'risk')
+    return {
+      ...raw as unknown as Cluster,
+      polarity,
+      // Keep the dimension contract even when no evidence resolves: a zero
+      // vector simply never matches a situation in the hot loop.
+      situationCentroid: members.length === 0
+        ? new Array<number>(ACTION_VECTOR_DIM).fill(0)
+        : centroidOf(members.map(member => actionVector(member.sar.situation, []))),
+    }
+  }
 }
 
 /** Extract the numeric sequence from an `exp_<n>` id. */
@@ -483,4 +642,26 @@ function expSeqOf(expId: string): number {
 function predictionSeqOf(predictionId: string): number {
   const match = /^pred_(\d+)$/.exec(predictionId)
   return match === null ? 0 : Number(match[1])
+}
+
+/** Mean of L2-normalized vectors (centroid), re-normalized; zero input stays zero. */
+function centroidOf(vectors: readonly (readonly number[])[]): number[] {
+  const dim = vectors[0]?.length ?? 0
+  if (dim === 0) return []
+  const sum = new Array<number>(dim).fill(0)
+  for (const vector of vectors) {
+    for (let index = 0; index < dim; index += 1) {
+      sum[index] = (sum[index] ?? 0) + (vector[index] ?? 0)
+    }
+  }
+  const mean = sum.map(value => value / vectors.length)
+  let norm = 0
+  for (const value of mean) norm += value * value
+  norm = Math.sqrt(norm)
+  return norm < 1e-9 ? mean : mean.map(value => value / norm)
+}
+
+/** Clamp a feedback-derived utility axis into [0, 10] rounded to one decimal. */
+function clampLabel(value: number): number {
+  return Math.min(10, Math.max(0, Math.round(value * 10) / 10))
 }

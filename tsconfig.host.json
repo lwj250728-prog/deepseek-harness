@@ -173,6 +173,7 @@
     { "path": "./packages/schedule/schedule" },
     { "path": "./packages/context/time-context" },
     { "path": "./packages/context/tmux-context" },
+    { "path": "./packages/context/cognitive-inject" },
     { "path": "./packages/context/session-reference" },
     { "path": "./packages/interaction/user-questions" },
     { "path": "./packages/interaction/user-approval" },

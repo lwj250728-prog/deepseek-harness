@@ -465,6 +465,32 @@ export interface Config {
 
 Source: [`packages/code-runtime/code-runtime-worker-thread/src/index.ts:25`](../packages/code-runtime/code-runtime-worker-thread/src/index.ts)
 
+<a id="deepseek-aidsh-cognitive-inject"></a>
+
+## `@deepseek-ai/dsh-cognitive-inject`
+
+Requires: `agents` · `cognitivePipeline` · `tools`
+
+```ts config-catalog
+/** Plugin configuration (all fields optional; conservative defaults). */
+export interface Config {
+  /** How many related experiences to inject at most (default 1). */
+  topK?: number
+  /** Minimum situation-vector similarity to consider a memory related (default 0.4). */
+  minSimilarity?: number
+  /** After a failed step, multiply minSimilarity by this factor (default 0.6). */
+  failureThresholdFactor?: number
+  /** After a failed step, how many experiences to inject at most (default 3). */
+  failureTopK?: number
+  /** How many trailing message blocks feed the situation extraction (default 4). */
+  contextDepth?: number
+  /** False disables injection while keeping the listener mounted (default true). */
+  enabled?: boolean
+}
+```
+
+Source: [`packages/context/cognitive-inject/src/index.ts:34`](../packages/context/cognitive-inject/src/index.ts)
+
 <a id="deepseek-aidsh-cognitive-orchestration"></a>
 
 ## `@deepseek-ai/dsh-cognitive-orchestration`
@@ -531,12 +557,28 @@ export interface CognitivePipelineConfig {
   shrinkageAlpha?: number
   /** Minimum 80%-interval width (default 0.2). */
   minConfidenceIntervalWidth?: number
+  /** Situation-cosine threshold for matching a success-cluster reference (default 0.4). */
+  successReferenceThreshold?: number
+  /** Situation-centroid cosine below which the taxonomy is considered uncovered (default 0.3). */
+  coverageThreshold?: number
+  /** Routing margin below which a known-path prediction is SAR-ized as a retrieval failure (default 0.1). */
+  retrievalFailureMargin?: number
   /** Cold-loop time-decay lambda per day (default 0.01). */
   decayLambda?: number
   /** Cold-loop minimum decay weight (default 0.1). */
   minDecayWeight?: number
   /** Cold-loop prediction-error inclusion threshold (default 0.3). */
   predictionErrorThreshold?: number
+  /** Cold-loop utility-score threshold for including success experiences (default 3). */
+  successUtilityThreshold?: number
+  /** Minimum labeled validation samples before a rebuild may be accepted (default 3). */
+  minValidationCount?: number
+  /** Evidence weight at/above which one feedback fast-tracks a simulation to provisional verified (default 0.8). */
+  simulationFastTrackThreshold?: number
+  /** Cumulative evidence score needed for permanent verified (default 2). */
+  simulationPermanentThreshold?: number
+  /** Fallback TTL in ms after which an unverified simulation expires (default 30 days). */
+  simulationTtlMs?: number
   /** Cold-loop max sample ratio of the population (default 0.15). */
   maxSampleRatio?: number
   /** Evidence hard-constraint minimum count (default 3). */
@@ -547,6 +589,8 @@ export interface CognitivePipelineConfig {
   sandboxImprovement?: number
   /** Validation slice ratio of the sampled set (default 0.2). */
   validationRatio?: number
+  /** Extra reconstruct draws when one stochastic LLM sample yields nothing verified (default 2). */
+  reconstructRetries?: number
   /** Agglomerative merge cosine threshold (default 0.4). */
   clusterMergeCosine?: number
   /** Cluster-membership cosine threshold (default 0.3). */
@@ -556,7 +600,7 @@ export interface CognitivePipelineConfig {
 }
 ```
 
-Source: [`packages/cognition/cognitive-pipeline/src/service.ts:41`](../packages/cognition/cognitive-pipeline/src/service.ts)
+Source: [`packages/cognition/cognitive-pipeline/src/service.ts:46`](../packages/cognition/cognitive-pipeline/src/service.ts)
 
 <a id="deepseek-aidsh-compaction-basic"></a>
 
@@ -1385,6 +1429,46 @@ export interface Config {
 ```
 
 Source: [`packages/feedback/message-feedback/src/index.ts:49`](../packages/feedback/message-feedback/src/index.ts)
+
+<a id="deepseek-aidsh-mobile-gateway"></a>
+
+## `@deepseek-ai/dsh-mobile-gateway`
+
+Requires: `webServer`
+
+```ts config-catalog
+/** Plugin config: the gateway's own listener plus the loopback forward target. */
+export interface Config {
+  /** Gateway listen address; `0.0.0.0` exposes the AUTHENTICATED gateway to the LAN. */
+  bind: string
+  /** Gateway listen port. */
+  port: number
+  /** Upstream host (normally the loopback DSH web server). */
+  targetHost: string
+  /** Upstream port; 0 resolves from `ctx.webServer.port` at activation. */
+  targetPort: number
+  /** The phone-user whitelist; empty denies every login (fail closed). */
+  users: GatewayUser[]
+  /** Signed-session lifetime in seconds. */
+  sessionTtlSeconds: number
+  /** Optional stable HMAC secret; empty mints a per-process random secret. */
+  secret: string
+  /** Optional PEM private key path; must be set together with `tlsCertPath`. */
+  tlsKeyPath: string
+  /** Optional PEM certificate path; must be set together with `tlsKeyPath`. */
+  tlsCertPath: string
+}
+
+/** One named phone user: the whitelist entry the gateway is configured with. */
+export interface GatewayUser {
+  /** Human-readable name; appears in the audit log (never sent to DSH). */
+  name: string
+  /** Secret shared with this user's phone. Use `openssl rand -hex 24`-grade entropy. */
+  token: string
+}
+```
+
+Source: [`packages/host/mobile-gateway/src/index.ts:30`](../packages/host/mobile-gateway/src/index.ts)
 
 <a id="deepseek-aidsh-permission-presets"></a>
 

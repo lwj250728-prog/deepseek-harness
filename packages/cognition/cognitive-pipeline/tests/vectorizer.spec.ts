@@ -5,8 +5,10 @@ import {
   actionVector,
   cosine,
   isPositiveOutcome,
+  outcomePolarity,
   outcomeVector,
   signatureHash,
+  symptomOverlap,
   tokenize,
 } from '../src/vectorizer.ts'
 
@@ -49,5 +51,26 @@ describe('vectorizer', () => {
     expect(isPositiveOutcome({ materialGain: 8, emotionalValence: 7, energyCost: 3 })).toBe(true)
     expect(isPositiveOutcome({ materialGain: 2, emotionalValence: 2, energyCost: 8 })).toBe(false)
     expect(isPositiveOutcome({ materialGain: 5, emotionalValence: 5, energyCost: 5 })).toBe(false)
+  })
+
+  it('classifies outcomes into three polarities, never neutral as failure', () => {
+    expect(outcomePolarity({ materialGain: 8, emotionalValence: 7, energyCost: 3 })).toBe('positive')
+    expect(outcomePolarity({ materialGain: 2, emotionalValence: 2, energyCost: 8 })).toBe('negative')
+    expect(outcomePolarity({ materialGain: 5, emotionalValence: 5, energyCost: 5 })).toBe('neutral')
+    // A gain that exactly cancels its cost is neutral, not negative.
+    expect(outcomePolarity({ materialGain: 7, emotionalValence: 5, energyCost: 7 })).toBe('neutral')
+  })
+
+  it('scores symptom overlap as the exact-substring recall channel', () => {
+    const experience = '测试脚本挂起，发现浮点死循环'
+    // The query's symptom markers are all present verbatim.
+    expect(symptomOverlap('修复测试挂起问题', experience)).toBe(1)
+    // A marker absent from the query is not counted.
+    expect(symptomOverlap('修复测试挂起问题', '编译失败，无法构建')).toBe(0)
+    // A query with two markers, one present: 1/2.
+    expect(symptomOverlap('处理编译错误', experience)).toBe(0)
+    expect(symptomOverlap('处理编译错误', '编译失败，报错')).toBe(0.5)
+    // A query with no symptom markers scores 0, never a false hit.
+    expect(symptomOverlap('实现新功能', '挂起')).toBe(0)
   })
 })

@@ -32,6 +32,9 @@ function experience(expId: string, materialGain: number): Experience {
     cumulativeError: 0,
     hitCount: 0,
     positiveCount: 0,
+    simulated: false,
+    verification: 'verified',
+    evidenceScore: 0,
   }
 }
 
@@ -117,6 +120,42 @@ describe('CognitiveStore', () => {
     }
   })
 
+  it('folds feedback quality into the bound experience utility label', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cognition-store-'))
+    try {
+      const store = new CognitiveStore(dir)
+      await store.load()
+      // A neutral experience (5/5/5) bound to a prediction.
+      const exp = experience('exp_1', 5)
+      store.addExperience(exp)
+      store.addPrediction(prediction('pred_1', 0.5, 'exp_1'))
+      // High-quality feedback: the neutral experience must gain a real label.
+      store.resolvePrediction('pred_1', '结果很好', 0.3, 8)
+      const labeled = store.getExperience('exp_1')
+      // 5 + (8-5)*0.8 = 7.4 → rounded 7.4, material gain now positive.
+      expect(labeled?.sar.outcomeUtility.materialGain).toBeGreaterThan(5)
+      expect(labeled?.sar.outcomeUtility.materialGain).toBeLessThan(8)
+      // Valence and cost are not conveyed by feedback and stay put.
+      expect(labeled?.sar.outcomeUtility.emotionalValence).toBe(5)
+      expect(labeled?.sar.outcomeUtility.energyCost).toBe(5)
+
+      // Low-quality feedback moves the label the other way.
+      store.addExperience(experience('exp_2', 5))
+      store.addPrediction(prediction('pred_2', 0.5, 'exp_2'))
+      store.resolvePrediction('pred_2', '结果很差', 0.3, 2)
+      const negative = store.getExperience('exp_2')
+      expect(negative?.sar.outcomeUtility.materialGain).toBeLessThan(5)
+
+      // No quality: the label is untouched.
+      store.addExperience(experience('exp_3', 5))
+      store.addPrediction(prediction('pred_3', 0.5, 'exp_3'))
+      store.resolvePrediction('pred_3', '结果未知', 0.3)
+      expect(store.getExperience('exp_3')?.sar.outcomeUtility.materialGain).toBe(5)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('applies a new taxonomy atomically and reassigns members', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cognition-store-'))
     try {
@@ -136,11 +175,13 @@ describe('CognitiveStore', () => {
         origin: 'cold-loop',
         sampleCount: 2,
         cumPredictionError: 0.2,
+        polarity: 'success',
+        situationCentroid: actionVector('情境exp_1 情境exp_2', []),
       }
       const taxonomy: TaxonomyState = {
         version: 1,
         summaryShort: '重组为1簇',
-        rules: [{ condition: '正向簇', action: '沿用', utilityRange: { low: 6, high: 10 } }],
+        rules: [{ condition: '正向簇', action: '沿用', utilityRange: { low: 6, high: 10 }, polarity: 'success' }],
         updatedAt: Date.now(),
       }
       store.applyTaxonomy([clusterA], taxonomy, new Map([
@@ -185,6 +226,132 @@ describe('CognitiveStore', () => {
       expect(store.nextExpId()).toBe('exp_1')
       expect(store.nextExpId()).toBe('exp_2')
       expect(store.nextPredictionId()).toBe('pred_1')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('normalizes pre-polarity cluster and taxonomy rows on load', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cognition-store-'))
+    try {
+      const store = new CognitiveStore(dir)
+      await store.load()
+      store.addExperience(experience('exp_1', 8))
+      // Simulate an old on-disk cluster without the polarity / situationCentroid fields.
+      const legacy: Cluster = {
+        clusterId: 1,
+        name: '旧簇',
+        decisionRule: 'if 相似 then 沿用',
+        expectedUtilityRange: { low: 7, high: 10 },
+        supportingEvidenceIds: ['exp_1'],
+        fallbackAction: '观察',
+        createdAt: Date.now(),
+        origin: 'cold-loop',
+        sampleCount: 1,
+        cumPredictionError: 0,
+      } as unknown as Cluster
+      store.applyTaxonomy([legacy], {
+        version: 1,
+        summaryShort: '旧',
+        rules: [{ condition: '旧簇', action: '沿用', utilityRange: { low: 7, high: 10 }, polarity: 'success' }],
+        updatedAt: Date.now(),
+      }, new Map([['exp_1', { clusterId: 1, strategyLabel: '旧簇' }]]))
+      await store.flush()
+
+      const reloaded = new CognitiveStore(dir)
+      await reloaded.load()
+      const cluster = reloaded.clustersSnapshot()[0]
+      expect(cluster?.polarity).toBe('success')
+      expect(cluster?.situationCentroid.length).toBeGreaterThan(0)
+      const taxonomy = reloaded.taxonomySnapshot()
+      expect(taxonomy?.rules[0]?.polarity).toBe('success')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('drives simulated verification through the evidence-replacement state machine', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cognition-store-'))
+    try {
+      const store = new CognitiveStore(dir)
+      await store.load()
+      // A simulated experience starts unverified.
+      const simulated: Experience = {
+        ...experience('exp_1', 6),
+        simulated: true,
+        verification: 'unverified',
+        evidenceScore: 0,
+      }
+      store.addExperience(simulated)
+
+      // A single decisive weight fast-tracks to provisional.
+      store.applyFeedbackEvidence('exp_1', 0.9, false, 0.8, 2)
+      expect(store.getExperience('exp_1')?.verification).toBe('provisional')
+      expect(store.getExperience('exp_1')?.evidenceScore).toBe(0.9)
+
+      // Cumulative evidence reaches the permanent threshold → verified.
+      store.applyFeedbackEvidence('exp_1', 0.6, false, 0.8, 2)
+      store.applyFeedbackEvidence('exp_1', 0.6, false, 0.8, 2)
+      expect(store.getExperience('exp_1')?.verification).toBe('verified')
+
+      // A fresh simulation: contradictory feedback at provisional rolls back.
+      const second: Experience = {
+        ...experience('exp_2', 6),
+        simulated: true,
+        verification: 'unverified',
+        evidenceScore: 0,
+      }
+      store.addExperience(second)
+      store.applyFeedbackEvidence('exp_2', 0.9, false, 0.8, 2)
+      expect(store.getExperience('exp_2')?.verification).toBe('provisional')
+      store.applyFeedbackEvidence('exp_2', 0.5, true, 0.8, 2)
+      expect(store.getExperience('exp_2')?.verification).toBe('unverified')
+      expect(store.getExperience('exp_2')?.evidenceScore).toBe(0)
+
+      // Ordinary experiences are verified by construction and never touched.
+      store.applyFeedbackEvidence('exp_1', 0.9, false, 0.8, 2)
+      expect(store.getExperience('exp_1')?.verification).toBe('verified')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('expires unverified simulated experiences past the fallback TTL', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cognition-store-'))
+    try {
+      const store = new CognitiveStore(dir)
+      await store.load()
+      const old: Experience = {
+        ...experience('exp_1', 6),
+        simulated: true,
+        verification: 'unverified',
+        evidenceScore: 0,
+        timestamp: Date.now() - 10 * 24 * 60 * 60 * 1000, // 10 days old
+      }
+      const fresh: Experience = {
+        ...experience('exp_2', 6),
+        simulated: true,
+        verification: 'unverified',
+        evidenceScore: 0,
+        timestamp: Date.now(),
+      }
+      const verifiedSim: Experience = {
+        ...experience('exp_3', 6),
+        simulated: true,
+        verification: 'verified',
+        evidenceScore: 3,
+        timestamp: Date.now() - 10 * 24 * 60 * 60 * 1000,
+      }
+      store.addExperience(old)
+      store.addExperience(fresh)
+      store.addExperience(verifiedSim)
+
+      const expired = store.expireUnverifiedSimulated(Date.now(), 7 * 24 * 60 * 60 * 1000)
+      expect(expired).toEqual(['exp_1'])
+      expect(store.getExperience('exp_1')).toBeUndefined()
+      expect(store.getExperience('exp_2')).toBeDefined()
+      // Verified simulations are never TTL-expired.
+      expect(store.getExperience('exp_3')).toBeDefined()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

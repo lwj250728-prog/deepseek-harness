@@ -43,6 +43,52 @@ export function isPositiveOutcome(utility: OutcomeUtility): boolean {
   return utilityScore(utility) > 0
 }
 
+/** Tri-state polarity of an outcome on the composite utility axis. */
+export type OutcomePolarity = 'positive' | 'neutral' | 'negative'
+
+/** Failure-symptom markers that make an experience recallable by its signature. */
+export const SYMPTOM_MARKERS = [
+  '挂起', '死循环', '失败', '报错', '错误', '超时', '异常', '崩溃', '拒绝',
+  '无法', '不能', '编译', '断言', '溢出', '泄漏', '锁死', '卡住', '闪退',
+  'eperm', 'exit', 'timeout', 'error', 'fail', 'crash', 'hang',
+]
+
+/**
+ * Fraction of the query's symptom markers that appear in one text. The
+ * hashed bag-of-words vectors dilute short symptom queries against long
+ * situations, so this exact-substring overlap is the complementary recall
+ * channel: "测试挂起" hits an experience whose situation literally contains
+ * 挂起 even when the vector cosine is low.
+ * @param query - the query text (task summary, situation, etc.).
+ * @param text - the candidate experience text.
+ * @returns the matched-marker ratio in [0, 1].
+ */
+export function symptomOverlap(query: string, text: string): number {
+  const lower = text.toLowerCase()
+  let matched = 0
+  let present = 0
+  for (const marker of SYMPTOM_MARKERS) {
+    if (!query.toLowerCase().includes(marker)) continue
+    present += 1
+    if (lower.includes(marker)) matched += 1
+  }
+  return present === 0 ? 0 : matched / present
+}
+
+/**
+ * Classify an outcome by composite score sign. A zero composite score (for
+ * example the neutral 5/5/5 extraction, or a gain that exactly cancels its
+ * cost) carries no net signal and must not be counted as a failure.
+ * @param utility - the outcome utility.
+ * @returns the polarity.
+ */
+export function outcomePolarity(utility: OutcomeUtility): OutcomePolarity {
+  const score = utilityScore(utility)
+  if (score > 0) return 'positive'
+  if (score < 0) return 'negative'
+  return 'neutral'
+}
+
 /** FNV-1a 32-bit hash, a stable deterministic token hash.
  * @param token - the token to hash.
  * @returns an unsigned 32-bit hash.

@@ -11,8 +11,8 @@ import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { calibrate, reviewOod } from './llm.ts'
 import type { CognitiveLlmRoute } from './llm.ts'
 import { CognitiveStore } from './store.ts'
-import type { Experience, PredictInput, PredictResult, TempStrategy } from './types.ts'
-import { actionVector, cosine, isPositiveOutcome, signatureHash } from './vectorizer.ts'
+import type { Experience, PredictInput, PredictResult, SuccessReference, TaxonomyContext, TempStrategy } from './types.ts'
+import { ACTION_VECTOR_DIM, actionVector, cosine, outcomePolarity, signatureHash } from './vectorizer.ts'
 
 /** Fully resolved engine thresholds (no optional fields). */
 export interface HotEngineConfig {
@@ -22,6 +22,13 @@ export interface HotEngineConfig {
   readonly oodSiThreshold: number
   readonly shrinkageAlpha: number
   readonly minConfidenceIntervalWidth: number
+  /** Situation-centroid cosine at/above which a success cluster is returned as a reference strategy (default 0.4). */
+  readonly successReferenceThreshold: number
+  /** Situation-centroid cosine below which the taxonomy is considered uncovered (default 0.3). */
+  readonly coverageThreshold: number
+  /** Routing margin (best-minus-second-best cluster cosine) below which a
+   * known-path prediction is treated as a retrieval failure and SAR-ized (default 0.1). */
+  readonly retrievalFailureMargin: number
   readonly tempStrategyTtlMs: number
   readonly tempStrategyMatchThreshold: number
 }
@@ -142,10 +149,93 @@ export class HotEngine {
       isNovel = !review.isKnown
     }
 
+    const successReference = this.matchSuccessReference(input.situation)
+    const taxonomyContext = this.taxonomyContext(input.situation)
+    const adviceSuffix = this.taxonomyAdviceLine(taxonomyContext)
     if (isNovel) {
-      return this.predictNovel(input, sessionId, signal, oodSignal, top1)
+      return this.predictNovel(input, sessionId, signal, oodSignal, top1, successReference, taxonomyContext, adviceSuffix)
     }
-    return this.predictKnown(input, samples, sessionId, signal, oodSignal, top1)
+    return this.predictKnown(input, samples, sessionId, signal, oodSignal, top1, successReference, taxonomyContext, adviceSuffix)
+  }
+
+  /**
+   * Consult the taxonomy during retrieval: match the query situation against
+   * every cluster's situation centroid (any polarity), report the routed
+   * region, the routing confidence (best-minus-second-best margin), and
+   * whether SAR has coverage there. This is the structural layer of the
+   * pipeline's self-knowledge — retrieval knows what SAR contains before it
+   * scans the experience store.
+   * @param situation - the query situation text.
+   * @returns the taxonomy context for this query.
+   */
+  private taxonomyContext(situation: string): TaxonomyContext {
+    const clusters = this.store.clustersSnapshot().filter(cluster => cluster.situationCentroid.length === ACTION_VECTOR_DIM)
+    if (clusters.length === 0) {
+      return { cluster: null, similarity: 0, margin: 0, coverage: 'no-taxonomy' }
+    }
+    const vector = actionVector(situation, [])
+    const scored = clusters
+      .map(cluster => ({ cluster, score: cosine(vector, cluster.situationCentroid) }))
+      .sort((a, b) => b.score - a.score)
+    const best = scored[0]
+    if (best === undefined || best.score < this.config.coverageThreshold) {
+      return {
+        cluster: null,
+        similarity: best?.score ?? 0,
+        margin: 0,
+        coverage: 'gap',
+      }
+    }
+    const runner = scored[1]
+    return {
+      cluster: {
+        clusterId: best.cluster.clusterId,
+        name: best.cluster.name,
+        decisionRule: best.cluster.decisionRule,
+        polarity: best.cluster.polarity,
+      },
+      similarity: best.score,
+      margin: best.score - (runner?.score ?? 0),
+      coverage: 'covered',
+    }
+  }
+
+  /** Compact retrieval-advice line appended to the advice text. */
+  private taxonomyAdviceLine(context: TaxonomyContext): string {
+    if (context.coverage === 'no-taxonomy') return ' | 检索建议：分类体系尚未建立，按全新现象处理'
+    if (context.coverage === 'gap') {
+      return ` | 检索建议：情境落在分类覆盖缺口（最高相似度 ${context.similarity.toFixed(3)} < ${this.config.coverageThreshold}），SAR 无相关经验`
+    }
+    const confidence = context.margin < this.config.retrievalFailureMargin ? '，路由置信低' : ''
+    return ` | 检索建议：命中簇「${context.cluster?.name.slice(0, 24) ?? '?'}」（相似度 ${context.similarity.toFixed(3)}，路由余量 ${context.margin.toFixed(3)}${confidence}）`
+  }
+
+  /** Match the current situation against proven success clusters. Returns the
+   * closest success cluster whose situation centroid clears the threshold, so
+   * the model can reference a proven strategy even when the action itself is
+   * novel.
+   * @param situation - the current situation text.
+   * @returns the matched success reference, or null.
+   */
+  private matchSuccessReference(situation: string): SuccessReference | null {
+    const vector = actionVector(situation, [])
+    let best: SuccessReference | null = null
+    let bestScore = this.config.successReferenceThreshold
+    for (const cluster of this.store.clustersSnapshot()) {
+      if (cluster.polarity !== 'success') continue
+      if (cluster.situationCentroid.length !== ACTION_VECTOR_DIM) continue
+      const score = cosine(vector, cluster.situationCentroid)
+      if (score >= bestScore) {
+        bestScore = score
+        best = {
+          clusterId: cluster.clusterId,
+          clusterName: cluster.name,
+          decisionRule: cluster.decisionRule,
+          utilityRange: { ...cluster.expectedUtilityRange },
+        }
+      }
+    }
+    return best
   }
 
   /** Novel branch: scratchpad lookup or creation, conservative calibration. */
@@ -155,6 +245,9 @@ export class HotEngine {
     signal: AbortSignal | undefined,
     oodSignal: PredictResult['oodSignal'],
     top1: number,
+    successReference: SuccessReference | null,
+    taxonomyContext: TaxonomyContext,
+    adviceSuffix: string,
   ): Promise<PredictResult> {
     const hash = String(signatureHash(input.action))
     this.store.expireTempStrategies()
@@ -205,6 +298,10 @@ export class HotEngine {
         sourceExpId: null,
       })
     }
+    if (successReference !== null) {
+      advice += ` | 参照成功策略（簇「${successReference.clusterName}」）：${successReference.decisionRule}`
+    }
+    advice += adviceSuffix
 
     const predictionId = this.store.nextPredictionId()
     this.store.addPrediction({
@@ -238,6 +335,8 @@ export class HotEngine {
       topHitCount: 0,
       usedTempStrategy,
       clusterId: null,
+      successReference,
+      taxonomyContext,
     }
   }
 
@@ -249,9 +348,14 @@ export class HotEngine {
     signal: AbortSignal | undefined,
     oodSignal: PredictResult['oodSignal'],
     _top1: number,
+    successReference: SuccessReference | null,
+    taxonomyContext: TaxonomyContext,
+    adviceSuffix: string,
   ): Promise<PredictResult> {
-    const positive = samples.filter(exp => isPositiveOutcome(exp.sar.outcomeUtility)).length
-    const negative = samples.length - positive
+    const positive = samples.filter(exp => outcomePolarity(exp.sar.outcomeUtility) === 'positive').length
+    // Neutral experiences carry no net utility signal; they must not be
+    // counted as failures when they merely lack a distinguishable score.
+    const negative = samples.filter(exp => outcomePolarity(exp.sar.outcomeUtility) === 'negative').length
     const k = samples.length
 
     // Layer 1 (frequency prior injection) + Layer 4 (adversarial factors) live
@@ -266,6 +370,7 @@ export class HotEngine {
         expId: exp.expId,
         actionKeywords: exp.sar.actionKeywords.join(','),
         utility: `${exp.sar.outcomeUtility.materialGain}/${exp.sar.outcomeUtility.emotionalValence}/${exp.sar.outcomeUtility.energyCost}`,
+        ...exp.meta === true ? { meta: true } : {},
       })),
     }, { sessionId, signal })
 
@@ -295,6 +400,10 @@ export class HotEngine {
     if (clusterLabel !== null) {
       advice = `[簇:${clusterLabel}] ${advice}`
     }
+    if (successReference !== null) {
+      advice += ` | 参照成功策略（簇「${successReference.clusterName}」）：${successReference.decisionRule}`
+    }
+    advice += adviceSuffix
 
     const predictionId = this.store.nextPredictionId()
     this.store.addPrediction({
@@ -328,6 +437,8 @@ export class HotEngine {
       topHitCount: k,
       usedTempStrategy: false,
       clusterId,
+      successReference,
+      taxonomyContext,
     }
   }
 

@@ -147,6 +147,10 @@ The scratchpad strategy, the lifetime calibration decile, the cold-loop cluster,
   readonly sampleCount: number
   /** Rolling sum of prediction errors of member experiences. */
   readonly cumPredictionError: number
+  /** Whether this cluster is a proven success pattern or a risk pattern. */
+  readonly polarity: 'success' | 'risk'
+  /** Normalized centroid of member situation vectors (the reference axis). */
+  readonly situationCentroid: readonly number[]
 }
 ```
 
@@ -190,6 +194,10 @@ The online/offline service I/O contracts.
   readonly topHitCount: number
   readonly usedTempStrategy: boolean
   readonly clusterId: number | null
+  /** Closest proven success cluster matched by the situation, or null. */
+  readonly successReference: SuccessReference | null
+  /** Taxonomy consulted during retrieval: routed region, confidence, coverage. */
+  readonly taxonomyContext: TaxonomyContext
 }
 ```
 
@@ -199,11 +207,11 @@ The online/offline service I/O contracts.
   readonly predictionId: string
   readonly actualOutcome: string
   /**
-   * Optional model-supplied outcome quality 0–10. When provided it is used
-   * directly as the observed utility; otherwise the pipeline LLM-extracts the
-   * SAR utility from the outcome text, and 0.5 is the no-information baseline.
+   * Actual outcome quality 0–10, required so every resolved prediction
+   * carries a real, non-neutral utility signal; a neutral baseline is no
+   * longer inferred from the outcome text.
    */
-  readonly outcomeQuality?: number
+  readonly outcomeQuality: number
 }
 ```
 
@@ -219,7 +227,11 @@ The online/offline service I/O contracts.
 ```ts type-equiv
 /** Outcome of one cold-loop rebuild (the `/rebuild/trigger` contract). */ interface RebuildResult {
   readonly scope: 'local' | 'global'
+  /** Whether the proposed taxonomy was accepted and written back. */
   readonly accepted: boolean
+  /** True when the rebuild was postponed for insufficient labeled validation
+   * samples rather than rejected on merit; the store is left untouched. */
+  readonly deferred: boolean
   /** Validation-set error under the old taxonomy. */
   readonly oldError: number | null
   /** Validation-set error under the proposed taxonomy. */
@@ -230,7 +242,7 @@ The online/offline service I/O contracts.
   /** Clusters rejected by the evidence hard-constraint check. */
   readonly rejectedClusters: number
   readonly sampleCount: number
-  /** Human-readable accept/reject reason. */
+  /** Human-readable accept/reject/defer reason. */
   readonly reason: string
   readonly taxonomyVersion: number
 }

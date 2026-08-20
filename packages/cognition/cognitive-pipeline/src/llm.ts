@@ -11,6 +11,7 @@ import {
   BlockAssembler,
   createUserMessage,
   deepFreeze,
+  ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
 import type {
   ContentBlock,
@@ -18,9 +19,11 @@ import type {
   GenerateOptions,
   Message,
 } from '@deepseek-ai/dsh-llm'
-import type { Experience, OutcomeUtility, SarTriplet } from './types.ts'
+import type { AccumulationDecision, Experience, OutcomeUtility, SarTriplet } from './types.ts'
 import {
+  ACCUMULATE_SYSTEM_PROMPT,
   CALIBRATION_SYSTEM_PROMPT,
+  frameAccumulateInput,
   frameCalibrationInput,
   frameOodInput,
   frameReconstructInput,
@@ -29,7 +32,7 @@ import {
   RECONSTRUCT_SYSTEM_PROMPT,
   SAR_SYSTEM_PROMPT,
 } from './prompts.ts'
-import { tokenize } from './vectorizer.ts'
+import { SYMPTOM_MARKERS, tokenize } from './vectorizer.ts'
 
 /** Explicit provider/model route; both or neither must be set. */
 export interface CognitiveLlmRoute {
@@ -247,6 +250,12 @@ async function callJson(
     messages,
     system,
     maxTokens,
+    // Structured template calls are budget-constrained JSON extraction
+    // (500-4096 tokens). Chain-of-thought reasoning would consume the whole
+    // budget and starve the answer (finish=max-tokens with zero text), so these
+    // calls explicitly request reasoning off; the main agent loop keeps its
+    // own provider default.
+    reasoningEffort: ReasoningEffortId('off'),
     ...options.sessionId === undefined ? {} : { sessionId: options.sessionId },
     ...options.signal === undefined ? {} : { signal: options.signal },
   })
@@ -265,15 +274,28 @@ function clampUtility(value: number): number {
   return Math.min(10, Math.max(0, Math.round(value)))
 }
 
+/** Whether a sentence carries an observable failure symptom. */
+function hasSymptom(sentence: string): boolean {
+  const lower = sentence.toLowerCase()
+  return SYMPTOM_MARKERS.some(marker => lower.includes(marker))
+}
+
 /** Deterministic template-1 fallback: split sentences, neutral utility. */
 function sarFallback(rawText: string): SarTriplet {
   const sentences = rawText.split(/(?<=[。！？!?.])\s*/).map(sentence => sentence.trim()).filter(sentence => sentence.length > 0)
   const situation = sentences[0] ?? rawText.slice(0, 80)
   const action = sentences[1] ?? rawText.slice(0, 80)
   const outcome = sentences.slice(2).join(' ') || rawText.slice(0, 120)
+  // Symptom fusion: append any symptom-carrying sentence to the situation so
+  // the situation vector — the retrieval axis for similar failures — actually
+  // contains the failure signature, not just "something went wrong".
+  const symptomSentences = sentences.filter(hasSymptom)
+  const fusedSituation = symptomSentences.length === 0
+    ? situation
+    : [...new Set([situation, ...symptomSentences])].join(' ')
   const keywords = [...new Set(tokenize(action))].slice(0, 8)
   return {
-    situation,
+    situation: fusedSituation,
     action,
     outcome,
     actionKeywords: keywords,
@@ -312,15 +334,25 @@ export async function extractSar(
     const keywords = Array.isArray(parsed.action_keywords)
       ? parsed.action_keywords.filter((keyword): keyword is string => typeof keyword === 'string').slice(0, 16)
       : []
+    // All three utility fields must be present and finite; a partial or
+    // missing score is an extraction failure, not a neutral outcome — it
+    // degrades to the fallback instead of silently diluting the clustering
+    // axis with a fake 5/5/5.
+    const materialGain = Number(utility?.material_gain)
+    const emotionalValence = Number(utility?.emotional_valence)
+    const energyCost = Number(utility?.energy_cost)
+    if (!Number.isFinite(materialGain) || !Number.isFinite(emotionalValence) || !Number.isFinite(energyCost)) {
+      throw new CognitivePipelineError('cognitive-pipeline: SAR output missing utility fields', 'SAR_UTILITY_FAILED')
+    }
     return {
       situation: parsed.situation,
       action: parsed.action,
       outcome: parsed.outcome,
       actionKeywords: keywords.length > 0 ? keywords : [...new Set(tokenize(parsed.action))].slice(0, 8),
       outcomeUtility: {
-        materialGain: clampUtility(Number(utility?.material_gain)),
-        emotionalValence: clampUtility(Number(utility?.emotional_valence)),
-        energyCost: clampUtility(Number(utility?.energy_cost)),
+        materialGain: clampUtility(materialGain),
+        emotionalValence: clampUtility(emotionalValence),
+        energyCost: clampUtility(energyCost),
       },
     }
   } catch (error) {
@@ -552,5 +584,66 @@ export async function reconstructTaxonomy(
   } catch (error) {
     ctx.logger.warn(`cognitive-pipeline: taxonomy reconstruction degraded to fallback: ${String(error)}`)
     return reconstructFallback(groups, summaryShort)
+  }
+}
+
+/** Deterministic template-5 fallback: reject accumulation (no route → no gate). */
+export function accumulationFallback(): AccumulationDecision {
+  return { shouldAccumulate: false, sar: null }
+}
+
+/**
+ * Template 5: the accumulation gate. The LLM route judges whether a completed
+ * turn is worth becoming an experience and extracts the SAR triplet when it is.
+ * Without an explicit route the gate deterministically rejects — automatic
+ * accumulation never runs unjudged.
+ * @param ctx - plugin context for the LLM call.
+ * @param route - explicit model route.
+ * @param episode - the completed turn's situation/action/outcome material.
+ * @param similar - retrieved history hits for the novelty judgment.
+ * @param options - call context (session/signal/maxTokens).
+ * @returns the accumulation decision.
+ */
+export async function evaluateAccumulation(
+  ctx: Context,
+  route: CognitiveLlmRoute,
+  episode: { situation: string; action: string; outcome: string },
+  similar: readonly { expId: string; text: string; similarity: number }[],
+  options: CallOptions,
+): Promise<AccumulationDecision> {
+  if (!hasExplicitRoute(route)) return accumulationFallback()
+  try {
+    const parsed = asObject(await callJson(ctx, route, ACCUMULATE_SYSTEM_PROMPT, frameAccumulateInput(episode, similar), {
+      ...options,
+      maxTokens: 500,
+    }), 'accumulation')
+    const shouldAccumulate = parsed.should_accumulate === true
+    if (!shouldAccumulate) return { shouldAccumulate: false, sar: null }
+    const situation = parsed.situation
+    const action = parsed.action
+    const outcome = parsed.outcome
+    const materialGain = Number(parsed.material_gain)
+    const emotionalValence = Number(parsed.emotional_valence)
+    const energyCost = Number(parsed.energy_cost)
+    if (typeof situation !== 'string' || typeof action !== 'string' || typeof outcome !== 'string'
+      || !Number.isFinite(materialGain) || !Number.isFinite(emotionalValence) || !Number.isFinite(energyCost)) {
+      throw new CognitivePipelineError('cognitive-pipeline: accumulation output missing SAR fields', 'ACCUMULATE_SCHEMA_FAILED')
+    }
+    return {
+      shouldAccumulate: true,
+      sar: {
+        situation,
+        action,
+        outcome,
+        utility: {
+          materialGain: clampUtility(materialGain),
+          emotionalValence: clampUtility(emotionalValence),
+          energyCost: clampUtility(energyCost),
+        },
+      },
+    }
+  } catch (error) {
+    ctx.logger.warn(`cognitive-pipeline: accumulation gate degraded to fallback: ${String(error)}`)
+    return accumulationFallback()
   }
 }

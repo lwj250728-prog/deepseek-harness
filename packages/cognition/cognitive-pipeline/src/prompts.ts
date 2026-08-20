@@ -12,7 +12,7 @@ import type { Experience, TaxonomyState } from './types.ts'
 export const SAR_SYSTEM_PROMPT = [
   '你是一位经验编码专家。你的任务是从用户提供的原始经历文本中，提取出严格的"情境-行动-结果"（SAR）三元组。',
   '【提取规则】：',
-  '1. 情境（S）：客观约束，不含主观情绪（如"老板深夜发来修改意见"）。',
+  '1. 情境（S）：客观约束，不含主观情绪（如"老板深夜发来修改意见"）。若是排障/失败经历，必须把可观测的失败症状写进情境——错误信息、挂起、编译失败、超时、exit code 等（如"测试脚本突然无限挂起"而非"测试出了问题"）。症状是未来相似问题被检索到的关键线索。',
   '2. 行动（A）：主体发出的具体行为策略（如"立即起身去健身房"而非"感觉很糟"）。',
   '3. 结果（R）：可观测的短期+长期反馈（如"失眠但次日获得表扬"）。必须包含收益/代价的量化描述。',
   '【输出格式】：严格按照以下JSON Schema输出：',
@@ -66,11 +66,16 @@ export const CALIBRATION_SYSTEM_PROMPT = [
 export const RECONSTRUCT_SYSTEM_PROMPT = [
   '你是认知架构的"首席重构官"。现在提供给你一组经过筛选的经历样本（每个样本包含ID、情境、行动、结果效用评分）。当前旧的分类体系已经因为高频预测误差而失效。',
   '【重构任务】：',
-  '1. 放弃旧标签，完全基于这些样本的结果效用评分（outcome_utility_score）的相似性，重新聚类。',
-  '2. 每个新簇必须拥有鲜明的策略导向。标签命名格式必须为："当【触发条件】出现，应【采用行动姿态】，预期获得【效用区间】"。',
-  '【硬性约束（防幻觉锁）】：',
-  '- 每创建一个新簇，必须从提供的样本中引用至少3个不同的exp_id作为支撑证据。',
-  '- 禁止将仅出现1次的孤立事件设为一个新簇；若无法找到3个支撑证据，请将该样本归类至"噪声/偶发池"并忽略。',
+  '1. 放弃旧标签，基于【情境-策略配对的重现模式】重新聚类：把情境前提（行动者水平、环境约束、时间压力等）与所采用策略一起反复出现的模式识别为簇。',
+  '2. 同一类行动在不同前提（例如新手教学 vs 资深例行）下反复出现且策略不同时，拆分为不同簇，各自给出独立策略；情境措辞有差异但策略相同则合并为一簇。',
+  '3. 每个新簇必须拥有鲜明的策略导向。标签命名格式必须为："当【触发条件】出现，应【采用行动姿态】，预期获得【效用区间】"。',
+  '【证据相干性（硬性约束，后端会按此校验并驳回不相干簇）】：',
+  '- 每个簇的支撑证据必须是"同一效用模式"的经历：彼此在 material_gain、emotional_valence、energy_cost 三个维度上都应接近（单维差距不宜超过3），并且与簇的 expected_utility_range 一致。',
+  '- energy_cost 会把表面相似的"成功"拆成不同模式：低成本成功（cost 2~4）与高投入成功（cost 5~8）是不同策略簇，禁止混入同一簇。',
+  '- 无法归入任何相干簇的样本——高代价离群、中性（三个维度都是5）、仅出现1次的孤立事件——必须放入"噪声/偶发池"并忽略，禁止强行并入某个簇。',
+  '- 宁缺毋滥：只有模式差异稳定且有至少3条支撑证据时才拆簇，不要为单次措辞差异过度拆分。',
+  '【防幻觉锁】：',
+  '- 每创建一个新簇，必须从提供的样本中引用至少3个不同的exp_id作为支撑证据；引用的exp_id必须真实存在于样本列表中，禁止编造。',
   '【输出JSON格式】：',
   '{',
   '  "new_clusters": [',
@@ -122,14 +127,14 @@ export function frameCalibrationInput(
   context: string | undefined,
   positiveCount: number,
   negativeCount: number,
-  samples: readonly { expId: string; actionKeywords: string; utility: string }[],
+  samples: readonly { expId: string; actionKeywords: string; utility: string; meta?: boolean }[],
 ): string {
   const contextLine = context === undefined || context.length === 0 ? '' : `\n【额外上下文】：${context}`
   return `【情境】：${situation}\n【拟采取行动】：${action}${contextLine}\n\n`
     + `【历史相似案例统计】：正向结果 ${positiveCount} 个，负向结果 ${negativeCount} 个\n`
     + '【历史相似案例摘要（仅关键词与效用评分，无完整原文）】：\n'
     + samples.map(sample =>
-      `- ${sample.expId}: 关键词[${sample.actionKeywords}] 效用(${sample.utility})`).join('\n')
+      `- ${sample.expId}${sample.meta === true ? '【元经验-管道自身】' : ''}: 关键词[${sample.actionKeywords}] 效用(${sample.utility})`).join('\n')
 }
 
 /** Frame template-4 input with the sampled experiences.
@@ -142,6 +147,41 @@ export function frameReconstructInput(samples: readonly Experience[]): string {
     return `- ${sample.expId}: 情境="${sample.sar.situation}" 行动="${sample.sar.action}" `
       + `结果效用(material_gain=${u.materialGain}, emotional_valence=${u.emotionalValence}, energy_cost=${u.energyCost})`
   }).join('\n')
+}
+
+/** Template 5: the accumulation gate — judge whether a completed turn is worth
+ * becoming an experience, and extract the SAR triplet when it is. */
+export const ACCUMULATE_SYSTEM_PROMPT = [
+  '你是认知管线的"记忆评估官"。现在提供给你一段刚完成的代理工作（情境、行动、结果摘要）以及若干历史相似经验。',
+  '【判断任务】：',
+  '1. 判断这段工作是否值得沉淀为一条新经验：是否包含可复用的情境-策略模式、是否与历史经验显著不同、是否对未来的预测有指导价值。',
+  '2. 值得则提取 SAR 三元组与三维效用（material_gain / emotional_valence / energy_cost，0-10，5 为中性）；不值得则 should_accumulate 为 false。',
+  '【判断标准（宁缺毋滥）】：',
+  '- 纯寒暄、无实质工作、与历史经验高度重复的片段不值得沉淀。',
+  '- 成功经验（完成了有价值的工作）与失败经验（踩了坑、定位了根因）都值得沉淀。',
+  '- 情境、行动、结果必须来自提供的材料，禁止编造。',
+  '【输出JSON格式】：',
+  '{',
+  '  "should_accumulate": true,',
+  '  "situation": "string（情境）",',
+  '  "action": "string（行动）",',
+  '  "outcome": "string（结果）",',
+  '  "material_gain": 0-10,',
+  '  "emotional_valence": 0-10,',
+  '  "energy_cost": 0-10',
+  '}',
+].join('\n')
+
+/** Frame template-5 input with the completed episode and similar history. */
+export function frameAccumulateInput(
+  episode: { situation: string; action: string; outcome: string },
+  similar: readonly { expId: string; text: string; similarity: number }[],
+): string {
+  return `【刚完成的工作】：\n- 情境：${episode.situation}\n- 行动：${episode.action}\n- 结果：${episode.outcome}\n\n`
+    + (similar.length === 0
+      ? '【历史相似经验】：（无）'
+      : '【历史相似经验】（用于判断是否与已积累经验重复）：\n'
+        + similar.map(hit => `- [${hit.expId}] (相似度 ${hit.similarity.toFixed(2)}) ${hit.text}`).join('\n'))
 }
 
 /** 附录B: the dynamic cognition prefix injected into the hot-loop system prompt.
@@ -159,8 +199,10 @@ export function cognitionPrefix(taxonomy: TaxonomyState | null): string {
       '- 所有概率输出均经过样本量收缩与校准，请用户参考区间而非点估计。',
     ].join('\n')
   }
-  const ruleLines = taxonomy.rules.map((rule, index) =>
-    `   - 规则${String.fromCharCode(65 + index)}：若 ${rule.condition} → 推荐 ${rule.action}，预期效用 ${rule.utilityRange.low}~${rule.utilityRange.high}`)
+  const ruleLines = taxonomy.rules.map((rule, index) => {
+    const marker = rule.polarity === 'success' ? '✅成功' : '⚠️风险'
+    return `   - 规则${String.fromCharCode(65 + index)}（${marker}）：若 ${rule.condition} → 推荐 ${rule.action}，预期效用 ${rule.utilityRange.low}~${rule.utilityRange.high}`
+  })
   return [
     `【当前活跃认知框架（最后更新于 ${new Date(taxonomy.updatedAt).toISOString()}，版本 ${taxonomy.version}）】：`,
     `1. 分类体系摘要：${taxonomy.summaryShort}`,

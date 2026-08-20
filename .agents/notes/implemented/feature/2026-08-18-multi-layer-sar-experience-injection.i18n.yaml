@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-18-multi-layer-sar-experience-injection.md
+2026-08-18-multi-layer-sar-experience-injection.md: 479cb038b39621a68c18fd33bde36dba5e701370
+2026-08-18-multi-layer-sar-experience-injection.zh.md: 9857ef40ed6649b58a6d6aba169b81f07a1fa2a2

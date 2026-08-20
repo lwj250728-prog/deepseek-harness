@@ -19,7 +19,7 @@ import type {
   SubagentStopReason,
 } from '@deepseek-ai/dsh-subagent'
 import type { CognitivePipelineService } from '@deepseek-ai/dsh-cognitive-pipeline'
-import { actionVector, cosine } from '@deepseek-ai/dsh-cognitive-pipeline'
+import { actionVector, cosine, symptomOverlap } from '@deepseek-ai/dsh-cognitive-pipeline'
 /** Orchestration configuration (all defaults conservative). */
 export interface OrchestrationConfig {
   /** Delegate provider name to wrap (e.g. `spawn` or `fork`). */
@@ -135,18 +135,33 @@ export class CognitiveOrchestrator {
   }
 
   /**
-   * Retrieve experiences related to one task text.
+   * Retrieve experiences related to one task text. The task is matched on
+   * BOTH axes and the higher similarity wins: action-vector overlap (the task
+   * says the same thing the past action did) and situation-vector overlap (the
+   * task's symptoms resemble the situation where an experience happened). The
+   * situation axis is what lets a task like "fix the hanging test" recall the
+   * bug experience that started with "tests suddenly hang", even when the
+   * repair wording differs. A third, exact-substring channel scores the task's
+   * failure-symptom markers against the experience text — the recall that
+   * survives when the short symptom query dilutes in the hashed vectors.
    * @param task - the task summary text.
    * @returns the related experiences, best first, capped at topK.
    */
   retrieve(task: string): readonly ExperienceHit[] {
-    const vector = actionVector(task, [])
+    const taskVector = actionVector(task, [])
     return this.pipeline.store.experiencesSnapshot()
-      .map(exp => ({
-        expId: exp.expId,
-        text: `${exp.sar.situation}。${exp.sar.action}。${exp.sar.outcome}`,
-        similarity: cosine(vector, exp.actionVector),
-      }))
+      .map((exp) => {
+        const text = `${exp.sar.situation}。${exp.sar.action}。${exp.sar.outcome}`
+        return {
+          expId: exp.expId,
+          text,
+          similarity: Math.max(
+            cosine(taskVector, exp.actionVector),
+            cosine(taskVector, actionVector(exp.sar.situation, [])),
+            symptomOverlap(task, text),
+          ),
+        }
+      })
       .filter(hit => hit.similarity >= this.config.minSimilarity)
       .sort((a, b) => b.similarity - a.similarity)
       .slice(0, this.config.topK)

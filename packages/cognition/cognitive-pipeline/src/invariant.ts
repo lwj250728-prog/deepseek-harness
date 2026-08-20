@@ -43,6 +43,13 @@ const install: InvariantInstaller = (ctx: Context, fail: (message: string) => ne
       fail(`experience ${exp.expId} has outcomeVector of ${exp.outcomeVector.length} (expected ${OUTCOME_VECTOR_DIM})`)
     }
   }
+  for (const cluster of service.store.clustersSnapshot()) {
+    // polarity is normalized at the store load boundary, so the union is
+    // trusted; the centroid dimension is still a live runtime contract.
+    if (!Array.isArray(cluster.situationCentroid) || cluster.situationCentroid.length !== ACTION_VECTOR_DIM) {
+      fail(`cluster ${cluster.clusterId} has situationCentroid of ${cluster.situationCentroid.length} (expected ${ACTION_VECTOR_DIM})`)
+    }
+  }
 }
 
 /**
