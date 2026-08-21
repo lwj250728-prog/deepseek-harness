@@ -469,7 +469,7 @@ Source: [`packages/code-runtime/code-runtime-worker-thread/src/index.ts:25`](../
 
 ## `@deepseek-ai/dsh-cognitive-inject`
 
-Requires: `agents` · `cognitivePipeline` · `tools`
+Requires: `agents` · `cognitivePipeline` · `llm` · `tools`
 
 ```ts config-catalog
 /** Plugin configuration (all fields optional; conservative defaults). */
@@ -489,13 +489,13 @@ export interface Config {
 }
 ```
 
-Source: [`packages/context/cognitive-inject/src/index.ts:34`](../packages/context/cognitive-inject/src/index.ts)
+Source: [`packages/context/cognitive-inject/src/index.ts:35`](../packages/context/cognitive-inject/src/index.ts)
 
 <a id="deepseek-aidsh-cognitive-orchestration"></a>
 
 ## `@deepseek-ai/dsh-cognitive-orchestration`
 
-Requires: `subagents` · `cognitivePipeline`
+Requires: `subagents` · `cognitivePipeline` · `sessions` · `timer` · `tools`
 
 ```ts config-catalog
 /** Plugin configuration mirrors the orchestrator configuration. */
@@ -515,10 +515,36 @@ export interface OrchestrationConfig {
   readonly policyEnabled: boolean
   /** Probability at/above which a policy prediction approves the action. */
   readonly policyDecisionThreshold: number
+  /**
+   * Tool names whose calls are captured as tool-level delegations. These are
+   * subagent tools that bypass the wrapped provider (their `settle()` never
+   * runs), so the orchestrator captures the delegation itself: a
+   * `policy:delegate` prediction is calibrated against the outcome and a
+   * "委派决策" experience is written back. The cognitive-wrapped tool (the
+   * provider under `providerName`) is excluded by default because its children
+   * already write back through `settle()`.
+   */
+  readonly delegationToolNames: string[]
+  /** Whether the timer-driven exploration dispatcher polls pending tasks. */
+  readonly exploreEnabled: boolean
+  /** Polling interval for pending exploration tasks, in milliseconds. */
+  readonly exploreIntervalMs: number
+  /** Maximum exploration tasks executing concurrently. */
+  readonly exploreMaxConcurrent: number
+  /**
+   * Daily delegation budget for the loop-driven delegation sink
+   * (`createDelegationSink`): how many delegations the sink accepts per day.
+   */
+  readonly delegateDailyBudget: number
+  /** Maximum delegations executing concurrently through the sink. */
+  readonly delegateMaxConcurrent: number
+  /** Irreversible-action markers; a delegation decision containing one is
+   * refused by the sink's safety gate. */
+  readonly delegateRiskWords: string[]
 }
 ```
 
-Source: [`packages/cognition/cognitive-orchestration/src/index.ts:31`](../packages/cognition/cognitive-orchestration/src/index.ts)
+Source: [`packages/cognition/cognitive-orchestration/src/index.ts:33`](../packages/cognition/cognitive-orchestration/src/index.ts)
 
 <a id="deepseek-aidsh-cognitive-pipeline"></a>
 
@@ -553,6 +579,22 @@ export interface CognitivePipelineConfig {
   tempStrategyPositiveRatio?: number
   /** Scratchpad fuzzy-match cosine (default 0.5). */
   tempStrategyMatchThreshold?: number
+  /** Active-exploration daily budget (scheme 2): how many reversible novel
+   * attempts count as exploration per day (default 3). */
+  exploreDailyBudget?: number
+  /** Words marking an action as irreversible; such actions are never counted
+   * as active exploration (default: 删除/清空/覆盖/发布/推送/rm/移除/迁移/重置/格式化…). */
+  exploreRiskWords?: string[]
+  /** Whether reversible novel attempts also queue an autonomous exploration
+   * task for a background session to execute silently (default false). */
+  exploreAutoDispatch?: boolean
+  /** EWMA step for folding real-world reuse errors into an exploration
+   * entry's validatedError (default 0.3). */
+  exploreValidationLearningRate?: number
+  /** Prediction-error ceiling below which an explored strategy counts as
+   * validated (paid off in practice); at/above it counts as refuted
+   * (default 0.3, the same threshold as predictionErrorThreshold). */
+  exploreValidationErrorThreshold?: number
   /** Layer-2 shrinkage alpha (default 50). */
   shrinkageAlpha?: number
   /** Minimum 80%-interval width (default 0.2). */
@@ -563,6 +605,12 @@ export interface CognitivePipelineConfig {
   coverageThreshold?: number
   /** Routing margin below which a known-path prediction is SAR-ized as a retrieval failure (default 0.1). */
   retrievalFailureMargin?: number
+  /** EWMA step for the feedback-driven multi-channel retrieval weights (default 0.2). */
+  channelLearningRate?: number
+  /** Feedback error below which the dominant retrieval channel is rewarded, at/above penalized (default 0.3). */
+  channelErrorThreshold?: number
+  /** Bounded LLM-refine drops in one low-confidence prediction (default 2). */
+  refineMaxDrops?: number
   /** Cold-loop time-decay lambda per day (default 0.01). */
   decayLambda?: number
   /** Cold-loop minimum decay weight (default 0.1). */
@@ -579,6 +627,15 @@ export interface CognitivePipelineConfig {
   simulationPermanentThreshold?: number
   /** Fallback TTL in ms after which an unverified simulation expires (default 30 days). */
   simulationTtlMs?: number
+  /** Automatically accumulate completed turns as experiences when the LLM
+   * route judges them worth it (default false; pure chat never reaches the gate). */
+  autoAccumulate?: boolean
+  /** Minimum invoked audits before a criterion's deviation rate can flag
+   * rework and record a deviation meta experience (default 3). */
+  acceptanceMinEvidenceCount?: number
+  /** Violation ratio (violated/invoked) at/above which an applied criterion
+   * flags rework on an audit (default 0.5). */
+  acceptanceDeviationThreshold?: number
   /** Cold-loop max sample ratio of the population (default 0.15). */
   maxSampleRatio?: number
   /** Evidence hard-constraint minimum count (default 3). */
@@ -597,10 +654,24 @@ export interface CognitivePipelineConfig {
   clusterMatchCosine?: number
   /** Feedback error at/above which an emergency local rebuild fires (default 0.8). */
   emergencyErrorThreshold?: number
+  /** Real-embedding seam (roadmap R3): when set, the semantic retrieval
+   * channel uses an OpenAI-compatible `/embeddings` endpoint and experiences
+   * store their action embedding at write time; the hash-bag cosine remains
+   * the fallback for queries/experiences without a vector. */
+  embedding?: {
+    /** API base URL (default `https://api.deepseek.com`). */
+    baseUrl?: string
+    /** Embedding model id (default `deepseek-embedding`). */
+    model?: string
+    /** Env name holding the API key (default `DEEPSEEK_API_KEY`). */
+    apiKeyEnv?: string
+    /** Explicit API key, overriding env and credentials. */
+    apiKey?: string
+  }
 }
 ```
 
-Source: [`packages/cognition/cognitive-pipeline/src/service.ts:46`](../packages/cognition/cognitive-pipeline/src/service.ts)
+Source: [`packages/cognition/cognitive-pipeline/src/service.ts:61`](../packages/cognition/cognitive-pipeline/src/service.ts)
 
 <a id="deepseek-aidsh-compaction-basic"></a>
 
@@ -3209,6 +3280,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-client-modules` — requires `webServer` · `loader` ([`packages/client/modules/src/index.ts`](../packages/client/modules/src/index.ts))
 - `@deepseek-ai/dsh-client-runtime` ([`packages/client/runtime/src/index.ts`](../packages/client/runtime/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-agent-preset` ([`packages/client/ui-agent-preset/src/index.ts`](../packages/client/ui-agent-preset/src/index.ts))
+- `@deepseek-ai/dsh-client-ui-cognition` ([`packages/client/ui-cognition/src/index.ts`](../packages/client/ui-cognition/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-commands` ([`packages/client/ui-commands/src/index.ts`](../packages/client/ui-commands/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-conversation` ([`packages/client/ui-conversation/src/index.ts`](../packages/client/ui-conversation/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-cordis` ([`packages/extensions/ui-cordis/src/index.ts`](../packages/extensions/ui-cordis/src/index.ts))

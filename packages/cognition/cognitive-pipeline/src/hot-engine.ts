@@ -210,7 +210,7 @@ export class HotEngine {
    * (pre-fetched by the caller), or null to use the hash-bag scorer.
    * @returns ranked hits, best first.
    */
-  retrieveTopK(action: string, k: number, situation = '', queryEmbedding: readonly number[] | null = null): RankedHit[] {
+  retrieveTopK(action: string, k: number, situation: string = '', queryEmbedding: readonly number[] | null = null): RankedHit[] {
     const weights = this.store.channelWeightsSnapshot()
     const situationVector = situation.trim().length > 0 ? actionVector(situation, []) : null
     const queryText = `${action} ${situation}`.trim()

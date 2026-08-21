@@ -310,6 +310,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'Root interface of the unified API. New client-request domain = one new file pair + one field here + one map row.',
     methods: [
       {
+        signature: 'cognition: CognitionApi',
+        description: 'The cognitive pipeline\'s exploration-task surface (read-only learning area).',
+        parameters: [],
+      },
+      {
         signature: 'downloads: DownloadsApi',
         description: 'Host-only download surfaces (GET, no wire envelope); absent from IApiClient.',
         parameters: [],
@@ -464,6 +469,16 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [],
       },
       {
+        signature: 'readonly embedder: EmbeddingScorer | null',
+        description: 'Real-embedding scorer, or null when the seam is disabled.',
+        parameters: [],
+      },
+      {
+        signature: 'readonly loops: CognitiveLoopRegistry',
+        description: 'Meta-cognition loop registry (the "造新环路" surface).',
+        parameters: [],
+      },
+      {
         signature: 'async ready(): Promise<void>',
         description: 'Resolve after the store finished loading (never rejects).',
         parameters: [],
@@ -480,10 +495,34 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the new experience id and its SAR triplet.',
       },
       {
+        signature: 'async simulate( input: SimulateInput, call?: PipelineCallContext, ): Promise<{ expId: string; sar: SarTriplet }>',
+        description: 'Generate a simulated experience via the LLM route: a retrieval-only, unverified candidate for "if I take this action in this situation, what would happen". It shapes no cluster until real feedback verifies it.',
+        parameters: [{ name: 'input', description: 'the hypothetical situation and proposed action.' }, { name: 'call', description: 'optional session/signal context.' }],
+        returns: 'the new simulated experience id and its SAR triplet.',
+      },
+      {
+        signature: 'async deriveReference( input: { situation: string; action: string }, call?: PipelineCallContext, ): Promise<{ expId: string; sar: SarTriplet } | null>',
+        description: 'Derive a reference experience from the commonalities of similar history (cold-start online generalization). Retrieves the top similar experiences for the query, asks the LLM route to extract their shared pattern, and writes the result as a retrieval-only simulated candidate that the evidence-replacement lifecycle verifies against real feedback — the same lifecycle as simulate.',
+        parameters: [{ name: 'input', description: 'the current situation/action to anchor the derivation.' }, { name: 'call', description: 'optional session/signal context.' }],
+        returns: 'the reference experience id and SAR when derived, or null.',
+      },
+      {
         signature: 'async predict(input: PredictInput, call?: PipelineCallContext): Promise<PredictResult>',
         description: 'Hot-loop prediction.',
         parameters: [{ name: 'input', description: 'the situation/action to predict.' }, { name: 'call', description: 'optional session/signal context.' }],
         returns: 'the calibrated prediction result.',
+      },
+      {
+        signature: 'rememberMeta(input: { situation: string; action: string; outcome: string; utility: OutcomeUtility }): string',
+        description: 'Directly record a pipeline-own (meta) observation without LLM extraction — the structured path for automatic retrieval-failure SAR-ization. Meta experiences with a non-neutral utility join the cold-loop sample, so the pipeline can cluster and learn from its own failure modes.',
+        parameters: [{ name: 'input', description: 'the structured SAR fields for the observation.' }],
+        returns: 'the new experience id.',
+      },
+      {
+        signature: 'async accumulateTurn(episode: TurnEpisode, call?: PipelineCallContext): Promise<string | null>',
+        description: 'Automatic accumulation: judge one completed turn through the LLM gate and write it as an experience when the route deems it worth it. A deterministic pre-filter (pure chat: no tool calls, no failure, short output) never reaches the per-turn LLM call. Without an explicit route the gate rejects.',
+        parameters: [{ name: 'episode', description: 'the reconstructed turn material.' }, { name: 'call', description: 'optional session/signal context.' }],
+        returns: 'the new experience id when accumulated, or null.',
       },
       {
         signature: 'async report(input: FeedbackInput, call?: PipelineCallContext): Promise<FeedbackResult>',
@@ -504,10 +543,94 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'counts, clusters, calibration, taxonomy, and recent resolved predictions.',
       },
       {
+        signature: 'async explore(goal: string): Promise<ExplorationTask>',
+        description: 'Queue an autonomous exploration task for a background session to execute silently (scheme 2 cross-session dispatch). The goal text becomes the executing session\'s task; the result is written back as an experience.',
+        parameters: [{ name: 'goal', description: 'the exploration goal.' }],
+        returns: 'the queued task.',
+      },
+      {
+        signature: 'explorationTasks(): readonly ExplorationTask[]',
+        description: 'Snapshot of the queued exploration tasks (public for inspection).',
+        parameters: [],
+        returns: 'the task list, insertion order.',
+      },
+      {
+        signature: 'registerLoop(spec: MetaLoopSpec): this',
+        description: 'Register a meta-cognition loop (declarative "造新环路").',
+        parameters: [{ name: 'spec', description: 'the loop\'s identity and description.' }],
+        returns: 'the service, for chaining.',
+      },
+      {
+        signature: 'loopList(): readonly MetaLoopSpec[]',
+        description: 'Registered meta-cognition loops, in registration order.',
+        parameters: [],
+        returns: 'the loop specs.',
+      },
+      {
+        signature: 'createExplorationSink(): LoopExecutionSink',
+        description: 'Build a ready-made execution sink that drives the ACTIVE-EXPLORATION execution layer under its own discipline (reversibility safety gate + daily budget). A loop that attaches this sink truly closes the loop: an approved decision creates a scratchpad and (when configured) queues an autonomous exploration task — 意志批准，执行层按纪律受理.',
+        parameters: [],
+        returns: 'a sink targetable as `hot-engine.explore-create`.',
+      },
+      {
+        signature: 'async decideLoop( name: string, decision: string, situation: string, call?: PipelineCallContext, ): Promise<PredictResult>',
+        description: 'Run one meta-cognition loop decision through the SAME calibration ruler as every prediction. The loop\'s identity prefixes the situation (`loop:<name> 决策=…`), so the decision\'s history forms that loop\'s own special-experience layer — retrievable, aggregable, and calibrated.',
+        parameters: [{ name: 'name', description: 'the registered loop name.' }, { name: 'decision', description: 'what the loop is deciding (becomes the action text).' }, { name: 'situation', description: 'the context the decision is made in.' }, { name: 'call', description: 'optional session/signal context.' }],
+        returns: 'the predict result; rejects with INVALID_LOOP_NAME when unregistered.',
+      },
+      {
+        signature: 'async feedbackLoop( name: string, predictionId: string, actualOutcome: string, outcomeQuality: number, call?: PipelineCallContext, ): Promise<FeedbackResult>',
+        description: 'Feed the actual outcome of a loop decision back for calibration. Same report path as ordinary predictions.',
+        parameters: [{ name: 'name', description: 'the registered loop name (used for validation only).' }, { name: 'predictionId', description: 'the decision\'s prediction id.' }, { name: 'actualOutcome', description: 'the observed outcome text.' }, { name: 'outcomeQuality', description: 'the outcome quality 0–10.' }, { name: 'call', description: 'optional session/signal context.' }],
+        returns: 'the feedback result.',
+      },
+      {
+        signature: 'async decideAndExecute( name: string, decision: string, situation: string, threshold: number = 0.55, call?: PipelineCallContext, ): Promise<{ decision: PredictResult approved: boolean executions: readonly LoopExecutionReceipt[] }>',
+        description: 'Decide through a loop and — when the decision approves and the loop declared execution sinks — submit the decision as an execution request to each sink and persist one durable receipt per sink. This is the closing of the loop: 意志决策，执行层按纪律受理，回执可结算回流.',
+        parameters: [{ name: 'name', description: 'the registered loop name.' }, { name: 'decision', description: 'what the loop is deciding (becomes the action text).' }, { name: 'situation', description: 'the context the decision is made in.' }, { name: 'threshold', description: 'approval threshold on calibrated probability (default 0.55).' }, { name: 'call', description: 'optional session/signal context.' }],
+        returns: 'the decision result plus one persisted execution receipt per declared sink (id `<predictionId>@<target>`), which `settleExecution` later resolves with the actual execution outcome.',
+      },
+      {
+        signature: 'async settleExecution( receiptId: string, outcomeText: string, outcomeQuality: number, status: \'executed\' | \'failed\' = \'executed\', call?: PipelineCallContext, ): Promise<{ receipt: LoopExecutionReceipt; feedback: FeedbackResult }>',
+        description: 'Settle one loop-execution receipt with its actual execution outcome. The receipt must exist and must have been accepted (refused receipts are terminal by construction — the sink declined, nothing executed). The outcome feeds back through the SAME report path as every prediction: it resolves the decision\'s prediction on the |calibrated − observed| ruler, so what the execution actually did calibrates the loop that requested it — 执行结果回流，意志与执行共用同一把尺子.',
+        parameters: [{ name: 'receiptId', description: 'the receipt id (`<predictionId>@<target>`).' }, { name: 'outcomeText', description: 'what the execution actually produced.' }, { name: 'outcomeQuality', description: 'the outcome quality 0–10.' }, { name: 'status', description: 'the terminal outcome (\'executed\' or \'failed\'; default executed).' }, { name: 'call', description: 'optional session/signal context.' }],
+        returns: 'the settled receipt and the feedback result.',
+      },
+      {
         signature: 'taxonomyPrefix(): string',
         description: 'The dynamic cognition prefix for the system-prompt section.',
         parameters: [],
         returns: 'the 附录B prefix text.',
+      },
+      {
+        signature: 'async defineAcceptanceCheck(input: { criterion: string trigger: string evidenceHint: string }): Promise<AcceptanceCheck>',
+        description: 'Define one acceptance criterion: a reusable verification norm the agent audits claims against before treating them as settled. The pipeline records evidence PRESENCE, never evidence truth — it cannot verify its own claims; truth is adjudicated by the resolved outcome and the user.',
+        parameters: [{ name: 'input', description: 'the criterion statement, its trigger marker, and the evidence hint that satisfies it.' }],
+        returns: 'the new criterion, active with an empty evidence ledger.',
+      },
+      {
+        signature: 'async auditClaim(input: { claim: string situation: string evidence?: string predictionId?: string }): Promise<ClaimAudit>',
+        description: 'Audit one claim against the active acceptance criteria. Applicable checks are those whose trigger marker appears in the claim or its situation; a claim with no applicable check audits as `not-applicable` and touches no ledger. An applicable check is satisfied when the claim carries evidence (non-empty), violated when it does not — presence, not truth. Violated checks accumulate in the criterion\'s ledger, and a criterion whose invoked count clears the evidence minimum while its deviation rate crosses the threshold flags `reworkNeeded` and records one deviation meta experience so the cold loop can cluster the pipeline\'s own acceptance-failure patterns.',
+        parameters: [{ name: 'input', description: 'the claim, its situation, the verification statement (empty when the claim is made without evidence), and an optional prediction the claim is about.' }],
+        returns: 'the recorded audit.',
+      },
+      {
+        signature: 'async updateAcceptanceCheck(input: { checkId: string criterion?: string evidenceHint?: string retire?: boolean }): Promise<AcceptanceCheck>',
+        description: 'Rewrite an active criterion\'s statement/evidence hint, or retire it. A retired criterion is frozen: its evidence ledger is never reset and audits no longer apply it. The criterion\'s invoked/passed/violated/error counts cannot be edited by any path — criteria are revisable, their track record is not (the evidence gate of acceptance-criterion change).',
+        parameters: [{ name: 'input', description: 'the criterion id, optional new statement/evidence hint, and optional retire flag.' }],
+        returns: 'the updated criterion.',
+      },
+      {
+        signature: 'acceptanceChecks(): readonly AcceptanceCheck[]',
+        description: 'All acceptance criteria (public for inspection).',
+        parameters: [],
+        returns: 'a detached criterion list, insertion order.',
+      },
+      {
+        signature: 'claimAudits(limit: number = 10): readonly ClaimAudit[]',
+        description: 'Recent claim audits (public for inspection).',
+        parameters: [{ name: 'limit', description: 'how many audits, newest first (default 10).' }],
+        returns: 'the most recent audits.',
       },
       {
         signature: 'clusters(): readonly Cluster[]',
@@ -2707,6 +2830,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
 /** Shapes of every exported type the Service and Event signatures reference (transitively), sorted by name. */
 export const TYPE_API: readonly TypeApiEntry[] = [
   {
+    name: 'AcceptanceCheck',
+    declaration: 'export interface AcceptanceCheck {\n    readonly checkId: string;\n    readonly criterion: string;\n    readonly trigger: string;\n    readonly evidenceHint: string;\n    readonly status: AcceptanceStatus;\n    readonly invokedCount: number;\n    readonly passedCount: number;\n    readonly violatedCount: number;\n    readonly cumulativeError: number;\n    readonly errorFoldCount: number;\n    readonly revision: number;\n    readonly createdAt: number;\n    readonly updatedAt: number;\n}',
+  },
+  {
+    name: 'AcceptanceStatus',
+    declaration: 'export type AcceptanceStatus = \'active\' | \'retired\';',
+  },
+  {
     name: 'AdapterRegistrationHandle',
     declaration: 'export interface AdapterRegistrationHandle {\n    (): void;\n    replace(providers: string[]): void;\n}',
   },
@@ -2839,12 +2970,20 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface CancelOptions {\n    keepInbox?: boolean | undefined;\n}',
   },
   {
+    name: 'ChannelWeights',
+    declaration: 'export interface ChannelWeights {\n    readonly semantic: number;\n    readonly situational: number;\n    readonly symptom: number;\n    readonly outcome: number;\n}',
+  },
+  {
+    name: 'ClaimAudit',
+    declaration: 'export interface ClaimAudit {\n    readonly auditId: string;\n    readonly claim: string;\n    readonly situation: string;\n    readonly verdict: \'verified\' | \'violated\' | \'not-applicable\';\n    readonly appliedCheckIds: readonly string[];\n    readonly satisfiedCheckIds: readonly string[];\n    readonly violatedCheckIds: readonly string[];\n    readonly evidence: string;\n    readonly predictionId: string | null;\n    readonly reworkNeeded: boolean;\n    readonly deviationExpId: string | null;\n    readonly createdAt: number;\n}',
+  },
+  {
     name: 'ClientResponse',
     declaration: 'export interface ClientResponse {\n    type: \'client-response\';\n    rpcId: RpcId;\n    result: RpcResult<unknown>;\n}',
   },
   {
     name: 'Cluster',
-    declaration: 'export interface Cluster {\n    readonly clusterId: number;\n    readonly name: string;\n    readonly decisionRule: string;\n    readonly expectedUtilityRange: UtilityRange;\n    readonly supportingEvidenceIds: readonly string[];\n    readonly fallbackAction: string;\n    readonly createdAt: number;\n    readonly origin: \'cold-loop\' | \'temp-graduation\';\n    readonly sampleCount: number;\n    readonly cumPredictionError: number;\n}',
+    declaration: 'export interface Cluster {\n    readonly clusterId: number;\n    readonly name: string;\n    readonly decisionRule: string;\n    readonly expectedUtilityRange: UtilityRange;\n    readonly supportingEvidenceIds: readonly string[];\n    readonly fallbackAction: string;\n    readonly createdAt: number;\n    readonly origin: \'cold-loop\' | \'temp-graduation\';\n    readonly sampleCount: number;\n    readonly cumPredictionError: number;\n    readonly polarity: \'success\' | \'risk\';\n    readonly situationCentroid: readonly number[];\n}',
   },
   {
     name: 'CodeBindingErrorClass',
@@ -2879,12 +3018,24 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface CodeRunResult {\n    value?: CodeJsonValue;\n    logs: string[];\n    error?: CodeRunFailure;\n}',
   },
   {
+    name: 'CognitionApi',
+    declaration: 'export interface CognitionApi {\n    list(request: RpcRequest<Record<string, never>>): Promise<RpcResponse<{\n        tasks: readonly ExplorationTaskView[];\n        counts: ExplorationTaskCounts;\n    }>>;\n}',
+  },
+  {
     name: 'CognitiveLlmRoute',
     declaration: 'export interface CognitiveLlmRoute {\n    readonly provider?: string | undefined;\n    readonly model?: string | undefined;\n}',
   },
   {
+    name: 'CognitiveLoopRegistry',
+    declaration: 'export class CognitiveLoopRegistry {\n    register(spec: MetaLoopSpec): this;\n    has(name: string): boolean;\n    get(name: string): MetaLoopSpec | undefined;\n    list(): readonly MetaLoopSpec[];\n    async requestExecution(request: LoopExecutionRequest): Promise<readonly LoopExecutionReceipt[]>;\n    stats(predictions: readonly {\n        situation: string;\n        resolvedAt: number | null;\n        predictionError: number | null;\n    }[], executions: readonly LoopExecutionReceipt[]): readonly CognitiveLoopStats[];\n}',
+  },
+  {
+    name: 'CognitiveLoopStats',
+    declaration: 'export interface CognitiveLoopStats {\n    readonly name: string;\n    readonly description: string;\n    readonly predictionCount: number;\n    readonly resolvedCount: number;\n    readonly avgPredictionError: number | null;\n    readonly executedCount: number;\n    readonly refusedCount: number;\n    readonly failedCount: number;\n}',
+  },
+  {
     name: 'CognitiveStore',
-    declaration: 'export class CognitiveStore {\n    constructor(root: string);\n    async load(): Promise<void>;\n    async flush(): Promise<void>;\n    addExperience(exp: Experience): void;\n    getExperience(expId: string): Experience | undefined;\n    experiencesSnapshot(): readonly Experience[];\n    updateExperience(expId: string, patch: Partial<Experience>): Experience;\n    addPrediction(prediction: Prediction): void;\n    getPrediction(predictionId: string): Prediction | undefined;\n    predictionsSnapshot(): readonly Prediction[];\n    resolvePrediction(predictionId: string, actualOutcome: string, predictionError: number): Prediction;\n    getTempStrategy(signatureHash: string): TempStrategy | undefined;\n    addTempStrategy(strategy: TempStrategy): void;\n    updateTempStrategy(signatureHash: string, patch: Partial<TempStrategy>): TempStrategy;\n    tempStrategiesSnapshot(): readonly TempStrategy[];\n    expireTempStrategies(now: number = Date.now()): string[];\n    recordCalibration(probability: number, hit: boolean): void;\n    calibrationBucketsSnapshot(): readonly CalibrationBucket[];\n    empiricalAccuracyFor(probability: number): number | null;\n    clustersSnapshot(): readonly Cluster[];\n    taxonomySnapshot(): TaxonomyState | null;\n    nextClusterId(): number;\n    applyTaxonomy(clusters: readonly Cluster[], taxonomy: TaxonomyState, assignments: ReadonlyMap<string, {\n        clusterId: number;\n        strategyLabel: string;\n    }>): void;\n    stats(): {\n        experienceCount: number;\n        p /* …truncated — full shape in source */',
+    declaration: 'export class CognitiveStore {\n    constructor(root: string);\n    async load(): Promise<void>;\n    async flush(): Promise<void>;\n    addExperience(exp: Experience): void;\n    getExperience(expId: string): Experience | undefined;\n    experiencesSnapshot(): readonly Experience[];\n    updateExperience(expId: string, patch: Partial<Experience>): Experience;\n    applyFeedbackEvidence(expId: string, weight: number, contradictory: boolean, fastTrackThreshold: number, permanentThreshold: number): Experience;\n    expireUnverifiedSimulated(now: number, ttlMs: number): string[];\n    addPrediction(prediction: Prediction): void;\n    getPrediction(predictionId: string): Prediction | undefined;\n    predictionsSnapshot(): readonly Prediction[];\n    resolvePrediction(predictionId: string, actualOutcome: string, predictionError: number, outcomeQuality?: number): Prediction;\n    getTempStrategy(signatureHash: string): TempStrategy | undefined;\n    addTempStrategy(strategy: TempStrategy): void;\n    updateTempStrategy(signatureHash: string, patch: Partial<TempStrategy>): TempStrategy;\n    tempStrategiesSnapshot(): readonly TempStrategy[];\n    expireTempStrategies(now: number = Date.now()): string[];\n    recordCalibration(probability: number, hit: boolean): void;\n    calibrationBucketsSnapshot(): readonly CalibrationBucket[];\n    empiricalAccuracyFor(probability: number): number | null;\n    channelWeightsSnapshot(): ChannelWeights;\n    updateChannelWeights(weights: ChannelWeights): void;\n    explor /* …truncated — full shape in source */',
   },
   {
     name: 'ColdEngine',
@@ -2892,7 +3043,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ColdEngineConfig',
-    declaration: 'export interface ColdEngineConfig {\n    readonly decayLambda: number;\n    readonly minDecayWeight: number;\n    readonly predictionErrorThreshold: number;\n    readonly maxSampleRatio: number;\n    readonly evidenceMinCount: number;\n    readonly evidenceMaxDistance: number;\n    readonly sandboxImprovement: number;\n    readonly validationRatio: number;\n    readonly clusterMergeCosine: number;\n    readonly clusterMatchCosine: number;\n}',
+    declaration: 'export interface ColdEngineConfig {\n    readonly decayLambda: number;\n    readonly minDecayWeight: number;\n    readonly predictionErrorThreshold: number;\n    readonly successUtilityThreshold: number;\n    readonly maxSampleRatio: number;\n    readonly evidenceMinCount: number;\n    readonly evidenceMaxDistance: number;\n    readonly sandboxImprovement: number;\n    readonly validationRatio: number;\n    readonly minValidationCount: number;\n    readonly reconstructRetries: number;\n    readonly clusterMergeCosine: number;\n    readonly clusterMatchCosine: number;\n}',
   },
   {
     name: 'CollectedOutput',
@@ -3147,16 +3298,40 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface EditGoalRequest {\n    readonly objective?: string;\n    readonly maxGoalRounds?: number;\n}',
   },
   {
+    name: 'EmbeddingScorer',
+    declaration: 'export class EmbeddingScorer {\n    constructor(private readonly ctx: Context, private readonly config: ResolvedEmbeddingConfig, private readonly injectedTransport?: EmbeddingTransport);\n    async embed(text: string): Promise<number[] | null>;\n}',
+  },
+  {
+    name: 'EmbeddingTransport',
+    declaration: 'export interface EmbeddingTransport {\n    embed(text: string): Promise<number[]>;\n}',
+  },
+  {
     name: 'EpochHeader',
     declaration: 'export interface EpochHeader {\n    config: LlmCallConfig;\n    adapterDefaults?: LlmCallConfigAdapterDefaults;\n    system?: string;\n    tools?: ToolSchema[];\n}',
   },
   {
     name: 'Experience',
-    declaration: 'export interface Experience {\n    readonly expId: string;\n    readonly sar: SarTriplet;\n    readonly actionVector: readonly number[];\n    readonly outcomeVector: readonly number[];\n    readonly clusterId: number | null;\n    readonly strategyLabel: string | null;\n    readonly timestamp: number;\n    readonly predictionError: number | null;\n    readonly cumulativeError: number;\n    readonly hitCount: number;\n    readonly positiveCount: number;\n}',
+    declaration: 'export interface Experience {\n    readonly expId: string;\n    readonly sar: SarTriplet;\n    readonly actionVector: readonly number[];\n    readonly outcomeVector: readonly number[];\n    readonly embedding?: readonly number[];\n    readonly clusterId: number | null;\n    readonly strategyLabel: string | null;\n    readonly timestamp: number;\n    readonly predictionError: number | null;\n    readonly cumulativeError: number;\n    readonly hitCount: number;\n    readonly positiveCount: number;\n    readonly simulated: boolean;\n    readonly verification: ExperienceVerification;\n    readonly evidenceScore: number;\n    readonly meta?: boolean;\n}',
+  },
+  {
+    name: 'ExperienceVerification',
+    declaration: 'export type ExperienceVerification = \'unverified\' | \'provisional\' | \'verified\';',
+  },
+  {
+    name: 'ExplorationTask',
+    declaration: 'export interface ExplorationTask {\n    readonly taskId: string;\n    readonly goal: string;\n    readonly status: ExplorationTaskStatus;\n    readonly createdAt: number;\n    readonly pickedUpAt: number | null;\n    readonly result: string | null;\n}',
+  },
+  {
+    name: 'ExplorationTaskCounts',
+    declaration: 'export interface ExplorationTaskCounts {\n    readonly pending: number;\n    readonly running: number;\n    readonly completed: number;\n    readonly failed: number;\n}',
+  },
+  {
+    name: 'ExplorationTaskView',
+    declaration: 'export interface ExplorationTaskView {\n    readonly taskId: string;\n    readonly goal: string;\n    readonly status: ExplorationTaskStatus;\n    readonly createdAt: number;\n    readonly pickedUpAt: number | null;\n    readonly result: string | null;\n}',
   },
   {
     name: 'FeedbackInput',
-    declaration: 'export interface FeedbackInput {\n    readonly predictionId: string;\n    readonly actualOutcome: string;\n    readonly outcomeQuality?: number;\n}',
+    declaration: 'export interface FeedbackInput {\n    readonly predictionId: string;\n    readonly actualOutcome: string;\n    readonly outcomeQuality: number;\n}',
   },
   {
     name: 'FeedbackResult',
@@ -3263,12 +3438,16 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface GoalView extends GoalSnapshot {\n    readonly roundsStarted: number;\n    readonly createdAt: number;\n    readonly updatedAt: number;\n    readonly activation: GoalActivation;\n}',
   },
   {
+    name: 'HashSemanticScorer',
+    declaration: 'export class HashSemanticScorer implements SemanticScorer {\n    score(queryText: string, exp: Experience): number;\n}',
+  },
+  {
     name: 'HotEngine',
-    declaration: 'export class HotEngine {\n    constructor(ctx: Context, store: CognitiveStore, config: HotEngineConfig, route: CognitiveLlmRoute);\n    retrieveTopK(action: string, k: number): RankedHit[];\n    detectOod(ranked: readonly RankedHit[]): {\n        signal: PredictResult[\'oodSignal\'];\n        top1: number;\n    };\n    async predict(input: PredictInput, sessionId?: GenerateOptions[\'sessionId\'], signal?: AbortSignal): Promise<PredictResult>;\n    findMatchingTempStrategy(action: string): TempStrategy | undefined;\n}',
+    declaration: 'export class HotEngine {\n    constructor(ctx: Context, store: CognitiveStore, config: HotEngineConfig, route: CognitiveLlmRoute, scorer: SemanticScorer = new HashSemanticScorer(), embedder: EmbeddingScorer | null = null);\n    retrieveTopK(action: string, k: number, situation: string = \'\', queryEmbedding: readonly number[] | null = null): RankedHit[];\n    detectOod(ranked: readonly RankedHit[]): {\n        signal: PredictResult[\'oodSignal\'];\n        top1: number;\n    };\n    async predict(input: PredictInput, sessionId?: GenerateOptions[\'sessionId\'], signal?: AbortSignal): Promise<PredictResult>;\n    learnFromFeedback(prediction: Prediction, error: number): void;\n    findMatchingTempStrategy(action: string): TempStrategy | undefined;\n}',
   },
   {
     name: 'HotEngineConfig',
-    declaration: 'export interface HotEngineConfig {\n    readonly topK: number;\n    readonly oodSimThreshold: number;\n    readonly oodFlatThreshold: number;\n    readonly oodSiThreshold: number;\n    readonly shrinkageAlpha: number;\n    readonly minConfidenceIntervalWidth: number;\n    readonly tempStrategyTtlMs: number;\n    readonly tempStrategyMatchThreshold: number;\n}',
+    declaration: 'export interface HotEngineConfig {\n    readonly topK: number;\n    readonly oodSimThreshold: number;\n    readonly oodFlatThreshold: number;\n    readonly oodSiThreshold: number;\n    readonly shrinkageAlpha: number;\n    readonly minConfidenceIntervalWidth: number;\n    readonly successReferenceThreshold: number;\n    readonly coverageThreshold: number;\n    readonly retrievalFailureMargin: number;\n    readonly channelLearningRate: number;\n    readonly channelErrorThreshold: number;\n    readonly refineMaxDrops: number;\n    readonly exploreDailyBudget: number;\n    readonly exploreRiskWords: readonly string[];\n    readonly exploreAutoDispatch: boolean;\n    readonly tempStrategyTtlMs: number;\n    readonly tempStrategyMatchThreshold: number;\n}',
   },
   {
     name: 'ImageAttachmentLimits',
@@ -3300,7 +3479,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'InspectResult',
-    declaration: 'export interface InspectResult {\n    readonly experienceCount: number;\n    readonly predictionCount: number;\n    readonly resolvedPredictionCount: number;\n    readonly clusterCount: number;\n    readonly activeTempStrategyCount: number;\n    readonly calibrationBuckets: readonly CalibrationBucket[];\n    readonly taxonomy: TaxonomyState;\n    readonly recentResolved: readonly Prediction[];\n}',
+    declaration: 'export interface InspectResult {\n    readonly experienceCount: number;\n    readonly predictionCount: number;\n    readonly resolvedPredictionCount: number;\n    readonly clusterCount: number;\n    readonly activeTempStrategyCount: number;\n    readonly calibrationBuckets: readonly CalibrationBucket[];\n    readonly taxonomy: TaxonomyState;\n    readonly channelWeights: ChannelWeights;\n    readonly exploration: {\n        readonly budget: number;\n        readonly used: number;\n        readonly total: number;\n        readonly graduated: number;\n        readonly expired: number;\n        readonly validated: number;\n        readonly refuted: number;\n        readonly avgValidationError: number | null;\n        readonly tasks: {\n            readonly pending: number;\n            readonly running: number;\n            readonly completed: number;\n            readonly failed: number;\n        };\n    };\n    readonly loops: readonly CognitiveLoopStats[];\n    readonly loopExecutions: readonly LoopExecutionReceipt[];\n    readonly acceptance: {\n        readonly checkCount: number;\n        readonly activeCount: number;\n        readonly retiredCount: number;\n        readonly invokedCount: number;\n        readonly passedCount: number;\n        readonly violatedCount: number;\n        readonly deviationRate: number | null;\n        readonly reworkCheckIds: readonly string[];\n    };\n    readonly recentAudits: readonly ClaimAudit[];\n    readonly recentResolved: readonly Prediction[];\n}',
   },
   {
     name: 'InvariantFailure',
@@ -3463,6 +3642,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export class LlmRuntime extends Service {\n    constructor(ctx: Context);\n    registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle;\n    listProviders(): LlmProviderInfo[];\n    registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle;\n    listConfigurableProviders(): LlmConfigurableProvider[];\n    registerModelDiscovery(settingsNs: string, discover: (request: LlmModelDiscoveryRequest) => Promise<readonly LlmDiscoveredModel[]>): () => void;\n    async discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest): Promise<LlmDiscoveredModel[]>;\n    providerRetryPolicy(provider: string): ResolvedRetryPolicy;\n    async listModels(provider: string): Promise<LlmModelInfo[]>;\n    async resolveModelInfo(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async resolveCallConfig(config: LlmCallConfig, signal?: AbortSignal): Promise<LlmCallConfig>;\n    async prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<PreparedLlmCall>;\n    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
   },
   {
+    name: 'LoopExecutionReceipt',
+    declaration: 'export interface LoopExecutionReceipt {\n    readonly receiptId: string;\n    readonly loopName: string;\n    readonly predictionId: string;\n    readonly target: string;\n    readonly decision: string;\n    readonly situation: string;\n    readonly rejected: boolean;\n    readonly reason: string | null;\n    readonly createdAt: number;\n    readonly status: \'executed\' | \'failed\' | null;\n    readonly settledAt: number | null;\n    readonly outcomeText: string | null;\n    readonly outcomeQuality: number | null;\n}',
+  },
+  {
+    name: 'LoopExecutionRequest',
+    declaration: 'export interface LoopExecutionRequest {\n    readonly loopName: string;\n    readonly decision: string;\n    readonly situation: string;\n    readonly approved: boolean;\n    readonly probability: number;\n    readonly confidenceLow: number;\n    readonly confidenceHigh: number;\n    readonly predictionId: string;\n}',
+  },
+  {
+    name: 'LoopExecutionSink',
+    declaration: 'export interface LoopExecutionSink {\n    readonly target: string;\n    readonly apply: (request: LoopExecutionRequest) => string | null | void | Promise<string | null | void>;\n}',
+  },
+  {
     name: 'LspHover',
     declaration: 'export interface LspHover {\n    readonly contents: string;\n    readonly range?: LspRange;\n}',
   },
@@ -3599,6 +3790,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface MessageSourceMap {\n    user: {\n        kind: \'user\';\n    };\n    plugin: {\n        kind: \'plugin\';\n        plugin: string;\n    } & ContextFormed;\n    model: ModelMessageSource;\n    tool: ToolMessageSource;\n}',
   },
   {
+    name: 'MetaLoopSpec',
+    declaration: 'export interface MetaLoopSpec {\n    readonly name: string;\n    readonly description: string;\n    readonly execution?: readonly LoopExecutionSink[];\n}',
+  },
+  {
     name: 'ModelMessageSource',
     declaration: 'export interface ModelMessageSource extends AssistantProvenance {\n    kind: \'model\';\n}',
   },
@@ -3640,11 +3835,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'Prediction',
-    declaration: 'export interface Prediction {\n    readonly predictionId: string;\n    readonly expId: string | null;\n    readonly situation: string;\n    readonly action: string;\n    readonly predictedOutcome: string;\n    readonly rawProbability: number;\n    readonly calibratedProbability: number;\n    readonly confidenceLow: number;\n    readonly confidenceHigh: number;\n    readonly isNovel: boolean;\n    readonly usedTempStrategy: boolean;\n    readonly clusterId: number | null;\n    readonly timestamp: number;\n    readonly actualOutcome: string | null;\n    readonly predictionError: number | null;\n    readonly resolvedAt: number | null;\n}',
+    declaration: 'export interface Prediction {\n    readonly predictionId: string;\n    readonly expId: string | null;\n    readonly situation: string;\n    readonly action: string;\n    readonly predictedOutcome: string;\n    readonly rawProbability: number;\n    readonly calibratedProbability: number;\n    readonly confidenceLow: number;\n    readonly confidenceHigh: number;\n    readonly isNovel: boolean;\n    readonly usedTempStrategy: boolean;\n    readonly clusterId: number | null;\n    readonly exploredActionHash: string | null;\n    readonly timestamp: number;\n    readonly actualOutcome: string | null;\n    readonly predictionError: number | null;\n    readonly resolvedAt: number | null;\n    readonly fusion: {\n        readonly scores: readonly number[];\n    } | null;\n}',
   },
   {
     name: 'PredictResult',
-    declaration: 'export interface PredictResult {\n    readonly predictionId: string;\n    readonly advice: string;\n    readonly rawProbability: number;\n    readonly calibratedProbability: number;\n    readonly confidenceLow: number;\n    readonly confidenceHigh: number;\n    readonly isNovel: boolean;\n    readonly oodSignal: \'none\' | \'low-similarity\' | \'flat-top\' | \'high-strangeness\';\n    readonly topHitCount: number;\n    readonly usedTempStrategy: boolean;\n    readonly clusterId: number | null;\n}',
+    declaration: 'export interface PredictResult {\n    readonly predictionId: string;\n    readonly advice: string;\n    readonly rawProbability: number;\n    readonly calibratedProbability: number;\n    readonly confidenceLow: number;\n    readonly confidenceHigh: number;\n    readonly isNovel: boolean;\n    readonly oodSignal: \'none\' | \'low-similarity\' | \'flat-top\' | \'high-strangeness\';\n    readonly topHitCount: number;\n    readonly usedTempStrategy: boolean;\n    readonly clusterId: number | null;\n    readonly successReference: SuccessReference | null;\n    readonly taxonomyContext: TaxonomyContext;\n}',
   },
   {
     name: 'PreparedLlmCall',
@@ -3740,7 +3935,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'RebuildResult',
-    declaration: 'export interface RebuildResult {\n    readonly scope: \'local\' | \'global\';\n    readonly accepted: boolean;\n    readonly oldError: number | null;\n    readonly newError: number | null;\n    readonly deltaError: number | null;\n    readonly clusterCount: number;\n    readonly rejectedClusters: number;\n    readonly sampleCount: number;\n    readonly reason: string;\n    readonly taxonomyVersion: number;\n}',
+    declaration: 'export interface RebuildResult {\n    readonly scope: \'local\' | \'global\';\n    readonly accepted: boolean;\n    readonly deferred: boolean;\n    readonly oldError: number | null;\n    readonly newError: number | null;\n    readonly deltaError: number | null;\n    readonly clusterCount: number;\n    readonly rejectedClusters: number;\n    readonly sampleCount: number;\n    readonly reason: string;\n    readonly taxonomyVersion: number;\n}',
   },
   {
     name: 'RedactedSecret',
@@ -3772,11 +3967,15 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ResolvedCognitivePipelineConfig',
-    declaration: 'export interface ResolvedCognitivePipelineConfig {\n    readonly root: string;\n    readonly enabled: boolean;\n    readonly route: CognitiveLlmRoute;\n    readonly hot: HotEngineConfig;\n    readonly cold: ColdEngineConfig;\n    readonly tempStrategyHitThreshold: number;\n    readonly tempStrategyPositiveRatio: number;\n    readonly emergencyErrorThreshold: number;\n}',
+    declaration: 'export interface ResolvedCognitivePipelineConfig {\n    readonly root: string;\n    readonly enabled: boolean;\n    readonly route: CognitiveLlmRoute;\n    readonly hot: HotEngineConfig;\n    readonly cold: ColdEngineConfig;\n    readonly tempStrategyHitThreshold: number;\n    readonly tempStrategyPositiveRatio: number;\n    readonly emergencyErrorThreshold: number;\n    readonly simulationFastTrackThreshold: number;\n    readonly simulationPermanentThreshold: number;\n    readonly simulationTtlMs: number;\n    readonly autoAccumulate: boolean;\n    readonly acceptanceMinEvidenceCount: number;\n    readonly acceptanceDeviationThreshold: number;\n    readonly embedding: ResolvedEmbeddingConfig | null;\n    readonly exploreDailyBudget: number;\n    readonly exploreRiskWords: readonly string[];\n    readonly exploreAutoDispatch: boolean;\n    readonly exploreValidationLearningRate: number;\n    readonly exploreValidationErrorThreshold: number;\n}',
   },
   {
     name: 'ResolvedCredential',
     declaration: 'export interface ResolvedCredential {\n    value: string;\n    source: string;\n}',
+  },
+  {
+    name: 'ResolvedEmbeddingConfig',
+    declaration: 'export interface ResolvedEmbeddingConfig {\n    readonly baseUrl: string;\n    readonly model: string;\n    readonly apiKeyEnv: string;\n    readonly apiKey?: string;\n}',
   },
   {
     name: 'ResolvedNormalRetryPolicy',
@@ -3821,6 +4020,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'RpcReceipt',
     declaration: 'export type RpcReceipt = {\n    accepted: true;\n} | {\n    accepted: false;\n    reason: \'not-pending\' | \'bad-response\';\n};',
+  },
+  {
+    name: 'RpcRequest',
+    declaration: 'export interface RpcRequest<P> {\n    rpcId: RpcId;\n    payload: P;\n}',
+  },
+  {
+    name: 'RpcResponse',
+    declaration: 'export interface RpcResponse<T> {\n    rpcId: RpcId;\n    result: RpcResult<T>;\n}',
   },
   {
     name: 'RpcResult',
@@ -3897,6 +4104,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SearchResultView',
     declaration: 'export type SearchResultView = SearchMatchesResultView | SearchPathsResultView;',
+  },
+  {
+    name: 'SemanticScorer',
+    declaration: 'export interface SemanticScorer {\n    score(queryText: string, exp: Experience): number;\n}',
   },
   {
     name: 'ServerResponse',
@@ -4191,6 +4402,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ShellSandboxInfo {\n    mode: SandboxMode;\n    denied: boolean;\n    enforcement?: SandboxEnforcement;\n    runnerFailed?: boolean;\n}',
   },
   {
+    name: 'SimulateInput',
+    declaration: 'export interface SimulateInput {\n    readonly situation: string;\n    readonly action: string;\n}',
+  },
+  {
     name: 'SkillCandidate',
     declaration: 'export interface SkillCandidate extends SkillSummary {\n    readonly rank: number;\n    readonly locator: unknown;\n    readonly path?: string;\n    readonly metadata?: Readonly<Record<string, unknown>>;\n}',
   },
@@ -4399,6 +4614,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SubprocessTerminalSpawnSpec {\n    argv: readonly string[];\n    cwd: string;\n    env?: Record<string, string> | undefined;\n    rows: number;\n    cols: number;\n    graceMs: number;\n    signal?: AbortSignal | undefined;\n}',
   },
   {
+    name: 'SuccessReference',
+    declaration: 'export interface SuccessReference {\n    readonly clusterId: number;\n    readonly clusterName: string;\n    readonly decisionRule: string;\n    readonly utilityRange: UtilityRange;\n}',
+  },
+  {
     name: 'SurfaceEvent',
     declaration: 'export type SurfaceEvent = SessionEvent<SurfaceEventType> & {\n    surfaceOp: SurfaceOp;\n};',
   },
@@ -4423,8 +4642,12 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type TableValueOf<S extends DomainSpec, N extends keyof S[\'tables\']> = S[\'tables\'][N] extends DomainTableSpec<string, infer V> ? V : never;',
   },
   {
+    name: 'TaxonomyContext',
+    declaration: 'export interface TaxonomyContext {\n    readonly cluster: {\n        readonly clusterId: number;\n        readonly name: string;\n        readonly decisionRule: string;\n        readonly polarity: \'success\' | \'risk\';\n    } | null;\n    readonly similarity: number;\n    readonly margin: number;\n    readonly coverage: \'covered\' | \'gap\' | \'no-taxonomy\';\n}',
+  },
+  {
     name: 'TaxonomyRule',
-    declaration: 'export interface TaxonomyRule {\n    readonly condition: string;\n    readonly action: string;\n    readonly utilityRange: UtilityRange;\n}',
+    declaration: 'export interface TaxonomyRule {\n    readonly condition: string;\n    readonly action: string;\n    readonly utilityRange: UtilityRange;\n    readonly polarity: \'success\' | \'risk\';\n}',
   },
   {
     name: 'TaxonomyState',
@@ -4657,6 +4880,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'TurnEndReasonMap',
     declaration: 'export interface TurnEndReasonMap {\n    completed: {\n        kind: \'completed\';\n    };\n    aborted: {\n        kind: \'aborted\';\n        reason: TurnEndCancelCause;\n    };\n    blocked: {\n        kind: \'blocked\';\n    };\n    error: {\n        kind: \'error\';\n        error: LlmFailure;\n    };\n    \'max-tokens\': {\n        kind: \'max-tokens\';\n    };\n    interrupted: {\n        kind: \'interrupted\';\n    };\n}',
+  },
+  {
+    name: 'TurnEpisode',
+    declaration: 'export interface TurnEpisode {\n    readonly situation: string;\n    readonly action: string;\n    readonly outcome: string;\n    readonly toolCallCount: number;\n    readonly failed: boolean;\n    readonly turnId: number;\n}',
   },
   {
     name: 'TypertCodec',

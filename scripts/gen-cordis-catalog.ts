@@ -503,6 +503,13 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   CalibrationBucket: 'cognitive-pipeline.md',
   TaxonomyState: 'cognitive-pipeline.md',
   TempStrategy: 'cognitive-pipeline.md',
+  AcceptanceCheck: 'cognitive-pipeline.md',
+  ClaimAudit: 'cognitive-pipeline.md',
+  ExplorationTask: 'cognitive-pipeline.md',
+  LoopExecutionReceipt: 'cognitive-pipeline.md',
+  LoopExecutionSink: 'cognitive-pipeline.md',
+  MetaLoopSpec: 'cognitive-pipeline.md',
+  TurnEpisode: 'cognitive-pipeline.md',
 }
 
 /** TypeScript lib and pinned framework types with no repository-owned data page. */

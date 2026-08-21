@@ -1,8 +1,10 @@
 /**
  * Model-facing tools over the cognitive pipeline: `remember_experience`,
- * `simulate_experience`, `predict_outcome`, `report_outcome`,
- * `rebuild_taxonomy`, and `inspect_memory`. Every tool returns one canonical
- * JSON value; `output.render` mirrors it into model-facing text.
+ * `simulate_experience`, `reference_experience`, `predict_outcome`,
+ * `report_outcome`, `rebuild_taxonomy`, `inspect_memory`, `register_loop`,
+ * `define_acceptance_check`, `verify_claim`, and `update_acceptance_check`.
+ * Every tool returns one canonical JSON value; `output.render` mirrors it into
+ * model-facing text.
  * @module @deepseek-ai/dsh-cognitive-pipeline/tools
  */
 
@@ -23,7 +25,7 @@ function renderJson(_args: unknown, value: unknown): { type: 'text'; text: strin
   return [{ type: 'text', text: JSON.stringify(value) }]
 }
 
-/** Register the six pipeline tools.
+/** Register the eleven pipeline tools.
  * @param ctx - context with the tool registry.
  * @param service - the pipeline service backing the tools.
  */
@@ -567,6 +569,45 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
               },
             },
           },
+          acceptance: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            properties: {
+              check_count: { type: 'number', required: true },
+              active_count: { type: 'number', required: true },
+              retired_count: { type: 'number', required: true },
+              invoked_count: { type: 'number', required: true },
+              passed_count: { type: 'number', required: true },
+              violated_count: { type: 'number', required: true },
+              // -1 when nothing was invoked yet (the deviation rate is undefined).
+              deviation_rate: { type: 'number', required: true },
+              rework_check_ids: {
+                type: 'array',
+                required: true,
+                items: { type: 'string' },
+              },
+            },
+          },
+          recent_audits: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                audit_id: { type: 'string', required: true },
+                claim: { type: 'string', required: true },
+                verdict: {
+                  type: 'string',
+                  required: true,
+                  enum: ['verified', 'violated', 'not-applicable'],
+                },
+                rework_needed: { type: 'boolean', required: true },
+                deviation_exp_id: { type: 'string', required: true },
+              },
+            },
+          },
         },
       },
       render: renderJson,
@@ -630,6 +671,25 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           status: receipt.status ?? 'submitted',
           outcome_quality: receipt.outcomeQuality ?? -1,
         })),
+        acceptance: {
+          check_count: result.acceptance.checkCount,
+          active_count: result.acceptance.activeCount,
+          retired_count: result.acceptance.retiredCount,
+          invoked_count: result.acceptance.invokedCount,
+          passed_count: result.acceptance.passedCount,
+          violated_count: result.acceptance.violatedCount,
+          deviation_rate: result.acceptance.deviationRate === null
+            ? -1
+            : Number(result.acceptance.deviationRate.toFixed(3)),
+          rework_check_ids: [...result.acceptance.reworkCheckIds],
+        },
+        recent_audits: result.recentAudits.map(audit => ({
+          audit_id: audit.auditId,
+          claim: audit.claim,
+          verdict: audit.verdict,
+          rework_needed: audit.reworkNeeded,
+          deviation_exp_id: audit.deviationExpId ?? '',
+        })),
       })
     },
     presentCall: () => ({ card: 'generic', title: 'Inspect cognitive memory', kind: 'read' }),
@@ -671,5 +731,202 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
       return Promise.resolve({ name: args.name, registered: true })
     },
     presentCall: args => ({ card: 'generic', title: `Register cognitive loop ${args.name}`, kind: 'other' }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'define_acceptance_check',
+    description: 'Define one acceptance criterion: a reusable verification norm the agent audits claims against '
+      + 'before treating them as settled, e.g. "claims of completion must cite evidence". The pipeline records '
+      + 'evidence PRESENCE, never evidence truth — it cannot verify its own claims; truth is adjudicated by the '
+      + 'resolved outcome and the user. The criterion is active immediately with an empty evidence ledger; its '
+      + 'track record (invoked/passed/violated/error) can never be reset.',
+    parameters: {
+      criterion: {
+        type: 'string',
+        required: true,
+        description: 'The norm as a testable statement, e.g. "声称完成前必须给出证据来源".',
+      },
+      trigger: {
+        type: 'string',
+        required: true,
+        description: 'Situation marker selecting this check: an audit applies it when the marker appears in the '
+          + 'claim or its situation text.',
+      },
+      evidence_hint: {
+        type: 'string',
+        required: true,
+        description: 'What evidence a claim must carry to satisfy the criterion.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          check_id: { type: 'string', required: true },
+          criterion: { type: 'string', required: true },
+          trigger: { type: 'string', required: true },
+          evidence_hint: { type: 'string', required: true },
+          revision: { type: 'number', required: true },
+        },
+      },
+      render: renderJson,
+    },
+    async execute(args) {
+      const check = await service.defineAcceptanceCheck({
+        criterion: args.criterion,
+        trigger: args.trigger,
+        evidenceHint: args.evidence_hint,
+      })
+      return {
+        check_id: check.checkId,
+        criterion: check.criterion,
+        trigger: check.trigger,
+        evidence_hint: check.evidenceHint,
+        revision: check.revision,
+      }
+    },
+    presentCall: args => ({ card: 'generic', title: 'Define acceptance check', kind: 'other', rawInput: args.criterion }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'verify_claim',
+    description: 'Audit one claim against the active acceptance criteria before treating it as settled. '
+      + 'Applicable checks are those whose trigger marker appears in the claim or its situation; a claim with '
+      + 'no applicable check audits as not-applicable. An applicable check is satisfied when the claim carries '
+      + 'evidence (non-empty), violated when it does not — presence, not truth. Violated checks accumulate in '
+      + 'the criterion ledger, and a criterion whose invoked count clears the evidence minimum while its '
+      + 'deviation rate crosses the threshold flags rework_needed and records one deviation meta experience. '
+      + 'Pass prediction_id when a predict_outcome exists for the claim: its report_outcome feedback then folds '
+      + 'the prediction error into the violated criteria, measuring "claims without verification" on the same '
+      + 'ruler as every prediction.',
+    parameters: {
+      claim: {
+        type: 'string',
+        required: true,
+        description: 'The claim being made, e.g. "管线已学会验收标准".',
+      },
+      situation: {
+        type: 'string',
+        required: true,
+        description: 'The context the claim is made in.',
+      },
+      evidence: {
+        type: 'string',
+        description: 'The verification statement backing the claim; omit or leave empty when the claim is '
+          + 'made without evidence.',
+      },
+      prediction_id: {
+        type: 'string',
+        description: 'Optional prediction_id from predict_outcome that this claim is about; its feedback '
+          + 'folds into violated criteria.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          audit_id: { type: 'string', required: true },
+          verdict: {
+            type: 'string',
+            required: true,
+            enum: ['verified', 'violated', 'not-applicable'],
+          },
+          applied_check_ids: {
+            type: 'array',
+            required: true,
+            items: { type: 'string' },
+          },
+          satisfied_check_ids: {
+            type: 'array',
+            required: true,
+            items: { type: 'string' },
+          },
+          violated_check_ids: {
+            type: 'array',
+            required: true,
+            items: { type: 'string' },
+          },
+          rework_needed: { type: 'boolean', required: true },
+          deviation_exp_id: { type: 'string', required: true },
+        },
+      },
+      render: renderJson,
+    },
+    async execute(args) {
+      const audit = await service.auditClaim({
+        claim: args.claim,
+        situation: args.situation,
+        ...args.evidence === undefined || args.evidence.length === 0 ? {} : { evidence: args.evidence },
+        ...args.prediction_id === undefined || args.prediction_id.length === 0 ? {} : { predictionId: args.prediction_id },
+      })
+      return {
+        audit_id: audit.auditId,
+        verdict: audit.verdict,
+        applied_check_ids: [...audit.appliedCheckIds],
+        satisfied_check_ids: [...audit.satisfiedCheckIds],
+        violated_check_ids: [...audit.violatedCheckIds],
+        rework_needed: audit.reworkNeeded,
+        deviation_exp_id: audit.deviationExpId ?? '',
+      }
+    },
+    presentCall: args => ({ card: 'generic', title: 'Verify claim', kind: 'other', rawInput: args.claim }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'update_acceptance_check',
+    description: 'Rewrite an active acceptance criterion\'s statement or evidence hint, or retire it. A retired '
+      + 'criterion is frozen: its evidence ledger is never reset and audits no longer apply it — criteria are '
+      + 'revisable, their track record is not (the evidence gate of acceptance-criterion change).',
+    parameters: {
+      check_id: {
+        type: 'string',
+        required: true,
+        description: 'The acceptance criterion id from define_acceptance_check.',
+      },
+      criterion: {
+        type: 'string',
+        description: 'New criterion statement.',
+      },
+      evidence_hint: {
+        type: 'string',
+        description: 'New evidence hint.',
+      },
+      retire: {
+        type: 'boolean',
+        description: 'Set true to freeze the criterion as retired (terminal; cannot be un-retired).',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          check_id: { type: 'string', required: true },
+          status: { type: 'string', required: true, enum: ['active', 'retired'] },
+          criterion: { type: 'string', required: true },
+          evidence_hint: { type: 'string', required: true },
+          revision: { type: 'number', required: true },
+        },
+      },
+      render: renderJson,
+    },
+    async execute(args) {
+      const check = await service.updateAcceptanceCheck({
+        checkId: args.check_id,
+        ...args.criterion === undefined || args.criterion.length === 0 ? {} : { criterion: args.criterion },
+        ...args.evidence_hint === undefined || args.evidence_hint.length === 0 ? {} : { evidenceHint: args.evidence_hint },
+        ...args.retire === undefined ? {} : { retire: args.retire },
+      })
+      return {
+        check_id: check.checkId,
+        status: check.status,
+        criterion: check.criterion,
+        evidence_hint: check.evidenceHint,
+        revision: check.revision,
+      }
+    },
+    presentCall: args => ({ card: 'generic', title: `Update acceptance check ${args.check_id}`, kind: 'other' }),
   }))
 }

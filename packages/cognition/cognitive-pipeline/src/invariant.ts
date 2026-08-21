@@ -1,7 +1,8 @@
 /**
  * Package-owned invariant companion for `@deepseek-ai/dsh-cognitive-pipeline`.
- * Verifies the store's probability and vector-dimension contracts whenever
- * the pipeline service is mounted alongside the invariant registry.
+ * Verifies the store's probability, vector-dimension, and acceptance-ledger
+ * contracts whenever the pipeline service is mounted alongside the invariant
+ * registry.
  * @module @deepseek-ai/dsh-cognitive-pipeline/invariant
  */
 
@@ -48,6 +49,28 @@ const install: InvariantInstaller = (ctx: Context, fail: (message: string) => ne
     // trusted; the centroid dimension is still a live runtime contract.
     if (!Array.isArray(cluster.situationCentroid) || cluster.situationCentroid.length !== ACTION_VECTOR_DIM) {
       fail(`cluster ${cluster.clusterId} has situationCentroid of ${cluster.situationCentroid.length} (expected ${ACTION_VECTOR_DIM})`)
+    }
+  }
+  for (const check of service.store.acceptanceSnapshot()) {
+    // Every audit bumps invoked by exactly one and passed XOR violated by one,
+    // so the ledger must stay integer and the partition sound.
+    if (!Number.isInteger(check.invokedCount) || check.invokedCount < 0
+      || !Number.isInteger(check.passedCount) || check.passedCount < 0
+      || !Number.isInteger(check.violatedCount) || check.violatedCount < 0) {
+      fail(`acceptance check ${check.checkId} has a negative or non-integer count`)
+    }
+    if (check.passedCount + check.violatedCount > check.invokedCount) {
+      fail(`acceptance check ${check.checkId} has passed+violated exceeding invoked`)
+    }
+    if (check.cumulativeError < 0 || !Number.isInteger(check.errorFoldCount) || check.errorFoldCount < 0) {
+      fail(`acceptance check ${check.checkId} has an invalid error ledger`)
+    }
+  }
+  for (const audit of service.store.claimAuditsSnapshot()) {
+    // An audit's verdict partition must agree with its check-id lists.
+    const violated = audit.violatedCheckIds.length > 0
+    if ((audit.verdict === 'violated') !== violated && audit.verdict !== 'not-applicable') {
+      fail(`claim audit ${audit.auditId} has a verdict/check-list mismatch`)
     }
   }
 }

@@ -9,8 +9,10 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type {
+  AcceptanceCheck,
   CalibrationBucket,
   ChannelWeights,
+  ClaimAudit,
   Cluster,
   Experience,
   ExploreEntry,
@@ -105,11 +107,15 @@ export class CognitiveStore {
   private explorationState: ExplorationState = { date: todayKey(), used: 0, entries: [] }
   private explorationTasks = new Map<string, ExplorationTask>()
   private loopExecutions = new Map<string, LoopExecutionReceipt>()
+  private acceptance = new Map<string, AcceptanceCheck>()
+  private claimAudits = new Map<string, ClaimAudit>()
   private taxonomyState: TaxonomyState | null = null
   private nextExpSeq = 1
   private nextPredictionSeq = 1
   private nextClusterSeq = 1
   private nextTaskSeq = 1
+  private nextAcceptanceSeq = 1
+  private nextAuditSeq = 1
 
   /**
    * @param root - directory that will hold the JSONL/JSON state files.
@@ -127,7 +133,8 @@ export class CognitiveStore {
     await mkdir(this.root, { recursive: true })
     const [
       experiences, predictions, tempStrategies, clusters, calibration,
-      channelWeights, exploration, tasks, loopExecutions, taxonomy,
+      channelWeights, exploration, tasks, loopExecutions, acceptance,
+      claimAudits, taxonomy,
     ] = await Promise.all([
       readFile(this.file('experiences.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('predictions.jsonl'), 'utf8').catch(() => ''),
@@ -138,6 +145,8 @@ export class CognitiveStore {
       readFile(this.file('exploration.json'), 'utf8').catch(() => ''),
       readFile(this.file('exploration_tasks.json'), 'utf8').catch(() => ''),
       readFile(this.file('loop_executions.jsonl'), 'utf8').catch(() => ''),
+      readFile(this.file('acceptance.json'), 'utf8').catch(() => ''),
+      readFile(this.file('claim_audits.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('taxonomy.json'), 'utf8').catch(() => ''),
     ])
     for (const record of parseLines(experiences)) {
@@ -233,6 +242,27 @@ export class CognitiveStore {
       const receipt = record as LoopExecutionReceipt
       if (typeof receipt.receiptId !== 'string' || typeof receipt.predictionId !== 'string') continue
       this.loopExecutions.set(receipt.receiptId, receipt)
+    }
+    if (acceptance !== '') {
+      const parsed = JSON.parse(acceptance) as unknown
+      if (Array.isArray(parsed)) {
+        for (const record of parsed) {
+          if (typeof record !== 'object' || record === null) continue
+          const check = record as AcceptanceCheck
+          if (typeof check.checkId !== 'string' || typeof check.criterion !== 'string') continue
+          this.acceptance.set(check.checkId, check)
+          const seq = Number(check.checkId.replace('check_', ''))
+          if (Number.isFinite(seq)) this.nextAcceptanceSeq = Math.max(this.nextAcceptanceSeq, seq + 1)
+        }
+      }
+    }
+    for (const record of parseLines(claimAudits)) {
+      if (typeof record !== 'object' || record === null) continue
+      const audit = record as ClaimAudit
+      if (typeof audit.auditId !== 'string' || typeof audit.claim !== 'string') continue
+      this.claimAudits.set(audit.auditId, audit)
+      const seq = Number(audit.auditId.replace('audit_', ''))
+      if (Number.isFinite(seq)) this.nextAuditSeq = Math.max(this.nextAuditSeq, seq + 1)
     }
     if (taxonomy !== '') {
       const parsed = JSON.parse(taxonomy) as unknown
@@ -773,6 +803,124 @@ export class CognitiveStore {
     }
     this.loopExecutions.set(receiptId, next)
     this.enqueueLines('loop_executions.jsonl', [...this.loopExecutions.values()])
+    return next
+  }
+
+  // ── acceptance criteria + claim audits ───────────────────────────────────
+
+  /** Allocate the next acceptance-check id.
+   * @returns `check_<n>`.
+   */
+  nextAcceptanceCheckId(): string {
+    const id = `check_${this.nextAcceptanceSeq}`
+    this.nextAcceptanceSeq += 1
+    return id
+  }
+
+  /** Allocate the next claim-audit id.
+   * @returns `audit_<n>`.
+   */
+  nextAuditId(): string {
+    const id = `audit_${this.nextAuditSeq}`
+    this.nextAuditSeq += 1
+    return id
+  }
+
+  /** Store one acceptance criterion and enqueue its persistence.
+   * @param check - the criterion to add.
+   */
+  addAcceptanceCheck(check: AcceptanceCheck): void {
+    this.acceptance.set(check.checkId, check)
+    this.enqueue('acceptance.json', [...this.acceptance.values()])
+  }
+
+  /** Read one acceptance criterion by id.
+   * @param checkId - the criterion id.
+   * @returns the criterion, or undefined.
+   */
+  getAcceptanceCheck(checkId: string): AcceptanceCheck | undefined {
+    return this.acceptance.get(checkId)
+  }
+
+  /** Snapshot of every acceptance criterion, insertion order. */
+  acceptanceSnapshot(): readonly AcceptanceCheck[] {
+    return [...this.acceptance.values()]
+  }
+
+  /** Apply a partial patch to one acceptance criterion. The domain freeze
+   * (retired checks are immutable) is enforced by the service layer; the store
+   * applies any patch it receives.
+   * @param checkId - the criterion id.
+   * @param patch - the fields to replace.
+   * @returns the updated criterion.
+   */
+  updateAcceptanceCheck(checkId: string, patch: Partial<AcceptanceCheck>): AcceptanceCheck {
+    const current = this.acceptance.get(checkId)
+    if (current === undefined) {
+      throw new Error(`cognitive-pipeline: acceptance check "${checkId}" not found`)
+    }
+    const next: AcceptanceCheck = { ...current, ...patch }
+    this.acceptance.set(checkId, next)
+    this.enqueue('acceptance.json', [...this.acceptance.values()])
+    return next
+  }
+
+  /** Record one claim audit and enqueue its persistence.
+   * @param audit - the audit to add (id must be unique).
+   */
+  recordClaimAudit(audit: ClaimAudit): void {
+    this.claimAudits.set(audit.auditId, audit)
+    this.enqueueLines('claim_audits.jsonl', [...this.claimAudits.values()])
+  }
+
+  /** Snapshot of every claim audit, insertion order. */
+  claimAuditsSnapshot(): readonly ClaimAudit[] {
+    return [...this.claimAudits.values()]
+  }
+
+  /** Fold one audit's verdict into one criterion's evidence ledger: invoked
+   * always increments, and the audit counts as passed (evidence present) or
+   * violated (no evidence).
+   * @param checkId - the applied criterion.
+   * @param passed - whether the claim carried evidence for it.
+   * @returns the updated criterion.
+   */
+  applyAuditStats(checkId: string, passed: boolean): AcceptanceCheck {
+    const current = this.acceptance.get(checkId)
+    if (current === undefined) {
+      throw new Error(`cognitive-pipeline: acceptance check "${checkId}" not found`)
+    }
+    const next: AcceptanceCheck = {
+      ...current,
+      invokedCount: current.invokedCount + 1,
+      passedCount: current.passedCount + (passed ? 1 : 0),
+      violatedCount: current.violatedCount + (passed ? 0 : 1),
+    }
+    this.acceptance.set(checkId, next)
+    this.enqueue('acceptance.json', [...this.acceptance.values()])
+    return next
+  }
+
+  /** Fold one resolved prediction's |calibrated − observed| error into a
+   * criterion's deviation ledger. Only called for audits that violated the
+   * criterion, so the ledger measures "claims made without verification
+   * correlate with prediction error" on the same ruler as every prediction.
+   * @param checkId - the violated criterion.
+   * @param predictionError - the resolved prediction's absolute error in [0, 1].
+   * @returns the updated criterion.
+   */
+  foldAcceptanceError(checkId: string, predictionError: number): AcceptanceCheck {
+    const current = this.acceptance.get(checkId)
+    if (current === undefined) {
+      throw new Error(`cognitive-pipeline: acceptance check "${checkId}" not found`)
+    }
+    const next: AcceptanceCheck = {
+      ...current,
+      cumulativeError: current.cumulativeError + predictionError,
+      errorFoldCount: current.errorFoldCount + 1,
+    }
+    this.acceptance.set(checkId, next)
+    this.enqueue('acceptance.json', [...this.acceptance.values()])
     return next
   }
 

@@ -2,8 +2,9 @@
  * Prediction-error-driven dynamic cognition (DCA-PED) as a harness plugin:
  * SAR experience memory, a hot-loop online predictor with OOD detection and
  * five-layer confidence calibration, a temp-strategy scratchpad, simulated
- * experience generation, and a cold-loop taxonomy rebuild gated by sandbox
- * backtesting. The plugin exposes six model-facing tools, the
+ * experience generation, a cold-loop taxonomy rebuild gated by sandbox
+ * backtesting, meta-cognition loops, and acceptance-criteria claim audits.
+ * The plugin exposes eleven model-facing tools, the
  * `ctx.cognitivePipeline` service, and a dynamic `cognition:taxonomy`
  * system-prompt section.
  *

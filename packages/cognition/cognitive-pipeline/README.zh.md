@@ -21,6 +21,7 @@
 - **临时工作区 (episodic scratchpad)** — OOD 行动创建带 24 小时 TTL 的 `temp_strategies`；命中即复用；命中 ≥3 次且正反馈率 ≥66.7% 时晋升为下轮重建的标签种子。**主动探索 (active exploration, scheme 2)** 为其加上纪律：novel 试探创建 scratchpad 时，只有**动作可逆**（安全闸：`exploreRiskWords` 中的删除/发布/推送等不可逆标记永不消耗预算）且当日预算（`exploreDailyBudget`）未耗尽才计入探索配额，建议文本标注预算（`主动探索（今日预算 n/N）`，或 `探索预算已耗尽` / `动作不可逆`），并在 `exploration.json` 追踪结果：晋升的 scratchpad 是成功探索、过期的是失败——形成 inspect 可见的 ROI 账本。账本随后被**实战验证**：之后每次复用该 scratchpad 的预测，都会把真实的 `|calibrated − observed|` 误差按 EWMA（`exploreValidationLearningRate`）折回条目的 `validatedError`；一旦该 EWMA 低于或越过 `exploreValidationErrorThreshold`，条目翻转为 `validated`/`refuted`。晋升说明一个策略**成为了记忆**；验证说明复用它**确实降低了预测误差**——用与所有其他预测相同的尺子闭合元认知环路。
 - **模拟经验 (simulated experiences)** — `simulate_experience` 在真实测试成本高或不可行时，经 LLM 路由生成仅检索、未验证的候选经验。在真实反馈按**证据替代模型**验证前不塑造任何簇：一次决定性反馈快速晋升为临时 verified，累计证据升级为永久 verified，临时态遇矛盾回滚，未验证模拟在兜底 TTL 后过期。这镜像人类的现实监控——心理预演只提供建议，真做过后才成为记忆。
 - **参考经验 (reference experiences)** — `reference_experience` 是第二个冷启动来源：不推演假设结果，而是检索最相似的既有历史，请 LLM 路由归纳其**共同模式**（"这类情境通常如何解决"），并把该泛化写为仅检索的模拟候选，走与 `simulate_experience` 相同的证据替代生命周期。它从已发生的事泛化而非猜测可能发生的事；当没有锚点通过过滤器（低于 `referenceMinSimilarity`，或仅有模拟经验）时，派生被确定性拒绝（不调用 LLM）——参考经验绝不无中生有。
+- **验收清单 (acceptance criteria)** — `define_acceptance_check` / `verify_claim` / `update_acceptance_check`：可复用的验证规范，智能体在把声明当作既成事实前对其执行审计。审计应用 trigger 标记出现在声明或其情境文本中的活跃准则；声明携带证据（非空）即满足、否则违规——管线判断的是证据的**存在性**，而非证据的**真伪**（它无法验证自己的声明；真伪由解析结果与用户裁决）。准则持有只增不减的证据账本（`acceptance.json`）：invoked/passed/violated 计数，外加 `cumulativeError`/`errorFoldCount`——任何被审计且违规的已解析预测，其 `|calibrated − observed|` 都会折入对应准则——"未经验证的声明"与所有预测用同一把尺子计量（验收回流）。准则的 invoked 计数越过 `acceptanceMinEvidenceCount` 且违规率越过 `acceptanceDeviationThreshold` 时标记 `rework_needed` 并记录一条偏离元经验，让冷环路能聚类管线自身的验收失败模式。准则可改写（`revision` 递增）但账本不可清零；退役即冻结——审计不再应用它，账本永不重置。`inspect_memory` 报告账本与改写/退役候选。
 - **元认知环路 (meta-cognition loops, 造新环路)** — 此前三层特殊经验层（policy:* 委派决策、主动探索、探索验证）背后的可复用抽象：**具名环路**是一条声明式决策流，其选择与所有预测走**同一把** `predict`/`report` 校准尺子。注册一个环路（`register_loop` 工具或 `ctx.cognitivePipeline.registerLoop`），再用 `decideLoop`/`feedbackLoop` 驱动——环路的 situation 带 `loop:<name>` 前缀，其决策历史自成可检索、可聚合的特殊经验层。`inspect_memory` 按环路报告预测/已解析计数与平均 `|calibrated − observed|` 误差，使新声明的"何时 X"决策（压缩、重试、询问用户）可学习而非硬编码——第三层的意志与第一层用同一把尺子度量。环路还可以更进一步**真正行动**：注册 `MetaLoopSpec.execution`（一组 `LoopExecutionSink`）即把环路变成决策到执行的桥梁。sink 是执行层的端点，接收 `LoopExecutionRequest` 并**按自己的纪律**受理——环路只批准，执行与否由 sink 决定（预算、安全闸、可逆性），拒绝时返回理由字符串。`decideAndExecute(name, decision, situation, threshold?)` 执行一次决策：校准概率越过阈值时，把决策提交给每个已声明的 sink，并**为每个 sink 持久化一条回执**（id 为 `<predictionId>@<target>`——决策与执行之间的审计链接）。执行结果随后**回流**：`settleExecution(receiptId, outcomeText, outcomeQuality, status?)` 标记终态（executed/failed；未知、被拒、重复结算的回执全部响亮报错），并**经由同一 report 路径解析该决策预测**——执行层实际做了什么，就用同一把 |calibrated − observed| 尺子校准当初请求它的环路。`inspect_memory` 暴露完整的 决策→申请→受理/拒绝→结算 链条（近期回执）与按环路的执行计数（executed/refused/failed），使环路不仅作为被校准的决策流可观测，更作为真实执行的驱动者可观测。内置的 `createExplorationSink()`（`hot-engine.explore-create`）是现成范例：它执行主动探索的安全闸与每日预算纪律，受理时创建 scratchpad 与探索条目（对 predict 调用自身 novel 分支可能已创建的条目做去重优先），可选入队自主任务——**意志提交申请，执行层按纪律受理，回执结算回流**，新环路真正驱动执行，而不只是给建议。
 - **冷环路 (cold loop)** — `rebuild_taxonomy`：时间衰减加权采样 `W = e^(−λ·Δt)`（≤15% 样本量，另有 32 条下限）**叠加已证实的成功经验**（效用分 ≥ `successUtilityThreshold`），在**结果效用向量**上做层次凝聚聚类（效用优先于语义），LLM 因果锚定并施加 ≥3 条证据的硬约束（后端核验两两距离 ≤ 0.85，幻觉簇被驳回；确定性回退分组在写回前必须通过**同一道**证据闸门——被驳回的簇绝不会被复活），对最新 20% 做沙盒回测。重构提示词锚定**情境-策略配对的重现模式**，因此前提分化（例如同一行动在"新手教学"前提 vs "资深直推"前提下的不同策略）**随经验累积自动涌现**，无需任何硬编码的行动者/环境字段——一个模式需在训练切片内累积 ≥3 条实例才能自成簇。重构路由是随机的，产出无验证簇的抽样会按 `reconstructRetries` 有界重试。验收度量**连续 materialGain 轴**——分类法预测的效用对每条经验真实收益（归一化到 [0,1]）——使验收度量对齐流水线第一性原理的 `|calibrated − observed|` 误差，而非 0/1 极性分桶。验收分**两个区间**：首次建簇（无已存簇）以空视图 baseRate 基线为参照，只要未被测得"更差"（`Δerr ≤ 0`）即被接受——因为 15% 余量在年轻 store 的 2-3 条验证切片上统计上无意义、只会阻塞冷启动；迭代保持相对既有分类的 `Δerr ≤ −0.15` 门槛。当带标签的验证切片低于 `minValidationCount` 时，重建**暂缓**并给出可诊断的原因，而非按优劣拒绝。携带真实 materialGain 标签的经验（反馈回填后的已反馈经验）参与分母；未验证模拟经验永不进入采样——只有 verified 或 provisional 样本可塑造簇。每个被验收的簇携带 `success`/`risk` 极性，以及**由证据经验推导的情境质心**（而非全部结果相似成员——那会把前提分化簇的质心稀释成混合物），分类法规则也带有极性标注。结构化 LLM 模板调用（SAR/OOD/校准/重构）显式请求 `reasoningEffort: off`——思维链会耗尽小型 token 预算并饿死 JSON 答案。
 - **动态认知摘要** — 通过验收的重建会压缩为分类法摘要注入会话 System Prompt（附录B），使热环路建议反映流水线已学到的规律。
@@ -41,7 +42,7 @@
     model: deepseek-v4-flash
 ```
 
-模型即可使用七个工具：
+模型即可使用十一个工具：
 
 - `remember_experience` — 把原始经历编码进 SAR 记忆（效用字段必填；提取不完整时降级为兜底，而非伪造中性分）。
 - `simulate_experience` — 在真实测试成本高或不可行时，经 LLM 路由生成仅检索的模拟经验。
@@ -50,6 +51,10 @@
 - `report_outcome` — 回填实际结果并**必须提供** `outcome_quality`（0–10），更新校准统计、把质量回填为绑定经验的效用标签、驱动模拟经验验证，极端误差触发紧急局部修补。
 - `rebuild_taxonomy` — 运行冷环路（`scope: local | global`）。
 - `inspect_memory` — 查看经验、簇、校准桶与分类法摘要。
+- `register_loop` — 注册具名元认知环路，其决策与所有预测走同一把 predict/report 校准尺子。
+- `define_acceptance_check` — 定义可复用验证规范（准则 + 触发标记 + 证据提示），账本为空且不可清零。
+- `verify_claim` — 用活跃准则审计一条声明；违规计入准则账本并可标记重写。
+- `update_acceptance_check` — 改写活跃准则或将其退役（退役即冻结）。
 
 ## 服务 API
 
@@ -73,9 +78,15 @@ ctx.cognitivePipeline.decideAndExecute(name, decision, situation, threshold?) //
 ctx.cognitivePipeline.settleExecution(receiptId, outcomeText, outcomeQuality, status?) // → { receipt, feedback }
 ctx.cognitivePipeline.createExplorationSink()                    // → LoopExecutionSink ('hot-engine.explore-create')
 ctx.cognitivePipeline.loopList()                                 // → readonly MetaLoopSpec[]
+// acceptance criteria
+ctx.cognitivePipeline.defineAcceptanceCheck({ criterion, trigger, evidenceHint }) // → AcceptanceCheck
+ctx.cognitivePipeline.auditClaim({ claim, situation, evidence?, predictionId? })  // → ClaimAudit
+ctx.cognitivePipeline.updateAcceptanceCheck({ checkId, criterion?, evidenceHint?, retire? }) // → AcceptanceCheck
+ctx.cognitivePipeline.acceptanceChecks()                         // → readonly AcceptanceCheck[]
+ctx.cognitivePipeline.claimAudits(limit?)                        // → readonly ClaimAudit[]
 ```
 
-每个方法接受可选的 `{ sessionId?, signal? }` 调用上下文，用于模型辅助步骤。所有持久化状态位于 `root` 下（`experiences.jsonl`、`predictions.jsonl`、`temp_strategies.jsonl`、`clusters.json`、`calibration.json`、`taxonomy.json`）。
+每个方法接受可选的 `{ sessionId?, signal? }` 调用上下文，用于模型辅助步骤。所有持久化状态位于 `root` 下（`experiences.jsonl`、`predictions.jsonl`、`temp_strategies.jsonl`、`clusters.json`、`calibration.json`、`taxonomy.json`、`acceptance.json`、`claim_audits.jsonl`）。
 
 ## 配置
 
@@ -117,6 +128,8 @@ ctx.cognitivePipeline.loopList()                                 // → readonly
 | `simulationPermanentThreshold` | `2` | 永久 verified 所需的累计证据分 |
 | `simulationTtlMs` | `2_592_000_000` | 未验证模拟过期的兜底 TTL（30 天） |
 | `autoAccumulate` | `false` | 完成的轮次自动沉淀为经验，由 LLM 路由判断是否值得（纯聊天不进入门） |
+| `acceptanceMinEvidenceCount` | `3` | 准则违规率可触发重写并记录偏离元经验所需的最小审计次数 |
+| `acceptanceDeviationThreshold` | `0.5` | 违规率（violated/invoked）达到或超过此值即在该次审计标记重写 |
 | `exploreDailyBudget` | `3` | 主动探索每日预算（scheme 2）：每天有多少次可逆的 novel 试探计入探索配额 |
 | `exploreRiskWords` | `['删除','清空','覆盖','发布','推送','rm','移除','迁移','重置','格式化']` | 不可逆动作标记；含任一标记的 novel 试探永不纳入主动探索预算（安全闸） |
 | `exploreAutoDispatch` | `false` | 每次计入预算的可逆 novel 试探都入队一条自主探索任务（`exploration_tasks.json`）；调度会话拾取任务并把结果回写为经验（保守默认：仅显式开启才入队） |
@@ -142,11 +155,11 @@ ctx.cognitivePipeline.loopList()                                 // → readonly
 
 ## Model Experience
 
-### 七个模型工具
+### 十一个模型工具
 
 #### What the model sees
 
-`remember_experience`、`simulate_experience`、`reference_experience`、`predict_outcome`、`report_outcome`、`rebuild_taxonomy`、`inspect_memory` 通过 `ctx.tools.register` + `defineTool` 注册，其 schema 自动进入 System Prompt 工具目录；每个工具返回一个规范 JSON 值，由 `output.render` 镜像为模型可见文本；定义于 `src/tools.ts` 的工具描述是本包唯一的静态提示词文本（在生成的 [tool catalog](../../../docs/tool-catalog.md) 中展示）。
+`remember_experience`、`simulate_experience`、`reference_experience`、`predict_outcome`、`report_outcome`、`rebuild_taxonomy`、`inspect_memory`、`register_loop`、`define_acceptance_check`、`verify_claim`、`update_acceptance_check` 通过 `ctx.tools.register` + `defineTool` 注册，其 schema 自动进入 System Prompt 工具目录；每个工具返回一个规范 JSON 值，由 `output.render` 镜像为模型可见文本；定义于 `src/tools.ts` 的工具描述是本包唯一的静态提示词文本（在生成的 [tool catalog](../../../docs/tool-catalog.md) 中展示）。
 
 #### Token effect
 
@@ -177,4 +190,5 @@ ctx.cognitivePipeline.loopList()                                 // → readonly
 - **无定时冷环路** — 设计中的每日/每周调度目前是手动 `rebuild_taxonomy` 调用；基于 `@deepseek-ai/cordis-plugin-timer` 的定时行留待后续。
 - **无 PostgreSQL/pgvector 后端** — 存储为 JSONL+JSON 文件；设计中的 pgvector 单库方案在出现规模需求前不做。
 - **单流水线实例** — 每次插件挂载一个存储；不支持多租户或按智能体分库。
+- **验收准则只判证据存在性、不判真伪** — `verify_claim` 在声明携带证据时标记满足；管线刻意无法验证自己的声明，证据质量由解析结果与用户下游裁决。执行是观测式的：审计被记录、违规被计数，但声明是否被审计，取决于智能体是否选择调用 `verify_claim`。
 - **观测结果质量** — 反馈现在要求模型提供 `outcome_quality`（0–10）；流水线不再从结果文本推断中性基线，未提供质量分是响亮的工具错误，而非静默的 0.5。

@@ -474,6 +474,66 @@ export interface CognitiveLoopStats {
   readonly failedCount: number
 }
 
+/** Lifecycle of one acceptance criterion. Retired checks are frozen: their
+ * evidence ledger is never reset and they are no longer applied by audits. */
+export type AcceptanceStatus = 'active' | 'retired'
+
+/** One acceptance criterion: a reusable verification norm learned from
+ * experience. The pipeline judges evidence PRESENCE, never evidence truth —
+ * it cannot verify its own claims; truth is adjudicated downstream by the
+ * resolved outcome and the user. This is the same self-reference boundary as
+ * every other pipeline observation. */
+export interface AcceptanceCheck {
+  readonly checkId: string
+  /** The norm as a testable statement, e.g. "声称完成前必须给出证据来源". */
+  readonly criterion: string
+  /** Situation marker selecting this check: an audit applies it when the
+   * marker appears in the claim or its situation text. */
+  readonly trigger: string
+  /** What evidence the claim must carry to satisfy the criterion. */
+  readonly evidenceHint: string
+  readonly status: AcceptanceStatus
+  /** Audits that applied this check. */
+  readonly invokedCount: number
+  /** Audits where the claim carried evidence for this check. */
+  readonly passedCount: number
+  /** Audits where the claim was made without evidence for this check. */
+  readonly violatedCount: number
+  /** Rolling sum of |calibrated − observed| of resolved predictions whose
+   * audit violated this check — "claims made without verification correlate
+   * with bad outcomes" is measured on the same ruler as every prediction. */
+  readonly cumulativeError: number
+  /** How many feedback folds contributed to cumulativeError. */
+  readonly errorFoldCount: number
+  /** Bumped on every edit and on retire; retired checks never bump again. */
+  readonly revision: number
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
+/** One claim audit: a claim checked against the active acceptance criteria. */
+export interface ClaimAudit {
+  readonly auditId: string
+  readonly claim: string
+  readonly situation: string
+  readonly verdict: 'verified' | 'violated' | 'not-applicable'
+  readonly appliedCheckIds: readonly string[]
+  readonly satisfiedCheckIds: readonly string[]
+  readonly violatedCheckIds: readonly string[]
+  /** The verification statement the claim carried; empty means the claim was
+   * made without evidence. */
+  readonly evidence: string
+  /** Optional prediction the claim is about; its report feedback folds into
+   * the violated checks' error ledger. */
+  readonly predictionId: string | null
+  /** True when any applied check crossed the deviation gate at audit time. */
+  readonly reworkNeeded: boolean
+  /** expId of the deviation meta experience recorded for this audit, null
+   * when no check crossed the gate. */
+  readonly deviationExpId: string | null
+  readonly createdAt: number
+}
+
 /** Outcome of one cold-loop rebuild (the `/rebuild/trigger` contract). */
 export interface RebuildResult {
   readonly scope: 'local' | 'global'
@@ -528,6 +588,22 @@ export interface InspectResult {
   readonly loops: readonly CognitiveLoopStats[]
   /** Recent loop-execution receipts, newest first (the 决策→申请→受理/拒绝→结算 audit chain). */
   readonly loopExecutions: readonly LoopExecutionReceipt[]
+  /** Acceptance-criteria statistics: the verification-norm ledger. */
+  readonly acceptance: {
+    readonly checkCount: number
+    readonly activeCount: number
+    readonly retiredCount: number
+    readonly invokedCount: number
+    readonly passedCount: number
+    readonly violatedCount: number
+    /** violated / invoked over all audits, null when nothing was invoked. */
+    readonly deviationRate: number | null
+    /** Active checks whose invoked count cleared the evidence minimum and
+     * whose deviation rate crossed the threshold — rewrite/retire candidates. */
+    readonly reworkCheckIds: readonly string[]
+  }
+  /** Recent claim audits, newest first. */
+  readonly recentAudits: readonly ClaimAudit[]
   /** Recent resolved predictions, newest first. */
   readonly recentResolved: readonly Prediction[]
 }

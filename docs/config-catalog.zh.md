@@ -1,4 +1,4 @@
-﻿<!-- 英文源文件由 scripts/gen-config-catalog.ts 生成；本中文文件是通过双语配对维护的经评审对侧。
+<!-- 英文源文件由 scripts/gen-config-catalog.ts 生成；本中文文件是通过双语配对维护的经评审对侧。
 - `@deepseek-ai/dsh-typert-registry`（[`packages/typert/registry/src/index.ts`](../packages/typert/registry/src/index.ts)）
 - `@deepseek-ai/dsh-typert-protocol`（[`packages/typert/protocol/src/index.ts`](../packages/typert/protocol/src/index.ts)）
 - `@deepseek-ai/dsh-typert-registry`（[`packages/typert/registry/src/index.ts`](../packages/typert/registry/src/index.ts)）
@@ -501,7 +501,7 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-cognitive-orchestration`
 
-Requires: `subagents` · `cognitivePipeline`
+Requires: `subagents` · `cognitivePipeline` · `sessions` · `timer` · `tools`
 
 ```ts config-catalog
 /** Plugin configuration mirrors the orchestrator configuration. */
@@ -521,10 +521,36 @@ export interface OrchestrationConfig {
   readonly policyEnabled: boolean
   /** Probability at/above which a policy prediction approves the action. */
   readonly policyDecisionThreshold: number
+  /**
+   * Tool names whose calls are captured as tool-level delegations. These are
+   * subagent tools that bypass the wrapped provider (their `settle()` never
+   * runs), so the orchestrator captures the delegation itself: a
+   * `policy:delegate` prediction is calibrated against the outcome and a
+   * "委派决策" experience is written back. The cognitive-wrapped tool (the
+   * provider under `providerName`) is excluded by default because its children
+   * already write back through `settle()`.
+   */
+  readonly delegationToolNames: string[]
+  /** Whether the timer-driven exploration dispatcher polls pending tasks. */
+  readonly exploreEnabled: boolean
+  /** Polling interval for pending exploration tasks, in milliseconds. */
+  readonly exploreIntervalMs: number
+  /** Maximum exploration tasks executing concurrently. */
+  readonly exploreMaxConcurrent: number
+  /**
+   * Daily delegation budget for the loop-driven delegation sink
+   * (`createDelegationSink`): how many delegations the sink accepts per day.
+   */
+  readonly delegateDailyBudget: number
+  /** Maximum delegations executing concurrently through the sink. */
+  readonly delegateMaxConcurrent: number
+  /** Irreversible-action markers; a delegation decision containing one is
+   * refused by the sink's safety gate. */
+  readonly delegateRiskWords: string[]
 }
 ```
 
-Source: [`packages/cognition/cognitive-orchestration/src/index.ts:31`](../packages/cognition/cognitive-orchestration/src/index.ts)
+Source: [`packages/cognition/cognitive-orchestration/src/index.ts:33`](../packages/cognition/cognitive-orchestration/src/index.ts)
 
 <a id="deepseek-aidsh-cognitive-pipeline"></a>
 
@@ -559,6 +585,22 @@ export interface CognitivePipelineConfig {
   tempStrategyPositiveRatio?: number
   /** Scratchpad fuzzy-match cosine (default 0.5). */
   tempStrategyMatchThreshold?: number
+  /** Active-exploration daily budget (scheme 2): how many reversible novel
+   * attempts count as exploration per day (default 3). */
+  exploreDailyBudget?: number
+  /** Words marking an action as irreversible; such actions are never counted
+   * as active exploration (default: 删除/清空/覆盖/发布/推送/rm/移除/迁移/重置/格式化…). */
+  exploreRiskWords?: string[]
+  /** Whether reversible novel attempts also queue an autonomous exploration
+   * task for a background session to execute silently (default false). */
+  exploreAutoDispatch?: boolean
+  /** EWMA step for folding real-world reuse errors into an exploration
+   * entry's validatedError (default 0.3). */
+  exploreValidationLearningRate?: number
+  /** Prediction-error ceiling below which an explored strategy counts as
+   * validated (paid off in practice); at/above it counts as refuted
+   * (default 0.3, the same threshold as predictionErrorThreshold). */
+  exploreValidationErrorThreshold?: number
   /** Layer-2 shrinkage alpha (default 50). */
   shrinkageAlpha?: number
   /** Minimum 80%-interval width (default 0.2). */
@@ -569,6 +611,12 @@ export interface CognitivePipelineConfig {
   coverageThreshold?: number
   /** Routing margin below which a known-path prediction is SAR-ized as a retrieval failure (default 0.1). */
   retrievalFailureMargin?: number
+  /** EWMA step for the feedback-driven multi-channel retrieval weights (default 0.2). */
+  channelLearningRate?: number
+  /** Feedback error below which the dominant retrieval channel is rewarded, at/above penalized (default 0.3). */
+  channelErrorThreshold?: number
+  /** Bounded LLM-refine drops in one low-confidence prediction (default 2). */
+  refineMaxDrops?: number
   /** Cold-loop time-decay lambda per day (default 0.01). */
   decayLambda?: number
   /** Cold-loop minimum decay weight (default 0.1). */
@@ -585,6 +633,15 @@ export interface CognitivePipelineConfig {
   simulationPermanentThreshold?: number
   /** Fallback TTL in ms after which an unverified simulation expires (default 30 days). */
   simulationTtlMs?: number
+  /** Automatically accumulate completed turns as experiences when the LLM
+   * route judges them worth it (default false; pure chat never reaches the gate). */
+  autoAccumulate?: boolean
+  /** Minimum invoked audits before a criterion's deviation rate can flag
+   * rework and record a deviation meta experience (default 3). */
+  acceptanceMinEvidenceCount?: number
+  /** Violation ratio (violated/invoked) at/above which an applied criterion
+   * flags rework on an audit (default 0.5). */
+  acceptanceDeviationThreshold?: number
   /** Cold-loop max sample ratio of the population (default 0.15). */
   maxSampleRatio?: number
   /** Evidence hard-constraint minimum count (default 3). */
@@ -603,10 +660,24 @@ export interface CognitivePipelineConfig {
   clusterMatchCosine?: number
   /** Feedback error at/above which an emergency local rebuild fires (default 0.8). */
   emergencyErrorThreshold?: number
+  /** Real-embedding seam (roadmap R3): when set, the semantic retrieval
+   * channel uses an OpenAI-compatible `/embeddings` endpoint and experiences
+   * store their action embedding at write time; the hash-bag cosine remains
+   * the fallback for queries/experiences without a vector. */
+  embedding?: {
+    /** API base URL (default `https://api.deepseek.com`). */
+    baseUrl?: string
+    /** Embedding model id (default `deepseek-embedding`). */
+    model?: string
+    /** Env name holding the API key (default `DEEPSEEK_API_KEY`). */
+    apiKeyEnv?: string
+    /** Explicit API key, overriding env and credentials. */
+    apiKey?: string
+  }
 }
 ```
 
-来源：[`packages/cognition/cognitive-pipeline/src/service.ts:41`](../packages/cognition/cognitive-pipeline/src/service.ts)
+来源：[`packages/cognition/cognitive-pipeline/src/service.ts:61`](../packages/cognition/cognitive-pipeline/src/service.ts)
 
 <a id="deepseek-aidsh-compaction-basic"></a>
 
@@ -1435,6 +1506,46 @@ export interface Config {
 ```
 
 来源：[`packages/feedback/message-feedback/src/index.ts:49`](../packages/feedback/message-feedback/src/index.ts)
+
+<a id="deepseek-aidsh-mobile-gateway"></a>
+
+## `@deepseek-ai/dsh-mobile-gateway`
+
+需要：`webServer`
+
+```ts config-catalog
+/** Plugin config: the gateway's own listener plus the loopback forward target. */
+export interface Config {
+  /** Gateway listen address; `0.0.0.0` exposes the AUTHENTICATED gateway to the LAN. */
+  bind: string
+  /** Gateway listen port. */
+  port: number
+  /** Upstream host (normally the loopback DSH web server). */
+  targetHost: string
+  /** Upstream port; 0 resolves from `ctx.webServer.port` at activation. */
+  targetPort: number
+  /** The phone-user whitelist; empty denies every login (fail closed). */
+  users: GatewayUser[]
+  /** Signed-session lifetime in seconds. */
+  sessionTtlSeconds: number
+  /** Optional stable HMAC secret; empty mints a per-process random secret. */
+  secret: string
+  /** Optional PEM private key path; must be set together with `tlsCertPath`. */
+  tlsKeyPath: string
+  /** Optional PEM certificate path; must be set together with `tlsKeyPath`. */
+  tlsCertPath: string
+}
+
+/** One named phone user: the whitelist entry the gateway is configured with. */
+export interface GatewayUser {
+  /** Human-readable name; appears in the audit log (never sent to DSH). */
+  name: string
+  /** Secret shared with this user's phone. Use `openssl rand -hex 24`-grade entropy. */
+  token: string
+}
+```
+
+来源：[`packages/host/mobile-gateway/src/index.ts:30`](../packages/host/mobile-gateway/src/index.ts)
 
 <a id="deepseek-aidsh-permission-presets"></a>
 

@@ -1994,6 +1994,41 @@
       "doc": "docs/subsystems/cognitive-pipeline.md",
       "symbol": "InspectResult",
       "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "AcceptanceCheck",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "ClaimAudit",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "ExplorationTask",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "LoopExecutionReceipt",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "LoopExecutionSink",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "MetaLoopSpec",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "TurnEpisode",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
     }
   ]
 }

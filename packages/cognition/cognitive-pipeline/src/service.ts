@@ -22,7 +22,9 @@ import type { CognitiveLlmRoute } from './llm.ts'
 import { cognitionPrefix } from './prompts.ts'
 import { CognitiveStore } from './store.ts'
 import type {
+  AcceptanceCheck,
   CalibrationBucket,
+  ClaimAudit,
   Cluster,
   CognitiveLoopStats,
   Experience,
@@ -132,6 +134,12 @@ export interface CognitivePipelineConfig {
   /** Automatically accumulate completed turns as experiences when the LLM
    * route judges them worth it (default false; pure chat never reaches the gate). */
   autoAccumulate?: boolean
+  /** Minimum invoked audits before a criterion's deviation rate can flag
+   * rework and record a deviation meta experience (default 3). */
+  acceptanceMinEvidenceCount?: number
+  /** Violation ratio (violated/invoked) at/above which an applied criterion
+   * flags rework on an audit (default 0.5). */
+  acceptanceDeviationThreshold?: number
   /** Cold-loop max sample ratio of the population (default 0.15). */
   maxSampleRatio?: number
   /** Evidence hard-constraint minimum count (default 3). */
@@ -181,6 +189,10 @@ export interface ResolvedCognitivePipelineConfig {
   readonly simulationTtlMs: number
   /** Whether completed turns are automatically accumulated via the LLM gate. */
   readonly autoAccumulate: boolean
+  /** Minimum invoked audits before a criterion's deviation rate can flag rework. */
+  readonly acceptanceMinEvidenceCount: number
+  /** Violation ratio at/above which an applied criterion flags rework. */
+  readonly acceptanceDeviationThreshold: number
   /** Real-embedding configuration, or null when the seam is disabled. */
   readonly embedding: ResolvedEmbeddingConfig | null
   /** Active-exploration budget (scheme 2). */
@@ -231,6 +243,8 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   simulationPermanentThreshold: z.number().min(0).default(2),
   simulationTtlMs: z.number().step(1).min(60_000).default(30 * 24 * 60 * 60 * 1000),
   autoAccumulate: z.boolean().default(false),
+  acceptanceMinEvidenceCount: z.number().step(1).min(1).default(3),
+  acceptanceDeviationThreshold: z.number().min(0).max(1).default(0.5),
   maxSampleRatio: z.number().min(0.01).max(1).default(0.15),
   evidenceMinCount: z.number().step(1).min(1).default(3),
   evidenceMaxDistance: z.number().min(0).max(1).default(0.85),
@@ -302,6 +316,8 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
     simulationPermanentThreshold: config.simulationPermanentThreshold ?? 2,
     simulationTtlMs: config.simulationTtlMs ?? 30 * 24 * 60 * 60 * 1000,
     autoAccumulate: config.autoAccumulate ?? false,
+    acceptanceMinEvidenceCount: config.acceptanceMinEvidenceCount ?? 3,
+    acceptanceDeviationThreshold: config.acceptanceDeviationThreshold ?? 0.5,
     embedding: config.embedding === undefined
       ? null
       : Object.freeze({
@@ -874,6 +890,21 @@ export class CognitivePipelineService extends Service {
       )
     }
 
+    // Acceptance feedback fold (验收回流): when the resolved prediction was the
+    // subject of a claim audit that found violations, the prediction error
+    // folds into each violated criterion's error ledger — "claims made without
+    // verification" accumulate |calibrated − observed| on the same ruler as
+    // every prediction, so the cost of skipping verification is measured, not
+    // asserted.
+    const audited = [...this.store.claimAuditsSnapshot()]
+      .reverse()
+      .find(audit => audit.predictionId === prediction.predictionId && audit.violatedCheckIds.length > 0)
+    if (audited !== undefined) {
+      for (const checkId of audited.violatedCheckIds) {
+        this.store.foldAcceptanceError(checkId, error)
+      }
+    }
+
     let triggerRebuild = false
     if (error >= this.resolved.emergencyErrorThreshold) {
       triggerRebuild = true
@@ -920,6 +951,8 @@ export class CognitivePipelineService extends Service {
       exploration: this.explorationStats(),
       loops: this.loops.stats(this.store.predictionsSnapshot(), this.store.loopExecutionsSnapshot()),
       loopExecutions,
+      acceptance: this.acceptanceStats(),
+      recentAudits: this.claimAudits(10),
       taxonomy: this.store.taxonomySnapshot() ?? {
         version: 0,
         summaryShort: '（尚未完成首次重构）',
@@ -1098,7 +1131,7 @@ export class CognitivePipelineService extends Service {
     name: string,
     decision: string,
     situation: string,
-    threshold = 0.55,
+    threshold: number = 0.55,
     call?: PipelineCallContext,
   ): Promise<{
     decision: PredictResult
@@ -1190,6 +1223,261 @@ export class CognitivePipelineService extends Service {
    */
   taxonomyPrefix(): string {
     return cognitionPrefix(this.store.taxonomySnapshot())
+  }
+
+  /**
+   * Define one acceptance criterion: a reusable verification norm the agent
+   * audits claims against before treating them as settled. The pipeline
+   * records evidence PRESENCE, never evidence truth — it cannot verify its own
+   * claims; truth is adjudicated by the resolved outcome and the user.
+   * @param input - the criterion statement, its trigger marker, and the
+   *   evidence hint that satisfies it.
+   * @returns the new criterion, active with an empty evidence ledger.
+   */
+  async defineAcceptanceCheck(input: {
+    criterion: string
+    trigger: string
+    evidenceHint: string
+  }): Promise<AcceptanceCheck> {
+    const criterion = input.criterion.trim()
+    const trigger = input.trigger.trim()
+    const evidenceHint = input.evidenceHint.trim()
+    if (criterion.length === 0 || trigger.length === 0 || evidenceHint.length === 0) {
+      throw new CognitivePipelineError(
+        'cognitive-pipeline: criterion, trigger, and evidenceHint must not be empty',
+        'EMPTY_ACCEPTANCE_INPUT',
+      )
+    }
+    const now = Date.now()
+    const check: AcceptanceCheck = {
+      checkId: this.store.nextAcceptanceCheckId(),
+      criterion,
+      trigger,
+      evidenceHint,
+      status: 'active',
+      invokedCount: 0,
+      passedCount: 0,
+      violatedCount: 0,
+      cumulativeError: 0,
+      errorFoldCount: 0,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    }
+    this.store.addAcceptanceCheck(check)
+    await this.store.flush()
+    return check
+  }
+
+  /**
+   * Audit one claim against the active acceptance criteria. Applicable checks
+   * are those whose trigger marker appears in the claim or its situation; a
+   * claim with no applicable check audits as `not-applicable` and touches no
+   * ledger. An applicable check is satisfied when the claim carries evidence
+   * (non-empty), violated when it does not — presence, not truth. Violated
+   * checks accumulate in the criterion's ledger, and a criterion whose invoked
+   * count clears the evidence minimum while its deviation rate crosses the
+   * threshold flags `reworkNeeded` and records one deviation meta experience
+   * so the cold loop can cluster the pipeline's own acceptance-failure
+   * patterns.
+   * @param input - the claim, its situation, the verification statement (empty
+   *   when the claim is made without evidence), and an optional prediction the
+   *   claim is about.
+   * @returns the recorded audit.
+   */
+  async auditClaim(input: {
+    claim: string
+    situation: string
+    evidence?: string
+    predictionId?: string
+  }): Promise<ClaimAudit> {
+    const claim = input.claim.trim()
+    const situation = input.situation.trim()
+    if (claim.length === 0) {
+      throw new CognitivePipelineError('cognitive-pipeline: claim must not be empty', 'EMPTY_CLAIM')
+    }
+    const evidence = (input.evidence ?? '').trim()
+    const haystack = `${situation} ${claim}`
+    const active = this.store.acceptanceSnapshot().filter(check => check.status === 'active')
+    const applied = active.filter(check => check.trigger.length > 0 && haystack.includes(check.trigger))
+    const now = Date.now()
+    const auditId = this.store.nextAuditId()
+    const predictionId = input.predictionId ?? null
+    if (applied.length === 0) {
+      const audit: ClaimAudit = {
+        auditId,
+        claim,
+        situation,
+        verdict: 'not-applicable',
+        appliedCheckIds: [],
+        satisfiedCheckIds: [],
+        violatedCheckIds: [],
+        evidence,
+        predictionId,
+        reworkNeeded: false,
+        deviationExpId: null,
+        createdAt: now,
+      }
+      this.store.recordClaimAudit(audit)
+      await this.store.flush()
+      return audit
+    }
+    const satisfiedCheckIds: string[] = []
+    const violatedCheckIds: string[] = []
+    const passed = evidence.length > 0
+    const firstCrossingChecks: AcceptanceCheck[] = []
+    for (const check of applied) {
+      const updated = this.store.applyAuditStats(check.checkId, passed)
+      if (passed) satisfiedCheckIds.push(check.checkId)
+      else violatedCheckIds.push(check.checkId)
+      // Deviation gate: flag only on the audit where the criterion FIRST
+      // crosses the threshold, so the deviation meta experience is recorded
+      // once per crossing rather than once per subsequent audit.
+      const crossedBefore = check.invokedCount >= this.resolved.acceptanceMinEvidenceCount
+        && check.invokedCount > 0
+        && check.violatedCount / check.invokedCount >= this.resolved.acceptanceDeviationThreshold
+      const crossedNow = updated.invokedCount >= this.resolved.acceptanceMinEvidenceCount
+        && updated.violatedCount / updated.invokedCount >= this.resolved.acceptanceDeviationThreshold
+      if (crossedNow && !crossedBefore) firstCrossingChecks.push(updated)
+    }
+    let reworkNeeded = false
+    let deviationExpId: string | null = null
+    if (firstCrossingChecks.length > 0) {
+      reworkNeeded = true
+      const names = firstCrossingChecks.map(check => `「${check.criterion}」`).join('、')
+      const worst = firstCrossingChecks.reduce((a, b) =>
+        a.violatedCount / a.invokedCount >= b.violatedCount / b.invokedCount ? a : b)
+      deviationExpId = this.rememberMeta({
+        situation: `验收准则持续被违反：${names} 在累计审计中违规率 ≥ ${(this.resolved.acceptanceDeviationThreshold * 100).toFixed(0)}%（证据不足 ${this.resolved.acceptanceMinEvidenceCount} 次），触发重写或退役`,
+        action: `重写准则 ${names} 或将其退役（统计账本不可清零，仅可冻结）`,
+        outcome: `未验证声明与预测误差同尺累计：${names} 累计误差 ${worst.cumulativeError.toFixed(3)}（${worst.errorFoldCount} 次回流）`,
+        utility: { materialGain: 2, emotionalValence: 4, energyCost: 6 },
+      })
+    }
+    const audit: ClaimAudit = {
+      auditId,
+      claim,
+      situation,
+      verdict: violatedCheckIds.length > 0 ? 'violated' : 'verified',
+      appliedCheckIds: applied.map(check => check.checkId),
+      satisfiedCheckIds,
+      violatedCheckIds,
+      evidence,
+      predictionId,
+      reworkNeeded,
+      deviationExpId,
+      createdAt: now,
+    }
+    this.store.recordClaimAudit(audit)
+    await this.store.flush()
+    return audit
+  }
+
+  /**
+   * Rewrite an active criterion's statement/evidence hint, or retire it. A
+   * retired criterion is frozen: its evidence ledger is never reset and audits
+   * no longer apply it. The criterion's invoked/passed/violated/error counts
+   * cannot be edited by any path — criteria are revisable, their track record
+   * is not (the evidence gate of acceptance-criterion change).
+   * @param input - the criterion id, optional new statement/evidence hint, and
+   *   optional retire flag.
+   * @returns the updated criterion.
+   */
+  async updateAcceptanceCheck(input: {
+    checkId: string
+    criterion?: string
+    evidenceHint?: string
+    retire?: boolean
+  }): Promise<AcceptanceCheck> {
+    const current = this.store.getAcceptanceCheck(input.checkId)
+    if (current === undefined) {
+      throw new CognitivePipelineError(
+        `cognitive-pipeline: acceptance check "${input.checkId}" not found`,
+        'ACCEPTANCE_CHECK_NOT_FOUND',
+      )
+    }
+    if (current.status === 'retired') {
+      throw new CognitivePipelineError(
+        `cognitive-pipeline: acceptance check "${input.checkId}" is retired and frozen`,
+        'ACCEPTANCE_CHECK_RETIRED',
+      )
+    }
+    if (input.retire === true) {
+      const retired = this.store.updateAcceptanceCheck(input.checkId, {
+        status: 'retired',
+        updatedAt: Date.now(),
+        revision: current.revision + 1,
+      })
+      await this.store.flush()
+      return retired
+    }
+    const criterion = input.criterion?.trim()
+    const evidenceHint = input.evidenceHint?.trim()
+    if (criterion === undefined && evidenceHint === undefined) {
+      throw new CognitivePipelineError(
+        'cognitive-pipeline: update needs criterion, evidenceHint, or retire',
+        'EMPTY_ACCEPTANCE_UPDATE',
+      )
+    }
+    if (criterion !== undefined && criterion.length === 0) {
+      throw new CognitivePipelineError(
+        'cognitive-pipeline: criterion must not be empty',
+        'EMPTY_ACCEPTANCE_UPDATE',
+      )
+    }
+    if (evidenceHint !== undefined && evidenceHint.length === 0) {
+      throw new CognitivePipelineError(
+        'cognitive-pipeline: evidenceHint must not be empty',
+        'EMPTY_ACCEPTANCE_UPDATE',
+      )
+    }
+    const updated = this.store.updateAcceptanceCheck(input.checkId, {
+      ...criterion === undefined ? {} : { criterion },
+      ...evidenceHint === undefined ? {} : { evidenceHint },
+      updatedAt: Date.now(),
+      revision: current.revision + 1,
+    })
+    await this.store.flush()
+    return updated
+  }
+
+  /** All acceptance criteria (public for inspection).
+   * @returns a detached criterion list, insertion order.
+   */
+  acceptanceChecks(): readonly AcceptanceCheck[] {
+    return this.store.acceptanceSnapshot()
+  }
+
+  /** Recent claim audits (public for inspection).
+   * @param limit - how many audits, newest first (default 10).
+   * @returns the most recent audits.
+   */
+  claimAudits(limit: number = 10): readonly ClaimAudit[] {
+    return [...this.store.claimAuditsSnapshot()].reverse().slice(0, limit)
+  }
+
+  /** Acceptance-criteria statistics for inspection.
+   * @returns the verification-norm ledger and rewrite/retire candidates.
+   */
+  private acceptanceStats(): InspectResult['acceptance'] {
+    const checks = this.store.acceptanceSnapshot()
+    const active = checks.filter(check => check.status === 'active')
+    const invokedCount = checks.reduce((sum, check) => sum + check.invokedCount, 0)
+    const passedCount = checks.reduce((sum, check) => sum + check.passedCount, 0)
+    const violatedCount = checks.reduce((sum, check) => sum + check.violatedCount, 0)
+    return {
+      checkCount: checks.length,
+      activeCount: active.length,
+      retiredCount: checks.length - active.length,
+      invokedCount,
+      passedCount,
+      violatedCount,
+      deviationRate: invokedCount === 0 ? null : violatedCount / invokedCount,
+      reworkCheckIds: active
+        .filter(check => check.invokedCount >= this.resolved.acceptanceMinEvidenceCount
+          && check.violatedCount / check.invokedCount >= this.resolved.acceptanceDeviationThreshold)
+        .map(check => check.checkId),
+    }
   }
 
   /** All clusters (public for inspection).
