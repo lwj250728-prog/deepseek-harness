@@ -2,20 +2,24 @@
 
 English | [中文](README.zh.md)
 
-Step-level SAR experience priming for the cognitive pipeline. At every agent pre-step it extracts the current situation from the messages about to enter the model request, retrieves situation-related experiences from the pipeline store, and injects the closest hits as reference context. After a failed step it recalls more aggressively — the "memory chaining" analogue: a failure is the strongest situation cue, so the previous setback surfaces related past experience for faster matching on the retry step.
+Step-level SAR experience priming for the cognitive pipeline. At every agent pre-step it extracts the current situation from the messages about to enter the model request, and **only when the situation carries a trigger** (a failed step, a help/explore/decide behavior word, or a keyword derived from important stored experiences) does it retrieve situation-related experiences and inject the closest hits as reference context. After a failed step it recalls more aggressively — the "memory chaining" analogue: a failure is the strongest situation cue, so the previous setback surfaces related past experience for faster matching on the retry step.
 
 ## What the plugin does
 
 ```
 主对话 / 子任务 每步开始前
   → agent/pre-step → 提取当前情境文本（最近 N 条消息块）
-  → 情境向量检索经验库（行动轴 ∪ 情境轴，取 max；失败标记重叠为加成）
-  → 命中超阈值 → 注入【认知经验参考】块（source: cognitive-inject）
+  → 触发门：上一步失败？或 消息含触发词？（静态行为词 / SAR 派生关键词）
+  → 触发才检索经验库（行动轴 ∪ 情境轴，取 max；失败标记重叠按语义加成）
+  → 否决门：模板7精排判定 top 候选是否真正适用（LLM 路由存在时）
+  → 通过 → 注入【认知经验参考】块（source: cognitive-inject）
   → 上一步工具失败 → 阈值放宽 + 注入条数提升 + "上一步执行失败"标记
 ```
 
 - **步骤级预热 (step-level priming)** — unlike the orchestrator's one-shot pre-task injection, this plugin recalls at every step of every agent, so an experience is surfaced exactly when the current situation resembles it — including mid-task, when a bug first appears.
+- **触发式注入 (trigger-gated injection)** — humans consult past experience when they fail, face something new, or make a high-stakes decision — not on routine small talk. Injection is gated the same way: after a failed step it always primes; otherwise the incoming messages must carry a trigger. **Static behavior triggers** (失败/报错/卡住/排查/怎么/如何/试试/风险/以前/遇到过/发布/部署/计划…) match as substrings; **SAR-derived triggers** are keywords of important stored experiences — tokens of the situation/action of high-utility, high-risk, or frequently-hit experiences accumulate their importance (|utilityScore|/15 + risk + frequency) into per-token weights, the top 60 survive normalized, and a summed trigger weight ≥ 0.6 primes injection. A message like "重启一下" (routine) never injects even when retrieval would find a literal weak hit; "帮我排查测试挂起" (help) and "打包插件到GitHub" (derived keywords of a failed-push experience) both prime.
 - **双轴检索 + 症状加成 (dual-axis retrieval with symptom bonus)** — the situation text is matched against both the experience's action vector and its situation vector, and the higher similarity wins. A task text like "tests suddenly hang" recalls the bug experience whose *situation* was "tests suddenly hang", even when the repair wording differs. A failure-symptom overlap (挂起/超时/编译失败… in both the query and the experience text) adds a capped bonus (`SYMPTOM_BONUS = 0.3`) **proportional to the semantic score** on top of it — it sharpens recall for the current setback, but a literal marker match can never drag an unrelated experience across the threshold (measured: semantic 0.11 + marker 1.0 scored 0.41 under a flat bonus; proportional scoring drops it to 0.14, below the 0.4 floor, while a genuinely relevant 0.47 situational hit keeps a 0.61 score).
+- **否决门 (LLM veto gate)** — an over-threshold candidate is not automatically injected: when the pipeline has an LLM route, the template-7 refine route reads the situation and the candidate and judges whether it truly applies (a literal hit is not transferability). Each rejection moves to the next candidate (bounded, `INJECT_VETO_MAX = 2`; the injected block notes how many were vetoed), and all-rejected suppresses injection entirely. Without a route the gate degrades to the threshold-only behavior. With the default `topK: 1` the veto either admits the single candidate or suppresses injection — set `topK` ≥ 2 to let a veto fall through to the next candidate.
 - **失败强启动 (failure priming)** — when the most recent tool result for an agent was an error, the similarity threshold is multiplied by `failureThresholdFactor` and up to `failureTopK` experiences are injected, prefixed with an "上一步执行失败" marker.
 - **模型可见 ⟺ 已记录 (model-visible ⟺ logged)** — the reference block rides the step's `decision.messages`, so the agent loop appends it as a durable `user/message` event; replay and dispatch observe exactly what the model saw.
 

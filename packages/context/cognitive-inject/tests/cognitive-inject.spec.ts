@@ -10,7 +10,8 @@ import { agentEvents, Inbox, type Agent, type AgentStatus } from '@deepseek-ai/d
 import * as cognitiveInject from '@deepseek-ai/dsh-cognitive-inject'
 import type { Config } from '@deepseek-ai/dsh-cognitive-inject'
 import * as cognitivePipeline from '@deepseek-ai/dsh-cognitive-pipeline'
-import { createUserMessage, CallId } from '@deepseek-ai/dsh-llm'
+import { CallId, createUserMessage, LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -20,10 +21,54 @@ import type { Experience } from '@deepseek-ai/dsh-cognitive-pipeline'
 
 const SIGNAL = new AbortController().signal
 
-async function mount(config: Config = {}) {
+/** One text per call; the veto-gate tests drive the template-7 route. */
+class ScriptedAdapter extends LlmAdapter {
+  private cursor = 0
+  constructor(private readonly responses: readonly string[]) {
+    super()
+  }
+
+  async * stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const text = this.responses[this.cursor] ?? '{}'
+    this.cursor += 1
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+
+  override resolveModel(
+    provider: string,
+    model: string,
+    _signal?: AbortSignal,
+  ): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      reasoning: {
+        efforts: [
+          { id: ReasoningEffortId('off'), name: 'Off' },
+          { id: ReasoningEffortId('high'), name: 'High' },
+        ],
+        defaultEffort: ReasoningEffortId('off'),
+      },
+    })
+  }
+}
+
+async function mount(config: Config = {}, route?: { provider: string; model: string; script: readonly string[] }) {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
-  await ctx.plugin(cognitivePipeline, { enabled: false })
+  const pipelineConfig: { enabled: boolean; provider?: string; model?: string } = { enabled: false }
+  if (route !== undefined) {
+    pipelineConfig.provider = route.provider
+    pipelineConfig.model = route.model
+  }
+  await ctx.plugin(cognitivePipeline, pipelineConfig)
+  if (route !== undefined) {
+    ctx.llm.registerAdapter([route.provider], new ScriptedAdapter(route.script))
+  }
   await ctx.plugin(AgentLoop, { agents: [] })
   const fiber = await ctx.plugin(cognitiveInject, config)
   return { ctx, fiber }
@@ -216,6 +261,111 @@ describe('cognitive-inject priming', () => {
       expect(injected.length).toBe(1)
       expect(injected[0]).toContain('exp_2')
       expect(injected[0]).not.toContain('exp_1')
+    } finally {
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('does not inject on routine conversation without a trigger, even when retrieval would hit', async () => {
+    const { ctx, fiber } = await mount()
+    try {
+      // The situation literally shares tokens with the experience ("重启"), so
+      // retrieval would find it — but the message carries no trigger word, so
+      // the trigger gate must suppress the injection.
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '库存系统凌晨故障', '重启数据库服务器', '恢复，失败交易全部回滚')
+      const { agent, session } = stubAgent('routine')
+      session.append('turn/start', { turn: 1 })
+
+      const injected = await fire(ctx, agent, 1, 1, '重启一下')
+
+      expect(injected).toHaveLength(0)
+    } finally {
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('injects when a static behavior trigger appears', async () => {
+    const { ctx, fiber } = await mount()
+    try {
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '测试脚本挂起', '改为无循环算法', '测试恢复')
+      const { agent, session } = stubAgent('static-trigger')
+      session.append('turn/start', { turn: 1 })
+
+      const injected = await fire(ctx, agent, 1, 1, '帮我排查测试挂起')
+
+      expect(injected.length).toBe(1)
+      expect(injected[0]).toContain('exp_1')
+    } finally {
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('injects when a SAR-derived keyword of an important experience appears', async () => {
+    const { ctx, fiber } = await mount()
+    try {
+      // A high-importance experience (failed push: low utility, negative)
+      // whose action keywords 打包/插件/GitHub become derived trigger words.
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '发布插件时测试全部失败', '打包插件并推送到GitHub仓库失败', '回滚并修复依赖后恢复')
+      const { agent, session } = stubAgent('derived-trigger')
+      session.append('turn/start', { turn: 1 })
+
+      // No static trigger word, but the derived keywords 打包/插件/GitHub appear.
+      const injected = await fire(ctx, agent, 1, 1, '打包插件到GitHub')
+
+      expect(injected.length).toBe(1)
+      expect(injected[0]).toContain('exp_1')
+    } finally {
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('vetoes the over-threshold candidate when the refine route rejects it (no injection)', async () => {
+    const reject = JSON.stringify({ should_keep: false, rejected_exp_id: 'exp_1', reason: '情境不可迁移' })
+    const { ctx, fiber } = await mount(
+      {},
+      { provider: 'cognition-test', model: 'm', script: [reject] },
+    )
+    try {
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '库存系统凌晨故障', '重启数据库服务器', '恢复，失败交易全部回滚')
+      const { agent, session } = stubAgent('veto')
+      session.append('turn/start', { turn: 1 })
+
+      // Trigger word present (排查) and retrieval would hit — but the route
+      // rejects the candidate, so the veto gate suppresses injection.
+      const injected = await fire(ctx, agent, 1, 1, '帮我排查测试挂起')
+
+      expect(injected).toHaveLength(0)
+    } finally {
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('moves to the next candidate when the top hit is vetoed, noting the rejection', async () => {
+    const reject = JSON.stringify({ should_keep: false, rejected_exp_id: 'exp_2', reason: '前提矛盾' })
+    const keep = JSON.stringify({ should_keep: true, rejected_exp_id: null, reason: null })
+    const { ctx, fiber } = await mount(
+      { minSimilarity: 0.3, topK: 2 },
+      { provider: 'cognition-test', model: 'm', script: [reject, keep] },
+    )
+    try {
+      // exp_2 (situation identical to the query) is the fused top hit; the
+      // route vetoes it, so injection falls through to the second candidate.
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '服务启动失败排查日志', '检查依赖并重启', '恢复运行')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_2', '启动失败需要补充链接', '把插件加入bundle依赖并重新安装', '解析成功插件正常加载')
+      const { agent, session } = stubAgent('veto-next')
+      session.append('turn/start', { turn: 1 })
+
+      const injected = await fire(ctx, agent, 1, 1, '启动失败需要补充链接')
+
+      expect(injected.length).toBe(1)
+      expect(injected[0]).toContain('exp_1')
+      expect(injected[0]).not.toContain('exp_2')
+      expect(injected[0]).toContain('已否决 1 条')
     } finally {
       await fiber.dispose()
       await ctx.fiber.dispose()

@@ -34,6 +34,10 @@ export { CognitivePipelineService, Config }
 export type { CognitivePipelineConfig } from './service.ts'
 export * from './types.ts'
 export * from './vectorizer.ts'
+/** Template-7 retrieval refinement, reused by consumers (cognitive-inject)
+ * as the pre-injection veto gate. */
+export { refineRetrieval, refineRetrievalFallback } from './llm.ts'
+export type { CognitiveLlmRoute } from './llm.ts'
 
 /** Reconstruct one completed turn into candidate accumulation material.
  * Reads the turn's events back from the session ledger: the genuine user
