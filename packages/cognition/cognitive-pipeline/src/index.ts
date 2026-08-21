@@ -16,6 +16,7 @@ import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import {
+  CognitiveLoopRegistry,
   CognitivePipelineService,
   Config,
 } from './service.ts'
@@ -30,7 +31,7 @@ export const name = 'cognitive-pipeline'
 export const inject = ['llm', 'tools', 'systemPrompt']
 
 /** Re-export the service and config schema for consumers and Loader validation. */
-export { CognitivePipelineService, Config }
+export { CognitiveLoopRegistry, CognitivePipelineService, Config }
 export type { CognitivePipelineConfig } from './service.ts'
 export * from './types.ts'
 export * from './vectorizer.ts'

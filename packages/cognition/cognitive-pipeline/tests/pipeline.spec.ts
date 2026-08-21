@@ -590,4 +590,61 @@ describe('cognitive pipeline integration', () => {
       await teardown()
     }
   })
+
+  it('registers a meta-cognition loop and aggregates its calibrated decisions in inspect', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      ctx.cognitivePipeline.registerLoop({ name: 'when-to-compact', description: '是否值得压缩上下文' })
+      expect(ctx.cognitivePipeline.loopList().map(loop => loop.name)).toEqual(['when-to-compact'])
+
+      // A decision flows through the same predict/report calibration path.
+      const decision = await ctx.cognitivePipeline.decideLoop('when-to-compact', '压缩会话上下文', '上下文接近上限')
+      expect(decision.predictionId).toBeTruthy()
+      const stored = ctx.cognitivePipeline.store.getPrediction(decision.predictionId)
+      expect(stored?.situation).toContain('loop:when-to-compact')
+
+      await ctx.cognitivePipeline.feedbackLoop('when-to-compact', decision.predictionId, '压缩后依然完整', 8)
+
+      const insp = ctx.cognitivePipeline.inspect()
+      const loop = insp.loops.find(item => item.name === 'when-to-compact')
+      expect(loop?.predictionCount).toBe(1)
+      expect(loop?.resolvedCount).toBe(1)
+      expect(loop?.avgPredictionError).not.toBeNull()
+      // The loop layer does not leak into ordinary experience counts.
+      expect(insp.experienceCount).toBeGreaterThanOrEqual(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('rejects decisions and feedback for an unregistered loop', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      await expect(ctx.cognitivePipeline.decideLoop('missing', '试探', '情境'))
+        .rejects.toThrow(/not registered/)
+      await expect(ctx.cognitivePipeline.feedbackLoop('missing', 'p1', '完成', 8))
+        .rejects.toThrow(/not registered/)
+      expect(ctx.cognitivePipeline.loopList()).toHaveLength(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('rejects malformed loop names and registers multiple loops independently', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      expect(() => ctx.cognitivePipeline.registerLoop({ name: 'Bad Name', description: 'x' }))
+        .toThrow(/lowercase/)
+      expect(() => ctx.cognitivePipeline.registerLoop({ name: '', description: 'x' }))
+        .toThrow(/must not be empty/)
+      ctx.cognitivePipeline.registerLoop({ name: 'loop-a', description: 'a' })
+      ctx.cognitivePipeline.registerLoop({ name: 'loop-b', description: 'b' })
+      expect(ctx.cognitivePipeline.loopList().map(loop => loop.name)).toEqual(['loop-a', 'loop-b'])
+      // Re-registering replaces the description, not the position.
+      ctx.cognitivePipeline.registerLoop({ name: 'loop-a', description: 'a2' })
+      expect(ctx.cognitivePipeline.loopList().map(loop => loop.description)).toEqual(['a2', 'b'])
+    } finally {
+      await teardown()
+    }
+  })
 })

@@ -24,11 +24,13 @@ import { CognitiveStore } from './store.ts'
 import type {
   CalibrationBucket,
   Cluster,
+  CognitiveLoopStats,
   Experience,
   ExplorationTask,
   FeedbackInput,
   FeedbackResult,
   InspectResult,
+  MetaLoopSpec,
   OutcomeUtility,
   PredictInput,
   PredictResult,
@@ -319,6 +321,74 @@ export interface PipelineCallContext {
   readonly signal?: AbortSignal
 }
 
+/**
+ * Registry of named meta-cognition loops ("造新环路"): each loop is a
+ * special-experience layer over the base SAR memory, exactly like the
+ * `policy:*` decisions the orchestrator learns. Registering a loop gives it a
+ * stable identity whose decisions flow through the SAME predict/report
+ * calibration ruler as every other prediction — the loop's situation carries
+ * a `loop:<name>` prefix, so its decision history forms its own retrievable
+ * layer and inspection can aggregate per-loop error. This is the reusable
+ * abstraction behind the three prior upgrades (policy:* delegation, active
+ * exploration, exploration validation): declare a decision stream, get the
+ * calibrated-意志 loop for free.
+ */
+export class CognitiveLoopRegistry {
+  private readonly loops = new Map<string, MetaLoopSpec>()
+
+  /**
+   * Register one meta-cognition loop. Re-registering the same name replaces
+   * the description (identity is the name).
+   * @param spec - the loop's identity and description.
+   * @returns the registry, for chaining.
+   */
+  register(spec: MetaLoopSpec): this {
+    if (spec.name.trim().length === 0) {
+      throw new CognitivePipelineError('cognitive-pipeline: loop name must not be empty', 'EMPTY_LOOP_NAME')
+    }
+    if (!/^[a-z][a-z0-9-]*$/.test(spec.name)) {
+      throw new CognitivePipelineError(
+        'cognitive-pipeline: loop name must match ^[a-z][a-z0-9-]*$ (lowercase, hyphen-separated)',
+        'INVALID_LOOP_NAME',
+      )
+    }
+    this.loops.set(spec.name, { name: spec.name, description: spec.description })
+    return this
+  }
+
+  /** Whether a loop with this name is registered. */
+  has(name: string): boolean {
+    return this.loops.has(name)
+  }
+
+  /** Every registered loop, in registration order. */
+  list(): readonly MetaLoopSpec[] {
+    return [...this.loops.values()]
+  }
+
+  /** Per-loop calibration statistics, aggregated from the prediction log.
+   * @param predictions - the full prediction snapshot.
+   * @returns one stats row per registered loop, in registration order.
+   */
+  stats(
+    predictions: readonly { situation: string; resolvedAt: number | null; predictionError: number | null }[],
+  ): readonly CognitiveLoopStats[] {
+    return [...this.loops.values()].map((spec) => {
+      const prefix = `loop:${spec.name} `
+      const own = predictions.filter(prediction => prediction.situation.startsWith(prefix))
+      const resolved = own.filter(prediction => prediction.resolvedAt !== null && prediction.predictionError !== null)
+      const errorSum = resolved.reduce((sum, prediction) => sum + (prediction.predictionError ?? 0), 0)
+      return {
+        name: spec.name,
+        description: spec.description,
+        predictionCount: own.length,
+        resolvedCount: resolved.length,
+        avgPredictionError: resolved.length === 0 ? null : errorSum / resolved.length,
+      }
+    })
+  }
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     cognitivePipeline: CognitivePipelineService
@@ -339,6 +409,8 @@ export class CognitivePipelineService extends Service {
   readonly cold: ColdEngine
   /** Real-embedding scorer, or null when the seam is disabled. */
   readonly embedder: EmbeddingScorer | null
+  /** Meta-cognition loop registry (the "造新环路" surface). */
+  readonly loops: CognitiveLoopRegistry
 
   private readonly readinessPromise: Promise<void>
 
@@ -351,6 +423,7 @@ export class CognitivePipelineService extends Service {
       : new EmbeddingScorer(ctx, this.resolved.embedding)
     this.hot = new HotEngine(ctx, this.store, this.resolved.hot, this.resolved.route, undefined, this.embedder)
     this.cold = new ColdEngine(ctx, this.store, this.resolved.cold, this.resolved.route)
+    this.loops = new CognitiveLoopRegistry()
     this.readinessPromise = this.store.load().catch((error: unknown) => {
       this.ctx.logger.warn(`cognitive-pipeline: store load failed, continuing in-memory: ${String(error)}`)
     })
@@ -788,6 +861,7 @@ export class CognitivePipelineService extends Service {
       calibrationBuckets: this.store.calibrationBucketsSnapshot(),
       channelWeights: this.store.channelWeightsSnapshot(),
       exploration: this.explorationStats(),
+      loops: this.loops.stats(this.store.predictionsSnapshot()),
       taxonomy: this.store.taxonomySnapshot() ?? {
         version: 0,
         summaryShort: '（尚未完成首次重构）',
@@ -818,6 +892,77 @@ export class CognitivePipelineService extends Service {
    */
   explorationTasks(): readonly ExplorationTask[] {
     return this.store.explorationTasksSnapshot()
+  }
+
+  /** Register a meta-cognition loop (declarative "造新环路").
+   * @param spec - the loop's identity and description.
+   * @returns the service, for chaining.
+   */
+  registerLoop(spec: MetaLoopSpec): this {
+    this.loops.register(spec)
+    return this
+  }
+
+  /** Registered meta-cognition loops, in registration order.
+   * @returns the loop specs.
+   */
+  loopList(): readonly MetaLoopSpec[] {
+    return this.loops.list()
+  }
+
+  /**
+   * Run one meta-cognition loop decision through the SAME calibration ruler as
+   * every prediction. The loop's identity prefixes the situation
+   * (`loop:<name> 决策=…`), so the decision's history forms that loop's own
+   * special-experience layer — retrievable, aggregable, and calibrated.
+   * @param name - the registered loop name.
+   * @param decision - what the loop is deciding (becomes the action text).
+   * @param situation - the context the decision is made in.
+   * @param call - optional session/signal context.
+   * @returns the predict result; rejects with INVALID_LOOP_NAME when unregistered.
+   */
+  async decideLoop(
+    name: string,
+    decision: string,
+    situation: string,
+    call?: PipelineCallContext,
+  ): Promise<PredictResult> {
+    if (!this.loops.has(name)) {
+      throw new CognitivePipelineError(
+        `cognitive-pipeline: loop "${name}" is not registered (register it first)`,
+        'INVALID_LOOP_NAME',
+      )
+    }
+    return this.predict({
+      situation: `loop:${name} 情境=${situation}`,
+      action: decision,
+    }, call)
+  }
+
+  /**
+   * Feed the actual outcome of a loop decision back for calibration. Same
+   * report path as ordinary predictions.
+   * @param name - the registered loop name (used for validation only).
+   * @param predictionId - the decision's prediction id.
+   * @param actualOutcome - the observed outcome text.
+   * @param outcomeQuality - the outcome quality 0–10.
+   * @param call - optional session/signal context.
+   * @returns the feedback result.
+   */
+  async feedbackLoop(
+    name: string,
+    predictionId: string,
+    actualOutcome: string,
+    outcomeQuality: number,
+    call?: PipelineCallContext,
+  ): Promise<FeedbackResult> {
+    if (!this.loops.has(name)) {
+      throw new CognitivePipelineError(
+        `cognitive-pipeline: loop "${name}" is not registered (register it first)`,
+        'INVALID_LOOP_NAME',
+      )
+    }
+    return this.report({ predictionId, actualOutcome, outcomeQuality }, call)
   }
 
   /** The dynamic cognition prefix for the system-prompt section.

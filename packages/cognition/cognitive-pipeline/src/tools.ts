@@ -531,6 +531,21 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
               },
             },
           },
+          loops: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                name: { type: 'string', required: true },
+                description: { type: 'string', required: true },
+                prediction_count: { type: 'number', required: true },
+                resolved_count: { type: 'number', required: true },
+                avg_prediction_error: { type: 'number', required: true },
+              },
+            },
+          },
         },
       },
       render: renderJson,
@@ -572,8 +587,55 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
             failed: result.exploration.tasks.failed,
           },
         },
+        loops: result.loops.map(loop => ({
+          name: loop.name,
+          description: loop.description,
+          prediction_count: loop.predictionCount,
+          resolved_count: loop.resolvedCount,
+          avg_prediction_error: loop.avgPredictionError === null
+            ? -1
+            : Number(loop.avgPredictionError.toFixed(3)),
+        })),
       })
     },
     presentCall: () => ({ card: 'generic', title: 'Inspect cognitive memory', kind: 'read' }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'register_loop',
+    description: 'Register a named meta-cognition loop (造新环路): a special-experience layer whose decisions '
+      + 'flow through the SAME predict/report calibration ruler as every other prediction. Registering a loop '
+      + 'gives it a stable identity — its decision history is retrievable under a `loop:<name>` prefix and '
+      + 'aggregated per-loop in inspect_memory. Use this to make a new recurring decision (e.g. "when to '
+      + 'compact", "when to retry", "when to ask the user") learnable instead of hard-coded: register once, then '
+      + 'drive it with predict_outcome/report_outcome on `loop:<name> 情境=…` situations.',
+    parameters: {
+      name: {
+        type: 'string',
+        required: true,
+        description: 'Stable loop identity, lowercase with hyphens (e.g. "when-to-compact").',
+      },
+      description: {
+        type: 'string',
+        required: true,
+        description: 'One line describing what this loop decides.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          name: { type: 'string', required: true },
+          registered: { type: 'boolean', required: true },
+        },
+      },
+      render: renderJson,
+    },
+    execute(args) {
+      service.registerLoop({ name: args.name, description: args.description })
+      return Promise.resolve({ name: args.name, registered: true })
+    },
+    presentCall: args => ({ card: 'generic', title: `Register cognitive loop ${args.name}`, kind: 'other' }),
   }))
 }

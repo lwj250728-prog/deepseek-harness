@@ -382,6 +382,26 @@ export interface FeedbackResult {
   readonly rebuildReason: string | null
 }
 
+/** One registered meta-cognition loop (a named special-experience layer). */
+export interface MetaLoopSpec {
+  /** Stable loop identity; its predictions carry a `loop:<name>` situation
+   * prefix so the loop's decision history forms its own retrievable layer. */
+  readonly name: string
+  /** One-line description surfaced in inspection. */
+  readonly description: string
+}
+
+/** Per-loop aggregation for inspection: the loop's decision history under
+ * the same |calibrated − observed| ruler as every other prediction. */
+export interface CognitiveLoopStats {
+  readonly name: string
+  readonly description: string
+  readonly predictionCount: number
+  readonly resolvedCount: number
+  /** Mean |calibrated − observed| over resolved predictions, null when none. */
+  readonly avgPredictionError: number | null
+}
+
 /** Outcome of one cold-loop rebuild (the `/rebuild/trigger` contract). */
 export interface RebuildResult {
   readonly scope: 'local' | 'global'
@@ -432,6 +452,8 @@ export interface InspectResult {
     /** Autonomous task queue counts by status. */
     readonly tasks: { readonly pending: number; readonly running: number; readonly completed: number; readonly failed: number }
   }
+  /** Registered meta-cognition loops and their per-loop calibration history. */
+  readonly loops: readonly CognitiveLoopStats[]
   /** Recent resolved predictions, newest first. */
   readonly recentResolved: readonly Prediction[]
 }
