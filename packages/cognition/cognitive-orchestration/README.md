@@ -22,6 +22,7 @@ cognitive provider ──注入相关SAR经验──▶ delegate provider → ch
 - **回写（settle 后）** — the child's output and stop reason become a new experience (`任务调度/子任务执行/结果`). In policy mode whether to record is predicted (`policy:update`); the prediction is then calibrated with the observed outcome quality. When the child session reports token accounting, the experience's outcome carries a one-line **token summary** (`token：输入 / 输出 / 缓存命中 / 缓存写入 / 推理`) summed from the child session's `assistant/message` usage — the cost of a delegation is remembered alongside the pattern.
 - **委派捕获（tools/result）** — subagent tool calls that bypass the wrapped provider (the tool names in `delegationToolNames`, default `['subagent']`) are captured at `tools/result`: a `policy:delegate` prediction ("is delegating this task worth it") is calibrated against the actual outcome, and a `委派决策` experience (task, execution summary, outcome) is written back — including the token summary when the child session can be located (the newest session whose `parentSession` is the delegating agent). This gives **ordinary subagent delegations** the same learnable "when to delegate" strategy the wrapped provider already has, without requiring the cognitive provider.
 - **决策学习** — `policy:*` predictions are ordinary predictions in the pipeline: with enough of them, `rebuild_taxonomy` re-clusters them into learned "when to inject / when to record / when to delegate" strategies.
+- **自主探索调度（跨会话执行）** — with `exploreEnabled` (default true), a timer polls `exploration_tasks.json` (the pipeline's autonomous task queue, fed by the pipeline's `explore()` API or `exploreAutoDispatch`) on `exploreIntervalMs`. Pending tasks are picked up — at most `exploreMaxConcurrent` at a time — marked `running`, and executed as **silent cognitive children** of a dedicated exploration anchor session (`cognitive-explorer`): the child prompt asks the model to complete the goal without asking the user, the outcome is written back as an experience (`探索目标/探索执行/结果`), and the task settles `completed`/`failed`. The queue and its status counts are visible through the pipeline's `inspect`. This is the cross-session execution loop behind scheme-2 active exploration: a session auto-starts and silently completes the exploration.
 
 ## Install
 
@@ -53,6 +54,9 @@ ctx.subagents.start('cognitive', { prompt, parent, signal })
 | `policyEnabled` | `true` | Whether inject/record decisions are predicted and calibrated |
 | `policyDecisionThreshold` | `0.55` | Probability at/above which a policy prediction approves the action |
 | `delegationToolNames` | `['subagent']` | Tool names captured at `tools/result` as tool-level delegations (predict `policy:delegate`, write back a `委派决策` experience). The cognitive-wrapped tool is excluded by default because its children already write back through the provider's settle path |
+| `exploreEnabled` | `true` | Whether the timer-driven exploration dispatcher runs (polls pending tasks and executes them silently) |
+| `exploreIntervalMs` | `3600000` | Polling interval for pending exploration tasks, in milliseconds |
+| `exploreMaxConcurrent` | `1` | Maximum exploration tasks executing concurrently |
 
 ## Model Experience
 

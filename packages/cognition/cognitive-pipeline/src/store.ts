@@ -15,6 +15,8 @@ import type {
   Experience,
   ExploreEntry,
   ExplorationState,
+  ExplorationTask,
+  ExplorationTaskStatus,
   Prediction,
   TaxonomyState,
   TempStrategy,
@@ -100,10 +102,12 @@ export class CognitiveStore {
   private calibration = emptyBuckets()
   private channelWeights: ChannelWeights = { semantic: 1, situational: 1, symptom: 1, outcome: 1 }
   private explorationState: ExplorationState = { date: todayKey(), used: 0, entries: [] }
+  private explorationTasks = new Map<string, ExplorationTask>()
   private taxonomyState: TaxonomyState | null = null
   private nextExpSeq = 1
   private nextPredictionSeq = 1
   private nextClusterSeq = 1
+  private nextTaskSeq = 1
 
   /**
    * @param root - directory that will hold the JSONL/JSON state files.
@@ -119,7 +123,10 @@ export class CognitiveStore {
   /** Create the root and load every table. Missing files start empty. */
   async load(): Promise<void> {
     await mkdir(this.root, { recursive: true })
-    const [experiences, predictions, tempStrategies, clusters, calibration, channelWeights, exploration, taxonomy] = await Promise.all([
+    const [
+      experiences, predictions, tempStrategies, clusters, calibration,
+      channelWeights, exploration, tasks, taxonomy,
+    ] = await Promise.all([
       readFile(this.file('experiences.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('predictions.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('temp_strategies.jsonl'), 'utf8').catch(() => ''),
@@ -127,6 +134,7 @@ export class CognitiveStore {
       readFile(this.file('calibration.json'), 'utf8').catch(() => ''),
       readFile(this.file('channel_weights.json'), 'utf8').catch(() => ''),
       readFile(this.file('exploration.json'), 'utf8').catch(() => ''),
+      readFile(this.file('exploration_tasks.json'), 'utf8').catch(() => ''),
       readFile(this.file('taxonomy.json'), 'utf8').catch(() => ''),
     ])
     for (const record of parseLines(experiences)) {
@@ -191,6 +199,19 @@ export class CognitiveStore {
             const e = entry as Record<string, unknown>
             return typeof e.ts === 'number' && typeof e.action === 'string' && typeof e.scratchpadHash === 'string'
           }),
+        }
+      }
+    }
+    if (tasks !== '') {
+      const parsed = JSON.parse(tasks) as unknown
+      if (Array.isArray(parsed)) {
+        for (const record of parsed) {
+          if (typeof record !== 'object' || record === null) continue
+          const task = record as ExplorationTask
+          if (typeof task.taskId !== 'string' || typeof task.goal !== 'string') continue
+          this.explorationTasks.set(task.taskId, task)
+          const seq = Number(task.taskId.replace('task_', ''))
+          if (Number.isFinite(seq)) this.nextTaskSeq = Math.max(this.nextTaskSeq, seq + 1)
         }
       }
     }
@@ -605,6 +626,49 @@ export class CognitiveStore {
       this.explorationState = { date: current.date, used: current.used, entries: updated }
       this.enqueue('exploration.json', this.explorationState)
     }
+  }
+
+  // ── autonomous exploration tasks ─────────────────────────────────────────
+
+  /** Snapshot of every queued exploration task, insertion order. */
+  explorationTasksSnapshot(): readonly ExplorationTask[] {
+    return [...this.explorationTasks.values()]
+  }
+
+  /** Queue one autonomous exploration task.
+   * @param goal - the exploration goal a background session will pursue.
+   * @returns the new task.
+   */
+  addExplorationTask(goal: string): ExplorationTask {
+    const task: ExplorationTask = {
+      taskId: `task_${this.nextTaskSeq}`,
+      goal,
+      status: 'pending',
+      createdAt: Date.now(),
+      pickedUpAt: null,
+      result: null,
+    }
+    this.nextTaskSeq += 1
+    this.explorationTasks.set(task.taskId, task)
+    this.enqueue('exploration_tasks.json', [...this.explorationTasks.values()])
+    return task
+  }
+
+  /** Transition one task's status, recording pickup time and the result.
+   * @param taskId - the task to update.
+   * @param patch - the status/pickedUpAt/result fields to apply.
+   * @returns the updated task, or undefined when unknown.
+   */
+  updateExplorationTask(
+    taskId: string,
+    patch: { status?: ExplorationTaskStatus; pickedUpAt?: number | null; result?: string | null },
+  ): ExplorationTask | undefined {
+    const current = this.explorationTasks.get(taskId)
+    if (current === undefined) return undefined
+    const next: ExplorationTask = { ...current, ...patch }
+    this.explorationTasks.set(taskId, next)
+    this.enqueue('exploration_tasks.json', [...this.explorationTasks.values()])
+    return next
   }
 
   // ── clusters + taxonomy ──────────────────────────────────────────────────

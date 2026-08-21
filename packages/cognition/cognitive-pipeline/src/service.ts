@@ -25,6 +25,7 @@ import type {
   CalibrationBucket,
   Cluster,
   Experience,
+  ExplorationTask,
   FeedbackInput,
   FeedbackResult,
   InspectResult,
@@ -81,6 +82,9 @@ export interface CognitivePipelineConfig {
   /** Words marking an action as irreversible; such actions are never counted
    * as active exploration (default: 删除/清空/覆盖/发布/推送/rm/移除/迁移/重置/格式化…). */
   exploreRiskWords?: string[]
+  /** Whether reversible novel attempts also queue an autonomous exploration
+   * task for a background session to execute silently (default false). */
+  exploreAutoDispatch?: boolean
   /** Layer-2 shrinkage alpha (default 50). */
   shrinkageAlpha?: number
   /** Minimum 80%-interval width (default 0.2). */
@@ -171,6 +175,8 @@ export interface ResolvedCognitivePipelineConfig {
   readonly exploreDailyBudget: number
   /** Irreversible-action markers that exclude an attempt from the budget. */
   readonly exploreRiskWords: readonly string[]
+  /** Whether reversible novel attempts queue autonomous exploration tasks. */
+  readonly exploreAutoDispatch: boolean
 }
 
 /** Config schema for Loader validation and defaulting. */
@@ -189,6 +195,7 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   tempStrategyMatchThreshold: z.number().min(0).max(1).default(0.5),
   exploreDailyBudget: z.number().step(1).min(0).max(100).default(3),
   exploreRiskWords: z.array(z.string()).default(['删除', '清空', '覆盖', '发布', '推送', 'rm', '移除', '迁移', '重置', '格式化']),
+  exploreAutoDispatch: z.boolean().default(false),
   shrinkageAlpha: z.number().min(0).default(50),
   minConfidenceIntervalWidth: z.number().min(0).max(1).default(0.2),
   successReferenceThreshold: z.number().min(0).max(1).default(0.4),
@@ -249,6 +256,7 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
       refineMaxDrops: config.refineMaxDrops ?? 2,
       exploreDailyBudget: config.exploreDailyBudget ?? 3,
       exploreRiskWords: Object.freeze(config.exploreRiskWords ?? ['删除', '清空', '覆盖', '发布', '推送', 'rm', '移除', '迁移', '重置', '格式化']),
+      exploreAutoDispatch: config.exploreAutoDispatch ?? false,
       tempStrategyTtlMs: config.tempStrategyTtlMs ?? 24 * 60 * 60 * 1000,
       tempStrategyMatchThreshold: config.tempStrategyMatchThreshold ?? 0.5,
     }),
@@ -284,6 +292,7 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
       }),
     exploreDailyBudget: config.exploreDailyBudget ?? 3,
     exploreRiskWords: Object.freeze(config.exploreRiskWords ?? ['删除', '清空', '覆盖', '发布', '推送', 'rm', '移除', '迁移', '重置', '格式化']),
+    exploreAutoDispatch: config.exploreAutoDispatch ?? false,
   })
 }
 
@@ -759,6 +768,28 @@ export class CognitivePipelineService extends Service {
     }
   }
 
+  /** Queue an autonomous exploration task for a background session to execute
+   * silently (scheme 2 cross-session dispatch). The goal text becomes the
+   * executing session's task; the result is written back as an experience.
+   * @param goal - the exploration goal.
+   * @returns the queued task.
+   */
+  async explore(goal: string): Promise<ExplorationTask> {
+    if (goal.trim().length === 0) {
+      throw new CognitivePipelineError('cognitive-pipeline: exploration goal must not be empty', 'EMPTY_EXPLORE_GOAL')
+    }
+    const task = this.store.addExplorationTask(goal.trim())
+    await this.store.flush()
+    return task
+  }
+
+  /** Snapshot of the queued exploration tasks (public for inspection).
+   * @returns the task list, insertion order.
+   */
+  explorationTasks(): readonly ExplorationTask[] {
+    return this.store.explorationTasksSnapshot()
+  }
+
   /** The dynamic cognition prefix for the system-prompt section.
    * @returns the 附录B prefix text.
    */
@@ -832,12 +863,19 @@ export class CognitivePipelineService extends Service {
     const state = this.store.explorationSnapshot()
     const graduated = state.entries.filter(entry => entry.outcome === 'graduated').length
     const expired = state.entries.filter(entry => entry.outcome === 'expired').length
+    const tasks = this.store.explorationTasksSnapshot()
     return {
       budget: this.resolved.exploreDailyBudget,
       used: state.used,
       total: state.entries.length,
       graduated,
       expired,
+      tasks: {
+        pending: tasks.filter(task => task.status === 'pending').length,
+        running: tasks.filter(task => task.status === 'running').length,
+        completed: tasks.filter(task => task.status === 'completed').length,
+        failed: tasks.filter(task => task.status === 'failed').length,
+      },
     }
   }
 }

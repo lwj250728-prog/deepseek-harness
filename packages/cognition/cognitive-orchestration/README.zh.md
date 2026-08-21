@@ -23,6 +23,7 @@ cognitive provider ──注入相关SAR经验──▶ delegate provider → ch
 - **回写（settle 后）** — 子任务的输出与停止原因成为一条新经验（任务调度/子任务执行/结果）。策略模式下是否入库由 `policy:update` 预测决定；随后用观测到的结果质量校准该预测。当子代理会话报告了 token 计费时，经验的结果带一行 **token 摘要**（`token：输入 / 输出 / 缓存命中 / 缓存写入 / 推理`），由子代理会话的 `assistant/message` usage 累加——委派的成本与模式一起被记住。
 - **委派捕获（tools/result）** — 绕过包装 provider 的子代理工具调用（`delegationToolNames` 中的工具名，默认 `['subagent']`）在 `tools/result` 被捕获：`policy:delegate` 预测（"把这个任务委派给子代理值不值"）用实际结果校准，并写回一条 `委派决策` 经验（任务、执行摘要、结果）——当能定位到子代理会话（`parentSession` 指向委派 agent 的最新会话）时同样带上 token 摘要。这让**普通 subagent 委派**也获得与包装 provider 相同的"何时委派"可学习策略，无需经过 cognitive provider。
 - **决策学习** — `policy:*` 预测就是流水线中的普通预测：积累足够后，`rebuild_taxonomy` 会把它们重聚类成学到的"何时注入 / 何时入库 / 何时委派"策略。
+- **自主探索调度（跨会话执行）** — `exploreEnabled`（默认 true）开启时，一个定时器按 `exploreIntervalMs` 轮询 `exploration_tasks.json`（流水线的自主任务队列，由流水线的 `explore()` API 或 `exploreAutoDispatch` 填充）。待处理任务被拾取——同时最多 `exploreMaxConcurrent` 个——标记为 running，并作为**静默 cognitive 子任务**在专用探索锚点会话（`cognitive-explorer`）下执行：子任务提示词要求模型不问用户直接完成目标，结果回写为经验（探索目标/探索执行/结果），任务落定为 completed/failed。队列及其状态计数通过流水线的 `inspect` 可见。这就是 scheme-2 主动探索背后的跨会话执行环：会话自动启动并静默完成探索。
 
 ## 安装
 
@@ -53,6 +54,10 @@ ctx.subagents.start('cognitive', { prompt, parent, signal })
 | `minSimilarity` | `0.3` | 判定经验相关的最小行动向量相似度 |
 | `policyEnabled` | `true` | 是否对注入/入库决策做预测与校准 |
 | `policyDecisionThreshold` | `0.55` | 策略预测批准动作所需的最低概率 |
+| `delegationToolNames` | `['subagent']` | 在 `tools/result` 被捕获为工具级委派的工具名（预测 `policy:delegate`，写回 `委派决策` 经验）。cognitive 包装工具默认排除，因为其子任务已通过 provider 的 settle 路径回写 |
+| `exploreEnabled` | `true` | 是否运行定时驱动的探索调度器（轮询待处理任务并静默执行） |
+| `exploreIntervalMs` | `3600000` | 待处理探索任务的轮询间隔（毫秒） |
+| `exploreMaxConcurrent` | `1` | 同时执行的探索任务上限 |
 
 ## Model Experience
 

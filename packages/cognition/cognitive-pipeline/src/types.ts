@@ -179,6 +179,24 @@ export interface ExplorationState {
   readonly entries: readonly ExploreEntry[]
 }
 
+/** Lifecycle of one autonomous exploration task (scheme 2 execution). */
+export type ExplorationTaskStatus = 'pending' | 'running' | 'completed' | 'failed'
+
+/** One queued autonomous exploration: a cross-session goal a background
+ * agent session picks up, executes silently, and writes back as experience. */
+export interface ExplorationTask {
+  readonly taskId: string
+  /** The exploration goal the executing session is told to pursue. */
+  readonly goal: string
+  readonly status: ExplorationTaskStatus
+  /** Epoch milliseconds at creation. */
+  readonly createdAt: number
+  /** Epoch milliseconds when a scheduler session picked it up, null while pending. */
+  readonly pickedUpAt: number | null
+  /** The executing session's outcome, null until settled. */
+  readonly result: string | null
+}
+
 /** Lifetime calibration statistics for one confidence decile. */
 export interface CalibrationBucket {
   /** Decile index 0–9 covering [bucketIndex*10, (bucketIndex+1)*10) percent. */
@@ -389,6 +407,8 @@ export interface InspectResult {
     readonly total: number
     readonly graduated: number
     readonly expired: number
+    /** Autonomous task queue counts by status. */
+    readonly tasks: { readonly pending: number; readonly running: number; readonly completed: number; readonly failed: number }
   }
   /** Recent resolved predictions, newest first. */
   readonly recentResolved: readonly Prediction[]

@@ -514,6 +514,17 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
               total: { type: 'number', required: true },
               graduated: { type: 'number', required: true },
               expired: { type: 'number', required: true },
+              tasks: {
+                type: 'object',
+                additionalProperties: false,
+                required: true,
+                properties: {
+                  pending: { type: 'number', required: true },
+                  running: { type: 'number', required: true },
+                  completed: { type: 'number', required: true },
+                  failed: { type: 'number', required: true },
+                },
+              },
             },
           },
         },
@@ -545,6 +556,12 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           total: result.exploration.total,
           graduated: result.exploration.graduated,
           expired: result.exploration.expired,
+          tasks: {
+            pending: result.exploration.tasks.pending,
+            running: result.exploration.tasks.running,
+            completed: result.exploration.tasks.completed,
+            failed: result.exploration.tasks.failed,
+          },
         },
       })
     },

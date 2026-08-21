@@ -510,4 +510,29 @@ describe('hot loop (predict_outcome)', () => {
       await teardown()
     }
   })
+
+  it('queues an autonomous exploration task when exploreAutoDispatch is enabled', async () => {
+    const { ctx, teardown } = await pipelineHarness({ exploreDailyBudget: 3, exploreAutoDispatch: true })
+    try {
+      await ctx.cognitivePipeline.predict({ situation: '未知领域', action: '尝试新的搜索策略' })
+      const tasks = ctx.cognitivePipeline.store.explorationTasksSnapshot()
+      expect(tasks.length).toBe(1)
+      expect(tasks[0]?.goal).toContain('尝试新的搜索策略')
+      expect(tasks[0]?.status).toBe('pending')
+      const insp = ctx.cognitivePipeline.inspect()
+      expect(insp.exploration.tasks.pending).toBe(1)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('does not queue an autonomous task when exploreAutoDispatch is off', async () => {
+    const { ctx, teardown } = await pipelineHarness({ exploreDailyBudget: 3 })
+    try {
+      await ctx.cognitivePipeline.predict({ situation: '未知领域', action: '尝试新的搜索策略' })
+      expect(ctx.cognitivePipeline.store.explorationTasksSnapshot().length).toBe(0)
+    } finally {
+      await teardown()
+    }
+  })
 })

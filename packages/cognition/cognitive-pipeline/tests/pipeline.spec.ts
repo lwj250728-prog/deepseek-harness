@@ -554,4 +554,40 @@ describe('cognitive pipeline integration', () => {
     expect(episode.toolCallCount).toBe(0)
     expect(episode.outcome).toContain('轮次结束（error）')
   })
+
+  it('queues and inspects an autonomous exploration task through the explore() API', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const task = await ctx.cognitivePipeline.explore('验证新的检索重排策略是否稳定')
+      expect(task.taskId).toBe('task_1')
+      expect(task.status).toBe('pending')
+      expect(task.result).toBeNull()
+      expect(ctx.cognitivePipeline.explorationTasks().length).toBe(1)
+
+      const insp = ctx.cognitivePipeline.inspect()
+      expect(insp.exploration.tasks.pending).toBe(1)
+
+      // A scheduler updates the task; the snapshot reflects the transition.
+      ctx.cognitivePipeline.store.updateExplorationTask(task.taskId, {
+        status: 'completed',
+        pickedUpAt: Date.now(),
+        result: '探索完成：策略稳定',
+      })
+      const settled = ctx.cognitivePipeline.store.explorationTasksSnapshot()[0]
+      expect(settled?.status).toBe('completed')
+      expect(settled?.result).toContain('策略稳定')
+      expect(ctx.cognitivePipeline.inspect().exploration.tasks.completed).toBe(1)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('rejects an empty exploration goal', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      await expect(ctx.cognitivePipeline.explore('   ')).rejects.toThrow(/must not be empty/)
+    } finally {
+      await teardown()
+    }
+  })
 })

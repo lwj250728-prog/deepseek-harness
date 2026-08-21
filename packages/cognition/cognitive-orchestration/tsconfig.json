@@ -15,6 +15,12 @@
       "path": "../../../vendor/schemastery"
     },
     {
+      "path": "../../../vendor/timer"
+    },
+    {
+      "path": "../../core/agent"
+    },
+    {
       "path": "../../llm/llm"
     },
     {

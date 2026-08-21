@@ -10,9 +10,10 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
-import type { Session } from '@deepseek-ai/dsh-session'
+import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type {
   ResolvedSubagentStartRequest,
   SubagentProvider,
@@ -20,7 +21,10 @@ import type {
   SubagentRun,
   SubagentStopReason,
 } from '@deepseek-ai/dsh-subagent'
-import type { CognitivePipelineService } from '@deepseek-ai/dsh-cognitive-pipeline'
+import type {
+  CognitivePipelineService,
+  ExplorationTask,
+} from '@deepseek-ai/dsh-cognitive-pipeline'
 import { actionVector, cosine, symptomOverlap } from '@deepseek-ai/dsh-cognitive-pipeline'
 /** Orchestration configuration (all defaults conservative). */
 export interface OrchestrationConfig {
@@ -46,6 +50,12 @@ export interface OrchestrationConfig {
    * already write back through `settle()`.
    */
   readonly delegationToolNames: string[]
+  /** Whether the timer-driven exploration dispatcher polls pending tasks. */
+  readonly exploreEnabled: boolean
+  /** Polling interval for pending exploration tasks, in milliseconds. */
+  readonly exploreIntervalMs: number
+  /** Maximum exploration tasks executing concurrently. */
+  readonly exploreMaxConcurrent: number
 }
 
 /**
@@ -62,6 +72,9 @@ export function resolveOrchestrationConfig(config: Partial<OrchestrationConfig>)
     policyEnabled: config.policyEnabled ?? true,
     policyDecisionThreshold: config.policyDecisionThreshold ?? 0.55,
     delegationToolNames: config.delegationToolNames ?? ['subagent'],
+    exploreEnabled: config.exploreEnabled ?? true,
+    exploreIntervalMs: config.exploreIntervalMs ?? 60 * 60 * 1000,
+    exploreMaxConcurrent: config.exploreMaxConcurrent ?? 1,
   }
 }
 
@@ -194,30 +207,126 @@ export function delegationOutput(result: ToolDelegationResult): string {
     .trim()
 }
 
+/** The dedicated anchor session exploration children hang off. */
+const EXPLORER_SESSION_ID = SessionId('cognitive-explorer')
+
+/**
+ * Render the silent exploration prompt for one queued task.
+ * @param goal - the exploration goal text.
+ * @returns the child prompt blocks.
+ */
+export function explorationPrompt(goal: string): ContentBlock[] {
+  return [{
+    type: 'text',
+    text: '你是认知探索代理。请在后台静默完成以下探索目标，不要询问用户，直接执行并返回结果。\n\n'
+      + `探索目标：\n${goal}\n\n`
+      + '完成后请用简洁中文总结你的发现、结论与后续建议。',
+  }]
+}
+
 /**
  * The orchestrator: retrieval, injection, decision prediction, and outcome
  * write-back over one cognitive pipeline service.
  */
 export class CognitiveOrchestrator {
+  private readonly ctx: Context
   private readonly pipeline: CognitivePipelineService
   private readonly sessions: { list(): readonly Session[] }
   private readonly config: OrchestrationConfig
+  /** Lazily created exploration anchor agent, reused across all tasks. */
+  private explorerHandle: AgentHandle | undefined
 
   /**
-   * @param _ctx - context carrying the subagent runtime (unused by the engine).
+   * @param ctx - context carrying the subagent runtime, agent registry, and timer.
    * @param pipeline - the cognitive pipeline service to read and write.
    * @param sessions - the session store, used to locate child sessions by parent.
    * @param config - resolved orchestration configuration.
    */
   constructor(
-    _ctx: Context,
+    ctx: Context,
     pipeline: CognitivePipelineService,
     sessions: { list(): readonly Session[] },
     config: OrchestrationConfig,
   ) {
+    this.ctx = ctx
     this.pipeline = pipeline
     this.sessions = sessions
     this.config = config
+  }
+
+  /**
+   * Run one exploration dispatch tick: pick pending tasks up to the
+   * concurrency cap, mark them running, and start each as a silent cognitive
+   * child. Results are written back as experiences and the task settles
+   * completed/failed. Idempotent per tick — tasks already running are skipped.
+   */
+  async dispatchExplorations(): Promise<void> {
+    if (!this.config.exploreEnabled) return
+    const tasks = this.pipeline.store.explorationTasksSnapshot()
+    const pending = tasks.filter(task => task.status === 'pending')
+    const running = tasks.filter(task => task.status === 'running').length
+    const slots = Math.max(0, this.config.exploreMaxConcurrent - running)
+    if (pending.length === 0 || slots === 0) return
+    const parent = await this.explorerParent()
+    if (parent === undefined) return
+    for (const task of pending.slice(0, slots)) {
+      void this.runExploration(task, parent)
+    }
+  }
+
+  /**
+   * Resolve the dedicated exploration anchor agent. A pre-registered agent
+   * under the explorer session id is reused (tests and restarts); otherwise a
+   * fresh one is created through the agent factory with the default model
+   * route when available. Returns undefined when no agent world exists.
+   */
+  private async explorerParent(): Promise<Agent | undefined> {
+    const agents = this.ctx.get('agents')
+    if (agents === undefined) return undefined
+    const existing = agents.get(EXPLORER_SESSION_ID)
+    if (existing !== undefined) return existing
+    if (this.explorerHandle !== undefined) return this.explorerHandle.agent
+    try {
+      const defaultModel = this.ctx.get('agentDefaultModel') as { currentSelection(): { provider: string; model: string } } | undefined
+      const selection = defaultModel?.currentSelection()
+      const handle = await agents.create({
+        sessionId: EXPLORER_SESSION_ID,
+        agentOptions: selection === undefined ? {} : { provider: selection.provider, model: selection.model },
+      })
+      this.explorerHandle = handle
+      this.ctx.effect(() => () => { void handle.dispose() }, 'cognitive-orchestration: exploration anchor')
+      return handle.agent
+    } catch (error) {
+      this.ctx.logger.warn(`cognitive-orchestration: exploration parent unavailable: ${String(error)}`)
+      return undefined
+    }
+  }
+
+  /** Run one exploration task to completion and settle its task record. */
+  private async runExploration(task: ExplorationTask, parent: Agent): Promise<void> {
+    this.pipeline.store.updateExplorationTask(task.taskId, { status: 'running', pickedUpAt: Date.now() })
+    try {
+      const run = await this.ctx.subagents.start(this.config.providerName, {
+        label: `认知探索：${task.goal.slice(0, 30)}`,
+        prompt: explorationPrompt(task.goal),
+        parent,
+        signal: new AbortController().signal,
+      })
+      const result = await run.result
+      await run.dispose()
+      const output = outputText(result.output)
+      const summary = `探索目标：${task.goal}\n探索执行：${output.slice(0, 300) || '（无文本输出）'}\n结果：${result.stopReason}`
+      await this.pipeline.remember({ rawText: summary })
+      this.pipeline.store.updateExplorationTask(task.taskId, {
+        status: result.stopReason === 'completed' ? 'completed' : 'failed',
+        result: summary,
+      })
+    } catch (error) {
+      this.pipeline.store.updateExplorationTask(task.taskId, {
+        status: 'failed',
+        result: `探索异常：${String(error)}`,
+      })
+    }
   }
 
   /**

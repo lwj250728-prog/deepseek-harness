@@ -51,6 +51,9 @@ export interface HotEngineConfig {
   /** Irreversible-action markers that exclude a novel attempt from the
    * exploration budget (scheme 2 safety gate). */
   readonly exploreRiskWords: readonly string[]
+  /** Whether a reversible budgeted novel attempt also queues an autonomous
+   * exploration task for a background session (default false). */
+  readonly exploreAutoDispatch: boolean
   readonly tempStrategyTtlMs: number
   readonly tempStrategyMatchThreshold: number
 }
@@ -537,6 +540,12 @@ export class HotEngine {
           reversible: true,
           outcome: null,
         })
+        // Autonomous dispatch: queue a background exploration task so a
+        // scheduler session can silently execute the attempt and write the
+        // result back as experience.
+        if (this.config.exploreAutoDispatch) {
+          this.store.addExplorationTask(`探索行动：${input.action}\n情境：${input.situation}`)
+        }
       }
       const budgetNote = reversible
         ? (budgetLeft

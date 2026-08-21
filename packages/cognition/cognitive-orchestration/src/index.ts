@@ -11,6 +11,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/cordis-plugin-timer'
 import z from '@deepseek-ai/schemastery'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-llm'
@@ -26,7 +27,7 @@ import type { OrchestrationConfig } from './orchestrator.ts'
 export const name = 'cognitive-orchestration'
 
 /** Services required before the orchestration layer can mount. */
-export const inject = ['subagents', 'cognitivePipeline', 'sessions', 'tools']
+export const inject = ['subagents', 'cognitivePipeline', 'sessions', 'timer', 'tools']
 
 /** Plugin configuration mirrors the orchestrator configuration. */
 export type Config = Partial<OrchestrationConfig>
@@ -40,6 +41,9 @@ export const Config: z<Config> = z.object({
   policyEnabled: z.boolean().default(true),
   policyDecisionThreshold: z.number().min(0).max(1).default(0.55),
   delegationToolNames: z.array(z.string()).default(['subagent']),
+  exploreEnabled: z.boolean().default(true),
+  exploreIntervalMs: z.number().step(1).min(60_000).default(60 * 60 * 1000),
+  exploreMaxConcurrent: z.number().step(1).min(1).max(5).default(1),
 })
 
 /**
@@ -81,9 +85,20 @@ export function apply(ctx: Context, config: Config): void {
         })
     })
   }
+  // Timer-driven autonomous exploration: pending cross-session tasks are picked
+  // up silently by a background subagent and written back as experiences. The
+  // interval is registered through the timer service, which disposes it with
+  // this plugin's fiber.
+  if (resolved.exploreEnabled) {
+    ctx.interval(() => {
+      void orchestrator.dispatchExplorations().catch((error: unknown) => {
+        ctx.logger.warn(`cognitive-orchestration: exploration dispatch failed: ${String(error)}`)
+      })
+    }, resolved.exploreIntervalMs)
+  }
 }
 
 /** Re-export the orchestrator and its helpers for programmatic use. */
-export { CognitiveOrchestrator, resolveOrchestrationConfig } from './orchestrator.ts'
+export { CognitiveOrchestrator, resolveOrchestrationConfig, explorationPrompt } from './orchestrator.ts'
 export type { OrchestrationConfig, ExperienceHit } from './orchestrator.ts'
 export type { ToolDelegationExec, ToolDelegationResult } from './orchestrator.ts'

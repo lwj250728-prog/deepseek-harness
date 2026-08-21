@@ -110,6 +110,7 @@ ctx.cognitivePipeline.store                                      // → Cognitiv
 | `autoAccumulate` | `false` | 完成的轮次自动沉淀为经验，由 LLM 路由判断是否值得（纯聊天不进入门） |
 | `exploreDailyBudget` | `3` | 主动探索每日预算（scheme 2）：每天有多少次可逆的 novel 试探计入探索配额 |
 | `exploreRiskWords` | `['删除','清空','覆盖','发布','推送','rm','移除','迁移','重置','格式化']` | 不可逆动作标记；含任一标记的 novel 试探永不纳入主动探索预算（安全闸） |
+| `exploreAutoDispatch` | `false` | 每次计入预算的可逆 novel 试探都入队一条自主探索任务（`exploration_tasks.json`）；调度会话拾取任务并把结果回写为经验（保守默认：仅显式开启才入队） |
 | `embedding` | 未设置 | 真实嵌入接缝（路线图 R3）：OpenAI 兼容 `/embeddings` 对象 `{ baseUrl?, model?, apiKeyEnv?, apiKey? }`（默认 `https://api.deepseek.com` / `deepseek-embedding` / `DEEPSEEK_API_KEY`）。启用后经验写入时存储行动嵌入，语义检索通道优先用嵌入余弦；无向量的查询/经验回退哈希余弦——端点不可达只是降级相似度，绝不破坏管线 |
 | `referenceTopK` | `5` | 一次参考派生锚定的相似历史命中数 |
 | `referenceMinSimilarity` | `0.3` | 历史命中作为参考派生锚点所需的最小双轴相似度；低于此值（或仅有模拟命中）时派生不调用 LLM 直接拒绝 |

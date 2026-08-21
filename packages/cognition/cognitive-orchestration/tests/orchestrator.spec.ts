@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { Context } from '@deepseek-ai/cordis'
+import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { Inbox } from '@deepseek-ai/dsh-agent'
 import { harness, runChild } from './helpers.ts'
 import * as cognitiveOrchestration from '../src/index.ts'
 import {
@@ -14,6 +15,26 @@ import {
 } from '../src/orchestrator.ts'
 import { CallId, createMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
+
+/** Register the dedicated exploration anchor agent under its stable id. */
+function registerExplorer(ctx: Context): void {
+  const session = Session.create(SessionId('cognitive-explorer'))
+  ctx.agents.register({
+    id: session.id,
+    options: {},
+    session,
+    inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+    get status(): import('@deepseek-ai/dsh-agent').AgentStatus { return 'idle' },
+    ctx: new Context(),
+    send: () => {},
+    followup: () => {},
+    steer: () => ({ outcome: Promise.resolve({ status: 'rejected' as const }) }),
+    inject: () => {},
+    cancel: () => {},
+    runMaintenance: task => task(new AbortController().signal),
+    whenIdle: () => Promise.resolve(),
+  })
+}
 
 /** Emit a fake tool-level subagent delegation outcome. */
 function emitDelegation(ctx: Context, agent: Agent, arguments_: Record<string, unknown>, result: Record<string, unknown>): void {
@@ -193,6 +214,89 @@ describe('cognitive-orchestration', () => {
       expect(ctx.cognitivePipeline.store.experiencesSnapshot().length).toBe(before + 1)
       expect(ctx.cognitivePipeline.store.predictionsSnapshot()
         .filter(p => p.situation.startsWith('policy:delegate'))).toHaveLength(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('dispatches a pending exploration task: silent cognitive child, experience write-back, task completed', async () => {
+    const { ctx, delegate, orchestrator, teardown } = await harness({ exploreMaxConcurrent: 1 })
+    try {
+      // Register the dedicated explorer anchor agent the dispatcher reuses.
+      registerExplorer(ctx)
+
+      const before = ctx.cognitivePipeline.store.experiencesSnapshot().length
+      await ctx.cognitivePipeline.explore('验证新的检索重排策略是否稳定')
+      await orchestrator.dispatchExplorations()
+      await settleAsync()
+
+      // The child prompt carries the silent exploration goal.
+      expect(delegate.prompts.length).toBe(1)
+      const promptText = outputText(delegate.prompts[0] ?? [])
+      expect(promptText).toContain('验证新的检索重排策略是否稳定')
+      expect(promptText).toContain('静默')
+
+      // The outcome was written back as an experience and the task settled.
+      expect(ctx.cognitivePipeline.store.experiencesSnapshot().length).toBe(before + 1)
+      const latest = ctx.cognitivePipeline.store.experiencesSnapshot().at(-1)
+      expect(latest?.sar.situation).toContain('探索目标')
+      const task = ctx.cognitivePipeline.store.explorationTasksSnapshot()[0]
+      expect(task?.status).toBe('completed')
+      expect(task?.pickedUpAt).not.toBeNull()
+      expect(task?.result).toContain('completed')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('marks a failed exploration child as a failed task', async () => {
+    const { ctx, delegate, orchestrator, teardown } = await harness()
+    try {
+      registerExplorer(ctx)
+      delegate.script('error', '模型调用失败')
+      await ctx.cognitivePipeline.explore('尝试有风险的探索')
+      await orchestrator.dispatchExplorations()
+      await settleAsync()
+
+      const task = ctx.cognitivePipeline.store.explorationTasksSnapshot()[0]
+      expect(task?.status).toBe('failed')
+      expect(task?.result).toContain('error')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('respects the exploration concurrency cap and skips running tasks', async () => {
+    const { ctx, orchestrator, teardown } = await harness({ exploreMaxConcurrent: 1 })
+    try {
+      registerExplorer(ctx)
+      await ctx.cognitivePipeline.explore('任务甲')
+      await ctx.cognitivePipeline.explore('任务乙')
+      await orchestrator.dispatchExplorations()
+      await settleAsync()
+
+      const tasks = ctx.cognitivePipeline.store.explorationTasksSnapshot()
+      expect(tasks.length).toBe(2)
+      // With max 1 concurrent, at most one task runs per tick; the other stays
+      // pending (the first completed synchronously through the fake delegate,
+      // so a second tick would pick it up).
+      expect(tasks.some(task => task.status === 'completed')).toBe(true)
+      expect(tasks.filter(task => task.status === 'pending').length).toBeGreaterThanOrEqual(1)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('does not dispatch when exploration is disabled', async () => {
+    const { ctx, delegate, orchestrator, teardown } = await harness({ exploreEnabled: false })
+    try {
+      registerExplorer(ctx)
+      await ctx.cognitivePipeline.explore('不会执行的任务')
+      await orchestrator.dispatchExplorations()
+      await settleAsync()
+      expect(delegate.prompts.length).toBe(0)
+      const task = ctx.cognitivePipeline.store.explorationTasksSnapshot()[0]
+      expect(task?.status).toBe('pending')
     } finally {
       await teardown()
     }
