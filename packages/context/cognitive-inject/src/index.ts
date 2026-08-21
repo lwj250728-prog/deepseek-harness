@@ -18,9 +18,16 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
-import { actionVector, cosine, refineRetrieval, symptomOverlap, tokenize } from '@deepseek-ai/dsh-cognitive-pipeline'
+import {
+  actionVector,
+  cosine,
+  outcomePolarity,
+  refineRetrieval,
+  symptomOverlap,
+  tokenize,
+} from '@deepseek-ai/dsh-cognitive-pipeline'
 import type { CognitivePipelineService } from '@deepseek-ai/dsh-cognitive-pipeline'
-import type { Experience } from '@deepseek-ai/dsh-cognitive-pipeline'
+import type { Experience, OutcomePolarity } from '@deepseek-ai/dsh-cognitive-pipeline'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
@@ -121,15 +128,31 @@ const SYMPTOM_BONUS = 0.3
  * overlap adds a capped bonus proportional to the semantic score, so the
  * current setback surfaces related past experience without letting literal
  * markers override relevance. */
+/** One retrieved candidate with its outcome polarity (for viewpoint coverage). */
+interface RankedHit extends ExperienceHit {
+  readonly polarity: OutcomePolarity
+}
+
+/**
+ * Retrieve experiences related to the current situation on both axes, then
+ * guarantee **viewpoint coverage**: when both a failure and a success
+ * experience clear the threshold, at least one of each is included — the
+ * model sees both the cautionary tale (上次怎么栽的) and the workable
+ * approach (成功时怎么做的), not just the single most similar memory. The
+ * semantic axes (action/situation cosine) dominate; a failure-signature
+ * overlap adds a capped bonus proportional to the semantic score, so the
+ * current setback surfaces related past experience without letting literal
+ * markers override relevance.
+ */
 function retrieve(
   service: CognitivePipelineService,
   situation: string,
   minSimilarity: number,
   topK: number,
-): readonly ExperienceHit[] {
+): readonly RankedHit[] {
   const vector = actionVector(situation, [])
-  return service.store.experiencesSnapshot()
-    .map((exp) => {
+  const hits = service.store.experiencesSnapshot()
+    .map((exp): RankedHit => {
       const text = `${exp.sar.situation}。${exp.sar.action}。${exp.sar.outcome}`
       const semantic = Math.max(
         cosine(vector, exp.actionVector),
@@ -138,12 +161,37 @@ function retrieve(
       return {
         expId: exp.expId,
         text,
+        polarity: outcomePolarity(exp.sar.outcomeUtility),
         similarity: semantic + symptomOverlap(situation, text) * SYMPTOM_BONUS * semantic,
       }
     })
     .filter(hit => hit.similarity >= minSimilarity)
     .sort((a, b) => b.similarity - a.similarity)
-    .slice(0, topK)
+  return coverViewpoints(hits, topK)
+}
+
+/**
+ * Enforce viewpoint coverage over the ranked candidates: when the set holds
+ * both a negative (failure) and a positive (success) experience, keep the
+ * highest-scoring one of each plus the next best to fill `topK` (floor 2).
+ * Otherwise the top-K ranking is returned unchanged — coverage only reshapes
+ * when both viewpoints genuinely exist.
+ * @param hits - ranked candidates, best first.
+ * @param topK - how many experiences to inject at most.
+ * @returns the covered selection, best first.
+ */
+function coverViewpoints(hits: readonly RankedHit[], topK: number): readonly RankedHit[] {
+  const failure = hits.find(hit => hit.polarity === 'negative')
+  const success = hits.find(hit => hit.polarity === 'positive')
+  if (failure === undefined || success === undefined) return hits.slice(0, topK)
+  const selected = new Map<string, RankedHit>()
+  selected.set(failure.expId, failure)
+  selected.set(success.expId, success)
+  for (const hit of hits) {
+    if (selected.size >= Math.max(topK, 2)) break
+    if (!selected.has(hit.expId)) selected.set(hit.expId, hit)
+  }
+  return hits.filter(hit => selected.has(hit.expId))
 }
 
 /** Render one reference block from the retrieved hits. */
@@ -326,17 +374,17 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (situation.trim().length === 0) return decision
     const hits = retrieve(ctx.cognitivePipeline, situation, threshold, topK)
     if (hits.length === 0) return decision
-    // Veto gate: retrieval may surface an over-threshold candidate that does
-    // not genuinely fit (a literal hit is not transferability). The template-7
-    // refine route judges whether the top candidate truly applies; each
-    // rejection moves to the next candidate (bounded), and all-rejected
-    // suppresses injection. Without a route the route keeps the candidate
-    // (deterministic degradation to the threshold-only behavior).
+    // Veto gate: retrieval may surface over-threshold candidates that do not
+    // genuinely fit (a literal hit is not transferability). The template-7
+    // refine route judges each candidate; every accepted one is injected
+    // (viewpoint coverage survives), every rejection records a note, and
+    // all-rejected suppresses injection. Without a route the route keeps the
+    // candidates (deterministic degradation to the threshold-only behavior).
     const vetoed = await vetoTopCandidates(
       ctx, ctx.cognitivePipeline.resolved.route, situation, hits, signal,
     )
-    if (vetoed.accepted === null) return decision
-    const block = referenceBlock([vetoed.accepted], afterFailure, vetoed.rejectedNotes)
+    if (vetoed.accepted.length === 0) return decision
+    const block = referenceBlock(vetoed.accepted, afterFailure, vetoed.rejectedNotes)
     return {
       kind: 'enter',
       messages: [...decision.messages, block],
@@ -350,15 +398,19 @@ export function apply(ctx: Context, config: Config = {}): void {
 const INJECT_VETO_MAX = 2
 
 /**
- * Run the template-7 refine route over the retrieved candidates and pick the
- * first one judged to genuinely apply. Each rejection records a note (visible
- * in the injected block for observability) and moves to the next candidate.
+ * Run the template-7 refine route over the retrieved candidates and keep the
+ * ones judged to genuinely apply. Each rejection records a note (visible in
+ * the injected block for observability) and moves to the next candidate.
+ * Viewpoint coverage survives the veto: ALL candidates the route accepts are
+ * injected, not only the first — so a failure + success pair both reach the
+ * model when both are judged transferable.
  * @param ctx - context carrying the llm service for the route call.
  * @param route - the pipeline's explicit LLM route (may be unset).
  * @param situation - the situation text to judge applicability against.
  * @param hits - the retrieved candidates, best first.
- * @returns the accepted candidate plus the rejection notes, or accepted null
- * when every candidate was vetoed (or a route-free fallback keeps the first).
+ * @param signal - cancellation signal for the route call.
+ * @returns the accepted candidates plus the rejection notes (empty accepted
+ * when every candidate was vetoed, or a route-free fallback keeps the ranking).
  */
 async function vetoTopCandidates(
   ctx: Context,
@@ -366,7 +418,8 @@ async function vetoTopCandidates(
   situation: string,
   hits: readonly ExperienceHit[],
   signal: AbortSignal | undefined,
-): Promise<{ accepted: ExperienceHit | null; rejectedNotes: string[] }> {
+): Promise<{ accepted: readonly ExperienceHit[]; rejectedNotes: string[] }> {
+  const accepted: ExperienceHit[] = []
   const notes: string[] = []
   for (let index = 0; index < Math.min(hits.length, INJECT_VETO_MAX + 1); index += 1) {
     const hit = hits[index]
@@ -376,8 +429,11 @@ async function vetoTopCandidates(
       text: hit.text,
       similarity: hit.similarity,
     }], { signal })
-    if (decision.shouldKeep) return { accepted: hit, rejectedNotes: notes }
+    if (decision.shouldKeep) {
+      accepted.push(hit)
+      continue
+    }
     if (decision.reason !== null && decision.reason.length > 0) notes.push(decision.reason)
   }
-  return { accepted: null, rejectedNotes: notes }
+  return { accepted, rejectedNotes: notes }
 }

@@ -5,6 +5,9 @@
  */
 
 import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { agentEvents, Inbox, type Agent, type AgentStatus } from '@deepseek-ai/dsh-agent'
 import * as cognitiveInject from '@deepseek-ai/dsh-cognitive-inject'
@@ -58,9 +61,10 @@ class ScriptedAdapter extends LlmAdapter {
 }
 
 async function mount(config: Config = {}, route?: { provider: string; model: string; script: readonly string[] }) {
+  const root = mkdtempSync(join(tmpdir(), 'cognition-inject-'))
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
-  const pipelineConfig: { enabled: boolean; provider?: string; model?: string } = { enabled: false }
+  const pipelineConfig: { enabled: boolean; root: string; provider?: string; model?: string } = { enabled: false, root }
   if (route !== undefined) {
     pipelineConfig.provider = route.provider
     pipelineConfig.model = route.model
@@ -71,7 +75,12 @@ async function mount(config: Config = {}, route?: { provider: string; model: str
   }
   await ctx.plugin(AgentLoop, { agents: [] })
   const fiber = await ctx.plugin(cognitiveInject, config)
-  return { ctx, fiber }
+  const teardown = async (): Promise<void> => {
+    await fiber.dispose()
+    await ctx.fiber.dispose()
+    rmSync(root, { recursive: true, force: true })
+  }
+  return { ctx, teardown }
 }
 
 function stubAgent(rawId: string): { agent: Agent; session: Session } {
@@ -100,6 +109,7 @@ function seedExperience(
   situation: string,
   action: string,
   outcome: string,
+  utility: { materialGain: number; emotionalValence: number; energyCost: number } = { materialGain: 6, emotionalValence: 6, energyCost: 5 },
 ): void {
   store.addExperience({
     expId,
@@ -108,10 +118,10 @@ function seedExperience(
       action,
       outcome,
       actionKeywords: [],
-      outcomeUtility: { materialGain: 6, emotionalValence: 6, energyCost: 5 },
+      outcomeUtility: utility,
     },
     actionVector: actionVector(action, []),
-    outcomeVector: outcomeVector({ materialGain: 6, emotionalValence: 6, energyCost: 5 }, outcome),
+    outcomeVector: outcomeVector(utility, outcome),
     clusterId: null,
     strategyLabel: null,
     timestamp: Date.now(),
@@ -167,7 +177,7 @@ function emitToolResult(ctx: Context, agent: Agent, isError: boolean): void {
 
 describe('cognitive-inject priming', () => {
   it('injects a situation-matched experience at pre-step and logs it durably', async () => {
-    const { ctx, fiber } = await mount()
+    const { ctx, teardown } = await mount()
     try {
       // Bug experience whose situation overlaps the current step text.
       seedExperience(ctx.cognitivePipeline.store, 'exp_1', '测试脚本挂起，发现浮点死循环', '改为无循环算法', '测试全部恢复')
@@ -186,13 +196,12 @@ describe('cognitive-inject priming', () => {
       expect(event.data.source).toMatchObject({ kind: 'plugin', plugin: 'cognitive-inject' })
       expect(event.surfaceOp).toBe('append')
     } finally {
-      await fiber.dispose()
-      await ctx.fiber.dispose()
+      await teardown()
     }
   })
 
   it('injects nothing when no experience clears the similarity threshold', async () => {
-    const { ctx, fiber } = await mount()
+    const { ctx, teardown } = await mount()
     try {
       seedExperience(ctx.cognitivePipeline.store, 'exp_1', '晨跑锻炼身体', '晨跑五公里', '精力充沛')
       const { agent, session } = stubAgent('miss')
@@ -203,13 +212,12 @@ describe('cognitive-inject priming', () => {
       expect(injected).toHaveLength(0)
       expect(session.events.filter(event => event.type === 'user/message')).toHaveLength(0)
     } finally {
-      await fiber.dispose()
-      await ctx.fiber.dispose()
+      await teardown()
     }
   })
 
   it('recalls more aggressively after a failed step', async () => {
-    const { ctx, fiber } = await mount({ minSimilarity: 0.5 })
+    const { ctx, teardown } = await mount({ minSimilarity: 0.5 })
     try {
       seedExperience(ctx.cognitivePipeline.store, 'exp_1', '测试脚本挂起，发现浮点死循环', '改为无循环算法', '测试全部恢复')
       const { agent, session } = stubAgent('failure')
@@ -223,13 +231,12 @@ describe('cognitive-inject priming', () => {
       expect(injected.length).toBeGreaterThanOrEqual(1)
       expect(injected[0]).toContain('上一步执行失败')
     } finally {
-      await fiber.dispose()
-      await ctx.fiber.dispose()
+      await teardown()
     }
   })
 
   it('stays silent when disabled', async () => {
-    const { ctx, fiber } = await mount({ enabled: false })
+    const { ctx, teardown } = await mount({ enabled: false })
     try {
       seedExperience(ctx.cognitivePipeline.store, 'exp_1', '测试脚本挂起，发现浮点死循环', '改为无循环算法', '测试全部恢复')
       const { agent, session } = stubAgent('disabled')
@@ -239,13 +246,12 @@ describe('cognitive-inject priming', () => {
 
       expect(injected).toHaveLength(0)
     } finally {
-      await fiber.dispose()
-      await ctx.fiber.dispose()
+      await teardown()
     }
   })
 
   it('ranks the semantically relevant experience above a symptom-only literal hit', async () => {
-    const { ctx, fiber } = await mount()
+    const { ctx, teardown } = await mount()
     try {
       // exp_1 shares only the 失败 literal marker with the query (irrelevant);
       // exp_2 matches the situation semantically (web boot needing a dependency
@@ -262,13 +268,12 @@ describe('cognitive-inject priming', () => {
       expect(injected[0]).toContain('exp_2')
       expect(injected[0]).not.toContain('exp_1')
     } finally {
-      await fiber.dispose()
-      await ctx.fiber.dispose()
+      await teardown()
     }
   })
 
   it('does not inject on routine conversation without a trigger, even when retrieval would hit', async () => {
-    const { ctx, fiber } = await mount()
+    const { ctx, teardown } = await mount()
     try {
       // The situation literally shares tokens with the experience ("重启"), so
       // retrieval would find it — but the message carries no trigger word, so
@@ -281,13 +286,12 @@ describe('cognitive-inject priming', () => {
 
       expect(injected).toHaveLength(0)
     } finally {
-      await fiber.dispose()
-      await ctx.fiber.dispose()
+      await teardown()
     }
   })
 
   it('injects when a static behavior trigger appears', async () => {
-    const { ctx, fiber } = await mount()
+    const { ctx, teardown } = await mount()
     try {
       seedExperience(ctx.cognitivePipeline.store, 'exp_1', '测试脚本挂起', '改为无循环算法', '测试恢复')
       const { agent, session } = stubAgent('static-trigger')
@@ -298,13 +302,12 @@ describe('cognitive-inject priming', () => {
       expect(injected.length).toBe(1)
       expect(injected[0]).toContain('exp_1')
     } finally {
-      await fiber.dispose()
-      await ctx.fiber.dispose()
+      await teardown()
     }
   })
 
   it('injects when a SAR-derived keyword of an important experience appears', async () => {
-    const { ctx, fiber } = await mount()
+    const { ctx, teardown } = await mount()
     try {
       // A high-importance experience (failed push: low utility, negative)
       // whose action keywords 打包/插件/GitHub become derived trigger words.
@@ -318,14 +321,13 @@ describe('cognitive-inject priming', () => {
       expect(injected.length).toBe(1)
       expect(injected[0]).toContain('exp_1')
     } finally {
-      await fiber.dispose()
-      await ctx.fiber.dispose()
+      await teardown()
     }
   })
 
   it('vetoes the over-threshold candidate when the refine route rejects it (no injection)', async () => {
     const reject = JSON.stringify({ should_keep: false, rejected_exp_id: 'exp_1', reason: '情境不可迁移' })
-    const { ctx, fiber } = await mount(
+    const { ctx, teardown } = await mount(
       {},
       { provider: 'cognition-test', model: 'm', script: [reject] },
     )
@@ -340,15 +342,14 @@ describe('cognitive-inject priming', () => {
 
       expect(injected).toHaveLength(0)
     } finally {
-      await fiber.dispose()
-      await ctx.fiber.dispose()
+      await teardown()
     }
   })
 
   it('moves to the next candidate when the top hit is vetoed, noting the rejection', async () => {
     const reject = JSON.stringify({ should_keep: false, rejected_exp_id: 'exp_2', reason: '前提矛盾' })
     const keep = JSON.stringify({ should_keep: true, rejected_exp_id: null, reason: null })
-    const { ctx, fiber } = await mount(
+    const { ctx, teardown } = await mount(
       { minSimilarity: 0.3, topK: 2 },
       { provider: 'cognition-test', model: 'm', script: [reject, keep] },
     )
@@ -367,8 +368,50 @@ describe('cognitive-inject priming', () => {
       expect(injected[0]).not.toContain('exp_2')
       expect(injected[0]).toContain('已否决 1 条')
     } finally {
-      await fiber.dispose()
-      await ctx.fiber.dispose()
+      await teardown()
+    }
+  })
+
+  it('covers both viewpoints: injects a failure AND a success experience when both exist', async () => {
+    const { ctx, teardown } = await mount({ topK: 1 })
+    try {
+      // Both experiences share the query's situation wording (重启dsh失败), so
+      // both clear the threshold; exp_1 is the failure lesson (negative
+      // outcome utility), exp_2 the success approach (positive). Viewpoint
+      // coverage injects BOTH even though topK is 1.
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '重启dsh失败，会话中断需要恢复', '直接在会话内重启', '进程被杀，脚本中断', { materialGain: 2, emotionalValence: 2, energyCost: 8 })
+      seedExperience(ctx.cognitivePipeline.store, 'exp_2', '重启dsh失败，外部脚本可以恢复', '用独立PowerShell进程重启', '重启成功，服务恢复', { materialGain: 8, emotionalValence: 8, energyCost: 3 })
+      const { agent, session } = stubAgent('coverage')
+      session.append('turn/start', { turn: 1 })
+
+      const injected = await fire(ctx, agent, 1, 1, '帮我排查重启dsh失败')
+
+      expect(injected.length).toBe(1)
+      expect(injected[0]).toContain('exp_1')
+      expect(injected[0]).toContain('exp_2')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('does not force viewpoint coverage when only one polarity exists', async () => {
+    const { ctx, teardown } = await mount({ topK: 1 })
+    try {
+      // Only a success experience clears the threshold; the 晨跑 experience is
+      // irrelevant. No failure lesson to pair, so injection stays a single
+      // top-1 hit.
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '重启dsh失败，外部脚本可以恢复', '用独立PowerShell进程重启', '重启成功，服务恢复', { materialGain: 8, emotionalValence: 8, energyCost: 3 })
+      seedExperience(ctx.cognitivePipeline.store, 'exp_2', '晨跑锻炼身体', '晨跑五公里', '精力充沛', { materialGain: 6, emotionalValence: 6, energyCost: 5 })
+      const { agent, session } = stubAgent('single-polarity')
+      session.append('turn/start', { turn: 1 })
+
+      const injected = await fire(ctx, agent, 1, 1, '帮我排查重启dsh失败')
+
+      expect(injected.length).toBe(1)
+      expect(injected[0]).toContain('exp_1')
+      expect(injected[0]).not.toContain('exp_2')
+    } finally {
+      await teardown()
     }
   })
 })
