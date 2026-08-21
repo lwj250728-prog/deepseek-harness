@@ -2990,6 +2990,10 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
     // Satisfies the ApiProxy contract type only: the browser export button
     // hands GET /api/session.export to the native download manager, so this
     // stub is never reached through the fixture's dispatch.
+    cognition: {
+      list: request => ok(request, { tasks: [], counts: { pending: 0, running: 0, completed: 0, failed: 0 } }),
+    },
+
     downloads: {
       sessionLog: () => Promise.resolve(new Response('fixture mode does not serve session export', { status: 404 })),
     },
@@ -3129,6 +3133,7 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'llm.providers': return this.api.llm.providers(request)
       case 'llm.models': return this.api.llm.models(request)
       case 'llm.discoverModels': return this.api.llm.discoverModels(request, signal)
+      case 'cognition.list': return this.api.cognition.list(request)
     }
   }
 

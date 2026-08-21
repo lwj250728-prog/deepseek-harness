@@ -277,6 +277,10 @@ export class FakeApiClient implements IApiClient {
     discoverModels: payload => this.record('llm.discoverModels', payload, Promise.resolve(ok({ models: [] }))),
   }
 
+  readonly cognition: IApiClient['cognition'] = {
+    list: payload => this.record('cognition.list', payload, Promise.resolve(ok({ tasks: [], counts: { pending: 0, running: 0, completed: 0, failed: 0 } }))),
+  }
+
   /** When true, streams never fire onOpen (misbehaving-carrier material for the handshake timeout guard). */
   suppressStreamOpen = false
 

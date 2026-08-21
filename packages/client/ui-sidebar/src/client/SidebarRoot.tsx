@@ -178,6 +178,15 @@ export function SidebarRoot({
         })}
       </div>
 
+      {/* The learning area sits between the browsing region and the foot:
+          the cognitive pipeline's exploration task queue. */}
+      <div className={css.learningArea}>
+        {renderSlot('sidebar.learning', {
+          wide,
+          expandSidebar: () => { if (collapsed) toggleSidebar() },
+        })}
+      </div>
+
       {/* Footer actions stack above Settings in both sidebar widths. */}
       <div className={css.footArea}>
         <div className={css.footerActions}>

@@ -3426,6 +3426,25 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
     },
 
+    cognition: {
+      // Read-only exploration-task surface for the learning area. The queue is
+      // fed and settled by the cognitive pipeline/orchestrator themselves, so
+      // this domain has no mutation verbs; `ctx.get` keeps the gateway
+      // independent of the pipeline plugin's inject list (absent → a clear
+      // empty learning area rather than a crash).
+      list(request) {
+        const pipeline = ctx.get('cognitivePipeline') as { explorationTasks(): readonly { taskId: string; goal: string; status: 'pending' | 'running' | 'completed' | 'failed'; createdAt: number; pickedUpAt: number | null; result: string | null }[] } | undefined
+        const tasks = pipeline?.explorationTasks() ?? []
+        const counts = {
+          pending: tasks.filter(task => task.status === 'pending').length,
+          running: tasks.filter(task => task.status === 'running').length,
+          completed: tasks.filter(task => task.status === 'completed').length,
+          failed: tasks.filter(task => task.status === 'failed').length,
+        }
+        return Promise.resolve(ok(request, { tasks, counts }))
+      },
+    },
+
     events: {
       mux(_request, signal) {
         const queue = new FrameQueue<RpcRequest<MuxFrame>>()

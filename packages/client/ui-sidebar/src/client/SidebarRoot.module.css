@@ -241,6 +241,21 @@
   padding-left: 0;
 }
 
+/* Learning area: a compact seat between the browsing region and the foot.
+   It shrinks to a rail icon while collapsed, like the footer controls. */
+.learningArea {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  width: 100%;
+}
+
+.collapsed .learningArea {
+  align-items: center;
+  width: auto;
+}
+
 /* Footer seats: additive actions stack above Settings. Each occupant owns its
    button geometry and hover chrome. */
 .footArea {

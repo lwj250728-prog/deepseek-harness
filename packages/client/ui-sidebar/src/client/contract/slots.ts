@@ -23,6 +23,13 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      */
     'sidebar.workspaces': { kind: 'single'; scope: 'root'; owner: SidebarSectionOwnerProps }
     /**
+     * The learning area seat between the browsing region and the foot: the
+     * cognitive pipeline's exploration task queue as a readable list. Declared
+     * by this package's 'sidebar' entry; ui-cognition registers its occupant.
+     * The sidebar passes only its column state.
+     */
+    'sidebar.learning': { kind: 'single'; scope: 'root'; owner: SidebarSectionOwnerProps }
+    /**
      * The settings seat at the sidebar foot. Declared by this package's
      * 'sidebar' entry; ui-settings registers its trigger row + modal panel.
      * The sidebar passes only its column state — it holds no settings state.
@@ -85,5 +92,5 @@ export type SidebarRootInjected = {
  */
 export type SidebarRootComponentProps =
   PropsRuntime<'sidebar'>
-  & PropsRenderSlots<'sidebar.workspaces' | 'sidebar.settings' | 'sidebar.footer.action'>
+  & PropsRenderSlots<'sidebar.workspaces' | 'sidebar.learning' | 'sidebar.settings' | 'sidebar.footer.action'>
   & SidebarRootInjected & PropsLocale<'sidebar'>
