@@ -3,12 +3,12 @@
 # overrides, disables, and insert lists; `!!js` expressions allowed).
 
 # DCA-PED cognitive pipeline (SAR memory + hot/cold dual-loop learning).
-# The pipeline mounts the `ctx.cognitivePipeline` service, five model-facing
-# tools (remember_experience, predict_outcome, report_outcome,
-# rebuild_taxonomy, inspect_memory), and the dynamic `cognition:taxonomy`
-# system-prompt section. It degrades to deterministic math when no LLM route
-# is configured; set provider/model to enable SAR extraction, OOD review,
-# calibration, and reconstruction assists.
+# The pipeline mounts the `ctx.cognitivePipeline` service, seven model-facing
+# tools (remember_experience, simulate_experience, reference_experience,
+# predict_outcome, report_outcome, rebuild_taxonomy, inspect_memory), and the
+# dynamic `cognition:taxonomy` system-prompt section. It degrades to
+# deterministic math when no LLM route is configured; set provider/model to
+# enable SAR extraction, OOD review, calibration, and reconstruction assists.
 - insert:
     - id: cognitive-pipeline
       name: '@deepseek-ai/dsh-cognitive-pipeline'
@@ -23,6 +23,22 @@
         # route and written as an experience when it deems the episode worth it
         # (pure chat is filtered deterministically before any LLM call).
         autoAccumulate: true
+
+    # Main-conversation SAR priming: at every agent pre-step, retrieve
+    # situation-related experiences from the pipeline store and inject them as
+    # a 【认知经验参考】 block, so the model uses accumulated memory without
+    # being told to call predict_outcome. After a failed step it recalls more
+    # aggressively (failureThresholdFactor / failureTopK).
+    # Must load after cognitive-pipeline (it needs the cognitivePipeline
+    # service).
+    - id: cognitive-inject
+      name: '@deepseek-ai/dsh-cognitive-inject'
+      config:
+        topK: 1
+        minSimilarity: 0.4
+        failureThresholdFactor: 0.6
+        failureTopK: 3
+        contextDepth: 4
 
     # Task-level cognition orchestration: wraps the spawn provider so child
     # prompts receive related SAR experience and settled outcomes are written
