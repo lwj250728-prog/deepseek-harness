@@ -85,6 +85,13 @@ export interface CognitivePipelineConfig {
   /** Whether reversible novel attempts also queue an autonomous exploration
    * task for a background session to execute silently (default false). */
   exploreAutoDispatch?: boolean
+  /** EWMA step for folding real-world reuse errors into an exploration
+   * entry's validatedError (default 0.3). */
+  exploreValidationLearningRate?: number
+  /** Prediction-error ceiling below which an explored strategy counts as
+   * validated (paid off in practice); at/above it counts as refuted
+   * (default 0.3, the same threshold as predictionErrorThreshold). */
+  exploreValidationErrorThreshold?: number
   /** Layer-2 shrinkage alpha (default 50). */
   shrinkageAlpha?: number
   /** Minimum 80%-interval width (default 0.2). */
@@ -177,6 +184,10 @@ export interface ResolvedCognitivePipelineConfig {
   readonly exploreRiskWords: readonly string[]
   /** Whether reversible novel attempts queue autonomous exploration tasks. */
   readonly exploreAutoDispatch: boolean
+  /** EWMA step for folding real-world reuse errors into an exploration entry. */
+  readonly exploreValidationLearningRate: number
+  /** Prediction-error ceiling: below it an explored strategy validates, at/above refutes. */
+  readonly exploreValidationErrorThreshold: number
 }
 
 /** Config schema for Loader validation and defaulting. */
@@ -196,6 +207,8 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   exploreDailyBudget: z.number().step(1).min(0).max(100).default(3),
   exploreRiskWords: z.array(z.string()).default(['删除', '清空', '覆盖', '发布', '推送', 'rm', '移除', '迁移', '重置', '格式化']),
   exploreAutoDispatch: z.boolean().default(false),
+  exploreValidationLearningRate: z.number().min(0).max(1).default(0.3),
+  exploreValidationErrorThreshold: z.number().min(0).max(1).default(0.3),
   shrinkageAlpha: z.number().min(0).default(50),
   minConfidenceIntervalWidth: z.number().min(0).max(1).default(0.2),
   successReferenceThreshold: z.number().min(0).max(1).default(0.4),
@@ -257,6 +270,8 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
       exploreDailyBudget: config.exploreDailyBudget ?? 3,
       exploreRiskWords: Object.freeze(config.exploreRiskWords ?? ['删除', '清空', '覆盖', '发布', '推送', 'rm', '移除', '迁移', '重置', '格式化']),
       exploreAutoDispatch: config.exploreAutoDispatch ?? false,
+      exploreValidationLearningRate: config.exploreValidationLearningRate ?? 0.3,
+      exploreValidationErrorThreshold: config.exploreValidationErrorThreshold ?? 0.3,
       tempStrategyTtlMs: config.tempStrategyTtlMs ?? 24 * 60 * 60 * 1000,
       tempStrategyMatchThreshold: config.tempStrategyMatchThreshold ?? 0.5,
     }),
@@ -293,6 +308,8 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
     exploreDailyBudget: config.exploreDailyBudget ?? 3,
     exploreRiskWords: Object.freeze(config.exploreRiskWords ?? ['删除', '清空', '覆盖', '发布', '推送', 'rm', '移除', '迁移', '重置', '格式化']),
     exploreAutoDispatch: config.exploreAutoDispatch ?? false,
+    exploreValidationLearningRate: config.exploreValidationLearningRate ?? 0.3,
+    exploreValidationErrorThreshold: config.exploreValidationErrorThreshold ?? 0.3,
   })
 }
 
@@ -716,6 +733,19 @@ export class CognitivePipelineService extends Service {
     if (prediction.usedTempStrategy) {
       this.feedbackTempStrategy(prediction.action, observed)
     }
+    // Close the meta-cognition loop: when this prediction reused (or created)
+    // an exploration scratchpad, its real-world error folds back into that
+    // exploration entry's ROI ledger — an exploration is validated only when
+    // reusing it actually reduced |calibrated − observed|, not merely when its
+    // strategy graduated. Null when the prediction never touched a scratchpad.
+    if (prediction.exploredActionHash !== null) {
+      this.store.validateExploration(
+        prediction.exploredActionHash,
+        error,
+        this.resolved.exploreValidationLearningRate,
+        this.resolved.exploreValidationErrorThreshold,
+      )
+    }
 
     let triggerRebuild = false
     if (error >= this.resolved.emergencyErrorThreshold) {
@@ -857,12 +887,16 @@ export class CognitivePipelineService extends Service {
   }
 
   /** Active-exploration statistics for inspection.
-   * @returns budget window usage and terminal-outcome counts.
+   * @returns budget window usage, terminal-outcome counts, and validation ROI.
    */
   private explorationStats(): InspectResult['exploration'] {
     const state = this.store.explorationSnapshot()
     const graduated = state.entries.filter(entry => entry.outcome === 'graduated').length
     const expired = state.entries.filter(entry => entry.outcome === 'expired').length
+    const validated = state.entries.filter(entry => entry.validated === true).length
+    const refuted = state.entries.filter(entry => entry.validated === false).length
+    const measured = state.entries.filter(entry => entry.validatedError !== null)
+    const errorSum = measured.reduce((sum, entry) => sum + (entry.validatedError ?? 0), 0)
     const tasks = this.store.explorationTasksSnapshot()
     return {
       budget: this.resolved.exploreDailyBudget,
@@ -870,6 +904,9 @@ export class CognitivePipelineService extends Service {
       total: state.entries.length,
       graduated,
       expired,
+      validated,
+      refuted,
+      avgValidationError: measured.length === 0 ? null : errorSum / measured.length,
       tasks: {
         pending: tasks.filter(task => task.status === 'pending').length,
         running: tasks.filter(task => task.status === 'running').length,

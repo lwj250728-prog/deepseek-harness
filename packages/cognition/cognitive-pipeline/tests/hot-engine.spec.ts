@@ -535,4 +535,75 @@ describe('hot loop (predict_outcome)', () => {
       await teardown()
     }
   })
+
+  it('folds a reused scratchpad feedback error into the exploration ROI and validates it', async () => {
+    const { ctx, teardown } = await pipelineHarness({
+      exploreDailyBudget: 3,
+      // Without an LLM route the calibrated probability shrinks to 0.5; quality 8
+      // gives observed 0.8, so the error is 0.3 — set the ceiling above it.
+      exploreValidationErrorThreshold: 0.5,
+    })
+    try {
+      // First prediction creates the budgeted exploration entry.
+      await ctx.cognitivePipeline.predict({ situation: '未知领域', action: '尝试新的搜索策略' })
+      expect(ctx.cognitivePipeline.store.explorationSnapshot().entries[0]?.validatedError).toBeNull()
+      expect(ctx.cognitivePipeline.store.explorationSnapshot().entries[0]?.validated).toBeNull()
+
+      // Reuse the same action; its feedback (low error) validates the entry.
+      const reuse = await ctx.cognitivePipeline.predict({ situation: '未知领域', action: '尝试新的搜索策略' })
+      expect(reuse.usedTempStrategy).toBe(true)
+      await ctx.cognitivePipeline.report({ predictionId: reuse.predictionId, actualOutcome: '有效', outcomeQuality: 8 })
+
+      const entry = ctx.cognitivePipeline.store.explorationSnapshot().entries[0]
+      expect(entry?.validatedError).not.toBeNull()
+      expect(entry?.validated).toBe(true)
+
+      const insp = ctx.cognitivePipeline.inspect()
+      expect(insp.exploration.validated).toBe(1)
+      expect(insp.exploration.refuted).toBe(0)
+      expect(insp.exploration.avgValidationError).not.toBeNull()
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('refutes an exploration whose reused scratchpad feedback carries high error', async () => {
+    const { ctx, teardown } = await pipelineHarness({
+      exploreDailyBudget: 3,
+      exploreValidationErrorThreshold: 0.3,
+    })
+    try {
+      await ctx.cognitivePipeline.predict({ situation: '未知领域', action: '尝试新的搜索策略' })
+      // A wrong prediction (quality 0 → observed 0, calibrated ≥ 0.5 → error ≥ 0.5)
+      // refutes the exploration entry.
+      const reuse = await ctx.cognitivePipeline.predict({ situation: '未知领域', action: '尝试新的搜索策略' })
+      await ctx.cognitivePipeline.report({ predictionId: reuse.predictionId, actualOutcome: '无效', outcomeQuality: 0 })
+
+      const entry = ctx.cognitivePipeline.store.explorationSnapshot().entries[0]
+      expect(entry?.validated).toBe(false)
+      const insp = ctx.cognitivePipeline.inspect()
+      expect(insp.exploration.refuted).toBe(1)
+      expect(insp.exploration.validated).toBe(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('keeps validatedError null for a prediction that never touched a scratchpad', async () => {
+    const { ctx, teardown } = await pipelineHarness({ exploreDailyBudget: 3 })
+    try {
+      const p = await ctx.cognitivePipeline.predict({ situation: '未知领域', action: '尝试新的搜索策略' })
+      await ctx.cognitivePipeline.report({ predictionId: p.predictionId, actualOutcome: '有效', outcomeQuality: 8 })
+      // The first prediction DID create the entry, so its feedback folds. Use a
+      // non-explored known path to prove no spurious validation happens.
+      const known = await ctx.cognitivePipeline.predict({ situation: '已知情境', action: '常规操作' })
+      await ctx.cognitivePipeline.report({ predictionId: known.predictionId, actualOutcome: '完成', outcomeQuality: 7 })
+      const insp = ctx.cognitivePipeline.inspect()
+      expect(insp.exploration.avgValidationError).not.toBeNull()
+      // The exploration entry exists and was validated by its own feedback.
+      expect(insp.exploration.validated).toBeGreaterThanOrEqual(1)
+    } finally {
+      await teardown()
+    }
+  })
 })

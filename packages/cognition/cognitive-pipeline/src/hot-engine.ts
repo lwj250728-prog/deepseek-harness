@@ -493,9 +493,14 @@ export class HotEngine {
     for (const expiredHash of expired) this.store.resolveExploration(expiredHash, 'expired')
     let strategy = this.store.getTempStrategy(hash)
     let usedTempStrategy = false
+    // Whether this prediction is linked to an exploration ledger entry: true
+    // when it reused an active scratchpad OR created a budgeted one. Its
+    // feedback error then folds back into that entry's ROI.
+    let explored = false
 
     if (strategy !== undefined && strategy.status === 'active') {
       usedTempStrategy = true
+      explored = true
       strategy = this.store.updateTempStrategy(hash, {
         hitCount: strategy.hitCount + 1,
         pendingResult: null,
@@ -533,12 +538,15 @@ export class HotEngine {
       const exploration = this.store.explorationSnapshot()
       const budgetLeft = exploration.used < this.config.exploreDailyBudget
       if (reversible && budgetLeft) {
+        explored = true
         this.store.recordExploration({
           ts: Date.now(),
           action: input.action,
           scratchpadHash: hash,
           reversible: true,
           outcome: null,
+          validatedError: null,
+          validated: null,
         })
         // Autonomous dispatch: queue a background exploration task so a
         // scheduler session can silently execute the attempt and write the
@@ -585,6 +593,10 @@ export class HotEngine {
       isNovel: true,
       usedTempStrategy,
       clusterId: null,
+      // Link feedback back to the exploration ledger whenever this prediction
+      // reused (or created) a scratchpad: the reuse error folds into the
+      // entry's ROI so "did this exploration pay off" is measured in practice.
+      exploredActionHash: explored ? hash : null,
       timestamp: Date.now(),
       actualOutcome: null,
       predictionError: null,
@@ -694,6 +706,7 @@ export class HotEngine {
       isNovel: false,
       usedTempStrategy: false,
       clusterId,
+      exploredActionHash: null,
       timestamp: Date.now(),
       actualOutcome: null,
       predictionError: null,

@@ -514,6 +514,10 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
               total: { type: 'number', required: true },
               graduated: { type: 'number', required: true },
               expired: { type: 'number', required: true },
+              validated: { type: 'number', required: true },
+              refuted: { type: 'number', required: true },
+              // -1 when no measured reuse exists yet (the average is undefined).
+              avg_validation_error: { type: 'number', required: true },
               tasks: {
                 type: 'object',
                 additionalProperties: false,
@@ -556,6 +560,11 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           total: result.exploration.total,
           graduated: result.exploration.graduated,
           expired: result.exploration.expired,
+          validated: result.exploration.validated,
+          refuted: result.exploration.refuted,
+          avg_validation_error: result.exploration.avgValidationError === null
+            ? -1
+            : Number(result.exploration.avgValidationError.toFixed(3)),
           tasks: {
             pending: result.exploration.tasks.pending,
             running: result.exploration.tasks.running,

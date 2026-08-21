@@ -52,6 +52,7 @@ function prediction(predictionId: string, probability: number, expId: string | n
     isNovel: false,
     usedTempStrategy: false,
     clusterId: null,
+    exploredActionHash: null,
     timestamp: Date.now(),
     actualOutcome: null,
     predictionError: null,
@@ -375,6 +376,89 @@ describe('CognitiveStore', () => {
       expect(store.getExperience('exp_2')).toBeDefined()
       // Verified simulations are never TTL-expired.
       expect(store.getExperience('exp_3')).toBeDefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('folds reuse errors into an exploration entry with EWMA and persists validated state', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cognition-store-'))
+    try {
+      const first = new CognitiveStore(dir)
+      await first.load()
+      first.recordExploration({
+        ts: Date.now(),
+        action: '试探行动',
+        scratchpadHash: 'h1',
+        reversible: true,
+        outcome: 'graduated',
+        validatedError: null,
+        validated: null,
+      })
+      // First fold seeds the EWMA; second fold moves it toward the new error.
+      first.validateExploration('h1', 0.4, 0.5, 0.3)
+      const afterFirst = first.explorationSnapshot().entries[0]
+      expect(afterFirst?.validatedError).toBe(0.4)
+      expect(afterFirst?.validated).toBe(false)
+      first.validateExploration('h1', 0.1, 0.5, 0.3)
+      const afterSecond = first.explorationSnapshot().entries[0]
+      expect(afterSecond?.validatedError).toBeCloseTo(0.25)
+      expect(afterSecond?.validated).toBe(true)
+      await first.flush()
+
+      // The validated ledger survives reload.
+      const second = new CognitiveStore(dir)
+      await second.load()
+      const reloaded = second.explorationSnapshot().entries[0]
+      expect(reloaded?.outcome).toBe('graduated')
+      expect(reloaded?.validatedError).toBeCloseTo(0.25)
+      expect(reloaded?.validated).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('leaves the exploration ledger untouched for an unknown scratchpad hash', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cognition-store-'))
+    try {
+      const store = new CognitiveStore(dir)
+      await store.load()
+      store.recordExploration({
+        ts: Date.now(),
+        action: '试探行动',
+        scratchpadHash: 'h1',
+        reversible: true,
+        outcome: null,
+        validatedError: null,
+        validated: null,
+      })
+      const result = store.validateExploration('missing', 0.2, 0.5, 0.3)
+      expect(result).toBeUndefined()
+      expect(store.explorationSnapshot().entries[0]?.validatedError).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('normalizes legacy exploration files that predate the validation fields', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cognition-store-'))
+    try {
+      // Write a legacy exploration.json without validatedError/validated.
+      writeFileSync(join(dir, 'exploration.json'), JSON.stringify({
+        date: '2026-08-21',
+        used: 1,
+        entries: [{ ts: Date.now(), action: '旧试探', scratchpadHash: 'legacy', reversible: true, outcome: 'graduated' }],
+      }), 'utf8')
+      const store = new CognitiveStore(dir)
+      await store.load()
+      const entry = store.explorationSnapshot().entries[0]
+      expect(entry?.scratchpadHash).toBe('legacy')
+      expect(entry?.validatedError).toBeNull()
+      expect(entry?.validated).toBeNull()
+      // A fold now works on the normalized entry instead of producing NaN.
+      store.validateExploration('legacy', 0.2, 0.5, 0.3)
+      expect(store.explorationSnapshot().entries[0]?.validatedError).toBe(0.2)
+      expect(store.explorationSnapshot().entries[0]?.validated).toBe(true)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

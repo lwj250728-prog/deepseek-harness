@@ -194,10 +194,20 @@ export class CognitiveStore {
         this.explorationState = {
           date: parsed.date,
           used: typeof parsed.used === 'number' && Number.isFinite(parsed.used) ? parsed.used : 0,
+          // Older files predate the validation fields; normalize missing values
+          // to the explicit nulls so EWMA folds start clean instead of on NaN.
           entries: entries.filter((entry): entry is ExploreEntry => {
             if (typeof entry !== 'object' || entry === null) return false
             const e = entry as Record<string, unknown>
             return typeof e.ts === 'number' && typeof e.action === 'string' && typeof e.scratchpadHash === 'string'
+          }).map((entry) => {
+            // The type guard narrowed the entry, but legacy files genuinely
+            // omit the validation fields — read them through the raw record
+            // and keep only values that satisfy the wire shape.
+            const raw = entry as unknown as Record<string, unknown>
+            const validatedError = typeof raw.validatedError === 'number' ? raw.validatedError : null
+            const validated = raw.validated === true || raw.validated === false ? raw.validated : null
+            return { ...entry, validatedError, validated }
           }),
         }
       }
@@ -626,6 +636,41 @@ export class CognitiveStore {
       this.explorationState = { date: current.date, used: current.used, entries: updated }
       this.enqueue('exploration.json', this.explorationState)
     }
+  }
+
+  /**
+   * Fold one real-world prediction error back into an exploration entry's ROI
+   * ledger. Called on every feedback for a prediction that reused the entry's
+   * scratchpad: the error (|calibrated − observed| of that reuse) updates the
+   * entry's EWMA, and the entry flips validated/refuted once its EWMA clears
+   * or crosses the threshold. This is the feedback chain that closes the
+   * meta-cognition loop — an exploration is not merely graduated (it became a
+   * strategy) but measured (did reusing it actually reduce prediction error).
+   * @param scratchpadHash - the scratchpad the resolved prediction reused.
+   * @param predictionError - the reuse prediction's absolute error in [0, 1].
+   * @param learningRate - EWMA step for the fold.
+   * @param errorThreshold - error ceiling: below validates, at/above refutes.
+   * @returns the updated entry, or undefined when the hash tracks no entry.
+   */
+  validateExploration(
+    scratchpadHash: string,
+    predictionError: number,
+    learningRate: number,
+    errorThreshold: number,
+  ): ExploreEntry | undefined {
+    const current = this.explorationSnapshot()
+    const target = current.entries.find(entry => entry.scratchpadHash === scratchpadHash)
+    if (target === undefined) return undefined
+    const validatedError = target.validatedError === null
+      ? predictionError
+      : (1 - learningRate) * target.validatedError + learningRate * predictionError
+    const entries = current.entries.map(entry =>
+      entry.scratchpadHash === scratchpadHash
+        ? { ...entry, validatedError, validated: validatedError < errorThreshold }
+        : entry)
+    this.explorationState = { date: current.date, used: current.used, entries }
+    this.enqueue('exploration.json', this.explorationState)
+    return entries.find(entry => entry.scratchpadHash === scratchpadHash)
   }
 
   // ── autonomous exploration tasks ─────────────────────────────────────────
