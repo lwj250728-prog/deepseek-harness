@@ -107,6 +107,7 @@ All fields optional; engine defaults follow the design documents.
 | `simulationPermanentThreshold` | `2` | Cumulative evidence score needed for permanent verified |
 | `simulationTtlMs` | `2_592_000_000` | Fallback TTL (30 days) after which an unverified simulation expires |
 | `autoAccumulate` | `false` | Automatically accumulate completed turns as experiences when the LLM route judges them worth it (pure chat never reaches the gate) |
+| `embedding` | unset | Real-embedding seam (roadmap R3): an OpenAI-compatible `/embeddings` object `{ baseUrl?, model?, apiKeyEnv?, apiKey? }` (defaults `https://api.deepseek.com` / `deepseek-embedding` / `DEEPSEEK_API_KEY`). When set, experiences store their action embedding at write time and the semantic retrieval channel prefers the embedding cosine; the hash-bag cosine serves queries/experiences without a vector, so the endpoint being unreachable only degrades similarity, never breaks the pipeline |
 | `referenceTopK` | `5` | How many similar history hits anchor one reference derivation |
 | `referenceMinSimilarity` | `0.3` | Minimum dual-axis similarity for a history hit to anchor a reference derivation (below it, or with only simulated hits, the derivation rejects without an LLM call) |
 | `channelLearningRate` | `0.2` | EWMA step for the feedback-driven multi-channel retrieval weights |
@@ -156,7 +157,7 @@ Replacing: the section text is re-rendered per assembly from store state and cha
 
 ## Known Limitations and Deferred Work
 
-- **Hashed vectors, not learned embeddings** — the action/outcome vectors are deterministic bag-of-words hashes; they cannot capture synonyms the way the design's `all-MiniLM-L6-v2` / `text-embedding-3-small` would. A provider seam for real embedding models is deferred.
+- **Embedding seam is action-only and write-time** — the real-embedding channel (roadmap R3) embeds the action text at write time and prefers the embedding cosine at retrieval; experiences written before the seam was enabled have no vector (hash fallback), and the situational/symptom/outcome channels remain hash-based. A lazy backfill for pre-seam experiences is deferred.
 - **Per-cluster cumulative error is not tracked online** — `cumPredictionError` is recomputed at write-back from member errors; the design's per-cluster error accumulator that triggers a local repair mid-lifecycle is only approximated by the emergency feedback threshold.
 - **No scheduled cold loop** — the design's daily/weekly scheduler is a manual `rebuild_taxonomy` call today; a timer-driven row (e.g. via `@deepseek-ai/cordis-plugin-timer`) is future work.
 - **No PostgreSQL/pgvector backend** — the store is JSONL+JSON files; the design's pgvector single-store plan is deferred until a scale need appears.

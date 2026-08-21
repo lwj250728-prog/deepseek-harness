@@ -57,6 +57,11 @@ export interface Experience {
   readonly actionVector: readonly number[]
   /** Deterministic hashed outcome vector (the clustering axis). */
   readonly outcomeVector: readonly number[]
+  /** Real-embedding vector of the action text (roadmap R3), present only
+   * when the embedding seam was enabled at write time. The semantic
+   * retrieval channel prefers it over the hashed action vector; experiences
+   * without one keep the hash fallback. */
+  readonly embedding?: readonly number[]
   /** Current cluster assignment, null until the first cold-loop rebuild. */
   readonly clusterId: number | null
   /** Human strategy label of the assigned cluster. */

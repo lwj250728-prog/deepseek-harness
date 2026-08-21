@@ -10,6 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { calibrate, refineRetrieval, reviewOod } from './llm.ts'
 import type { CognitiveLlmRoute } from './llm.ts'
+import type { EmbeddingScorer } from './embedding.ts'
 import { CognitiveStore } from './store.ts'
 import type { ChannelWeights, Experience, Prediction, PredictInput, PredictResult, SuccessReference, TaxonomyContext, TempStrategy } from './types.ts'
 import {
@@ -127,6 +128,7 @@ export class HotEngine {
   private readonly config: HotEngineConfig
   private readonly route: CognitiveLlmRoute
   private readonly scorer: SemanticScorer
+  private readonly embedder: EmbeddingScorer | null
 
   constructor(
     ctx: Context,
@@ -134,12 +136,21 @@ export class HotEngine {
     config: HotEngineConfig,
     route: CognitiveLlmRoute,
     scorer: SemanticScorer = new HashSemanticScorer(),
+    embedder: EmbeddingScorer | null = null,
   ) {
     this.ctx = ctx
     this.store = store
     this.config = config
     this.route = route
     this.scorer = scorer
+    this.embedder = embedder
+  }
+
+  /** Embed the query action once per prediction when the seam is enabled;
+   * null on failure or when disabled (the hash-bag scorer then serves). */
+  private async embedQuery(action: string): Promise<readonly number[] | null> {
+    if (this.embedder === null) return null
+    return this.embedder.embed(action)
   }
 
   /** Whether the query text itself carries any failure symptom marker. */
@@ -149,11 +160,15 @@ export class HotEngine {
   }
 
   /** Raw per-channel scores (w-independent) of one experience for one query,
-   * in [semantic, situational, symptom, outcome] order.
+   * in [semantic, situational, symptom, outcome] order. The semantic channel
+   * prefers the real-embedding cosine when the query embedding and the
+   * experience's stored embedding both exist; otherwise it falls back to the
+   * configured scorer (the hash-bag cosine by default).
    * @param exp - the candidate experience.
    * @param queryAction - the query action text.
    * @param situationVector - the precomputed query situation vector (null when the situation is empty).
    * @param queryText - action + situation, used for symptom/outcome channels.
+   * @param queryEmbedding - the real-embedding vector of the query action, or null.
    * @returns the four raw channel scores.
    */
   private channelScores(
@@ -161,8 +176,11 @@ export class HotEngine {
     queryAction: string,
     situationVector: number[] | null,
     queryText: string,
+    queryEmbedding: readonly number[] | null,
   ): readonly number[] {
-    const semantic = this.scorer.score(queryAction, exp)
+    const semantic = queryEmbedding !== null && exp.embedding !== undefined
+      ? cosine(queryEmbedding, exp.embedding)
+      : this.scorer.score(queryAction, exp)
     const situational = situationVector === null
       ? 0
       : cosine(situationVector, actionVector(exp.sar.situation, []))
@@ -180,16 +198,18 @@ export class HotEngine {
    * @param action - the proposed action text.
    * @param k - how many hits to return.
    * @param situation - the situation text, feeding the situational channel.
+   * @param queryEmbedding - the real-embedding vector of the query action
+   * (pre-fetched by the caller), or null to use the hash-bag scorer.
    * @returns ranked hits, best first.
    */
-  retrieveTopK(action: string, k: number, situation = ''): RankedHit[] {
+  retrieveTopK(action: string, k: number, situation = '', queryEmbedding: readonly number[] | null = null): RankedHit[] {
     const weights = this.store.channelWeightsSnapshot()
     const situationVector = situation.trim().length > 0 ? actionVector(situation, []) : null
     const queryText = `${action} ${situation}`.trim()
     const keys: readonly (keyof ChannelWeights)[] = ['semantic', 'situational', 'symptom', 'outcome']
     const scored = this.store.experiencesSnapshot()
       .map((exp) => {
-        const raws = this.channelScores(exp, action, situationVector, queryText)
+        const raws = this.channelScores(exp, action, situationVector, queryText, queryEmbedding)
         const channels = raws.map((raw, index) => raw * weights[keys[index] ?? 'semantic'])
         return {
           exp,
@@ -241,7 +261,8 @@ export class HotEngine {
    * @returns the calibrated prediction result.
    */
   async predict(input: PredictInput, sessionId?: GenerateOptions['sessionId'], signal?: AbortSignal): Promise<PredictResult> {
-    const ranked = this.retrieveTopK(input.action, this.config.topK, input.situation)
+    const queryEmbedding = await this.embedQuery(input.action)
+    const ranked = this.retrieveTopK(input.action, this.config.topK, input.situation, queryEmbedding)
     const { signal: oodSignal, top1 } = this.detectOod(ranked)
     const taxonomyContext = this.taxonomyContext(input.situation)
     // Low-confidence deterministic routing triggers the LLM refine pass: the

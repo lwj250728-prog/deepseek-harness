@@ -13,6 +13,8 @@ import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { ColdEngine } from './cold-engine.ts'
 import type { ColdEngineConfig } from './cold-engine.ts'
+import { EmbeddingScorer } from './embedding.ts'
+import type { ResolvedEmbeddingConfig } from './embedding.ts'
 import { HotEngine } from './hot-engine.ts'
 import type { HotEngineConfig } from './hot-engine.ts'
 import { CognitivePipelineError, deriveReference, evaluateAccumulation, extractSar, resolveRoute } from './llm.ts'
@@ -126,6 +128,20 @@ export interface CognitivePipelineConfig {
   clusterMatchCosine?: number
   /** Feedback error at/above which an emergency local rebuild fires (default 0.8). */
   emergencyErrorThreshold?: number
+  /** Real-embedding seam (roadmap R3): when set, the semantic retrieval
+   * channel uses an OpenAI-compatible `/embeddings` endpoint and experiences
+   * store their action embedding at write time; the hash-bag cosine remains
+   * the fallback for queries/experiences without a vector. */
+  embedding?: {
+    /** API base URL (default `https://api.deepseek.com`). */
+    baseUrl?: string
+    /** Embedding model id (default `deepseek-embedding`). */
+    model?: string
+    /** Env name holding the API key (default `DEEPSEEK_API_KEY`). */
+    apiKeyEnv?: string
+    /** Explicit API key, overriding env and credentials. */
+    apiKey?: string
+  }
 }
 
 /** Resolved configuration with every optional field materialized. */
@@ -143,6 +159,8 @@ export interface ResolvedCognitivePipelineConfig {
   readonly simulationTtlMs: number
   /** Whether completed turns are automatically accumulated via the LLM gate. */
   readonly autoAccumulate: boolean
+  /** Real-embedding configuration, or null when the seam is disabled. */
+  readonly embedding: ResolvedEmbeddingConfig | null
 }
 
 /** Config schema for Loader validation and defaulting. */
@@ -185,6 +203,12 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   clusterMergeCosine: z.number().min(0).max(1).default(0.4),
   clusterMatchCosine: z.number().min(0).max(1).default(0.3),
   emergencyErrorThreshold: z.number().min(0).max(1).default(0.8),
+  embedding: z.object({
+    baseUrl: z.string().default('https://api.deepseek.com'),
+    model: z.string().default('deepseek-embedding'),
+    apiKeyEnv: z.string().default('DEEPSEEK_API_KEY'),
+    apiKey: z.string(),
+  }),
 })
 
 /** Validate an untrusted config object without Loader normalization.
@@ -236,6 +260,14 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
     simulationPermanentThreshold: config.simulationPermanentThreshold ?? 2,
     simulationTtlMs: config.simulationTtlMs ?? 30 * 24 * 60 * 60 * 1000,
     autoAccumulate: config.autoAccumulate ?? false,
+    embedding: config.embedding === undefined
+      ? null
+      : Object.freeze({
+        baseUrl: config.embedding.baseUrl ?? 'https://api.deepseek.com',
+        model: config.embedding.model ?? 'deepseek-embedding',
+        apiKeyEnv: config.embedding.apiKeyEnv ?? 'DEEPSEEK_API_KEY',
+        ...config.embedding.apiKey === undefined ? {} : { apiKey: config.embedding.apiKey },
+      }),
   })
 }
 
@@ -263,6 +295,8 @@ export class CognitivePipelineService extends Service {
   readonly hot: HotEngine
   /** Cold-loop engine. */
   readonly cold: ColdEngine
+  /** Real-embedding scorer, or null when the seam is disabled. */
+  readonly embedder: EmbeddingScorer | null
 
   private readonly readinessPromise: Promise<void>
 
@@ -270,7 +304,10 @@ export class CognitivePipelineService extends Service {
     super(ctx, 'cognitivePipeline')
     this.resolved = resolveConfig(config)
     this.store = new CognitiveStore(this.resolved.root)
-    this.hot = new HotEngine(ctx, this.store, this.resolved.hot, this.resolved.route)
+    this.embedder = this.resolved.embedding === null
+      ? null
+      : new EmbeddingScorer(ctx, this.resolved.embedding)
+    this.hot = new HotEngine(ctx, this.store, this.resolved.hot, this.resolved.route, undefined, this.embedder)
     this.cold = new ColdEngine(ctx, this.store, this.resolved.cold, this.resolved.route)
     this.readinessPromise = this.store.load().catch((error: unknown) => {
       this.ctx.logger.warn(`cognitive-pipeline: store load failed, continuing in-memory: ${String(error)}`)
@@ -301,11 +338,13 @@ export class CognitivePipelineService extends Service {
       signal: call?.signal,
     })
     const expId = this.store.nextExpId()
+    const embedding = await this.maybeEmbed(sar.action)
     const exp: Experience = {
       expId,
       sar,
       actionVector: actionVector(sar.action, sar.actionKeywords),
       outcomeVector: outcomeVector(sar.outcomeUtility, sar.outcome),
+      ...embedding === undefined ? {} : { embedding },
       clusterId: null,
       strategyLabel: null,
       timestamp: Date.now(),
@@ -320,6 +359,15 @@ export class CognitivePipelineService extends Service {
     this.store.addExperience(exp)
     await this.store.flush()
     return { expId, sar }
+  }
+
+  /** Embed an action text when the seam is enabled; undefined otherwise.
+   * @param action - the action text to embed.
+   * @returns the vector, or undefined when disabled or the call failed.
+   */
+  private async maybeEmbed(action: string): Promise<readonly number[] | undefined> {
+    if (this.embedder === null) return undefined
+    return (await this.embedder.embed(action)) ?? undefined
   }
 
   /**
@@ -343,11 +391,13 @@ export class CognitivePipelineService extends Service {
       signal: call?.signal,
     })
     const expId = this.store.nextExpId()
+    const embedding = await this.maybeEmbed(sar.action)
     const exp: Experience = {
       expId,
       sar,
       actionVector: actionVector(sar.action, sar.actionKeywords),
       outcomeVector: outcomeVector(sar.outcomeUtility, sar.outcome),
+      ...embedding === undefined ? {} : { embedding },
       clusterId: null,
       strategyLabel: null,
       timestamp: Date.now(),
@@ -422,11 +472,13 @@ export class CognitivePipelineService extends Service {
       outcomeUtility: { ...decision.sar.utility },
     }
     const expId = this.store.nextExpId()
+    const embedding = await this.maybeEmbed(sar.action)
     this.store.addExperience({
       expId,
       sar,
       actionVector: actionVector(sar.action, sar.actionKeywords),
       outcomeVector: outcomeVector(sar.outcomeUtility, sar.outcome),
+      ...embedding === undefined ? {} : { embedding },
       clusterId: null,
       strategyLabel: null,
       timestamp: Date.now(),
@@ -565,11 +617,13 @@ export class CognitivePipelineService extends Service {
       actionKeywords: [...new Set(tokenize(decision.sar.action))].slice(0, 8),
       outcomeUtility: { ...decision.sar.utility },
     }
+    const embedding = await this.maybeEmbed(sar.action)
     this.store.addExperience({
       expId,
       sar,
       actionVector: actionVector(sar.action, sar.actionKeywords),
       outcomeVector: outcomeVector(sar.outcomeUtility, sar.outcome),
+      ...embedding === undefined ? {} : { embedding },
       clusterId: null,
       strategyLabel: null,
       timestamp: Date.now(),

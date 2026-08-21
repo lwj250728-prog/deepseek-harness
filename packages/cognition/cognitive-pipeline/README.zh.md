@@ -108,6 +108,7 @@ ctx.cognitivePipeline.store                                      // → Cognitiv
 | `simulationPermanentThreshold` | `2` | 永久 verified 所需的累计证据分 |
 | `simulationTtlMs` | `2_592_000_000` | 未验证模拟过期的兜底 TTL（30 天） |
 | `autoAccumulate` | `false` | 完成的轮次自动沉淀为经验，由 LLM 路由判断是否值得（纯聊天不进入门） |
+| `embedding` | 未设置 | 真实嵌入接缝（路线图 R3）：OpenAI 兼容 `/embeddings` 对象 `{ baseUrl?, model?, apiKeyEnv?, apiKey? }`（默认 `https://api.deepseek.com` / `deepseek-embedding` / `DEEPSEEK_API_KEY`）。启用后经验写入时存储行动嵌入，语义检索通道优先用嵌入余弦；无向量的查询/经验回退哈希余弦——端点不可达只是降级相似度，绝不破坏管线 |
 | `referenceTopK` | `5` | 一次参考派生锚定的相似历史命中数 |
 | `referenceMinSimilarity` | `0.3` | 历史命中作为参考派生锚点所需的最小双轴相似度；低于此值（或仅有模拟命中）时派生不调用 LLM 直接拒绝 |
 | `channelLearningRate` | `0.2` | 反馈驱动的多通道检索权重 EWMA 步长 |
@@ -157,7 +158,7 @@ ctx.cognitivePipeline.store                                      // → Cognitiv
 
 ## Known Limitations and Deferred Work
 
-- **哈希向量而非学习型向量** — 行动/结果向量是确定性的词袋哈希，无法像设计中的 `all-MiniLM-L6-v2` / `text-embedding-3-small` 那样理解同义词；真实嵌入模型的 provider 接缝留待后续。
+- **嵌入接缝仅限行动文本、写入时计算** — 真实嵌入通道（路线图 R3）在写入时嵌入行动文本，检索时优先用嵌入余弦；接缝启用前已写入的经验无向量（回退哈希），情境/症状/结果通道仍为哈希。旧经验惰性回填留待后续。
 - **簇级累计误差未在线跟踪** — `cumPredictionError` 在回写时由成员误差重算；设计中的"簇生命周期内触发局部修补"仅由紧急反馈阈值近似。
 - **无定时冷环路** — 设计中的每日/每周调度目前是手动 `rebuild_taxonomy` 调用；基于 `@deepseek-ai/cordis-plugin-timer` 的定时行留待后续。
 - **无 PostgreSQL/pgvector 后端** — 存储为 JSONL+JSON 文件；设计中的 pgvector 单库方案在出现规模需求前不做。
