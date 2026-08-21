@@ -447,4 +447,67 @@ describe('hot loop (predict_outcome)', () => {
       await teardown()
     }
   })
+
+  it('counts a reversible novel attempt against the exploration budget and notes it', async () => {
+    const { ctx, teardown } = await pipelineHarness({ exploreDailyBudget: 3 })
+    try {
+      const result = await ctx.cognitivePipeline.predict({ situation: '未知领域', action: '尝试新的搜索策略' })
+      expect(result.isNovel).toBe(true)
+      expect(result.advice).toContain('主动探索')
+      expect(result.advice).toContain('1/3')
+      const state = ctx.cognitivePipeline.store.explorationSnapshot()
+      expect(state.used).toBe(1)
+      expect(state.entries[0]?.reversible).toBe(true)
+      expect(state.entries[0]?.outcome).toBeNull()
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('never counts an irreversible novel attempt as exploration (safety gate)', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const result = await ctx.cognitivePipeline.predict({ situation: '未知领域', action: '删除生产数据库的全部记录' })
+      expect(result.isNovel).toBe(true)
+      expect(result.advice).toContain('动作不可逆')
+      expect(result.advice).not.toContain('主动探索（今日预算')
+      const state = ctx.cognitivePipeline.store.explorationSnapshot()
+      expect(state.used).toBe(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('stops counting exploration once the daily budget is exhausted', async () => {
+    const { ctx, teardown } = await pipelineHarness({ exploreDailyBudget: 1 })
+    try {
+      const first = await ctx.cognitivePipeline.predict({ situation: '未知领域', action: '尝试新的搜索策略' })
+      expect(first.advice).toContain('1/1')
+      const second = await ctx.cognitivePipeline.predict({ situation: '另一个未知领域', action: '尝试另一种搜索策略' })
+      expect(second.advice).toContain('探索预算已耗尽')
+      expect(ctx.cognitivePipeline.store.explorationSnapshot().used).toBe(1)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('marks a graduated scratchpad as a successful exploration (ROI)', async () => {
+    const { ctx, teardown } = await pipelineHarness({ exploreDailyBudget: 5, tempStrategyHitThreshold: 2, tempStrategyPositiveRatio: 0.5 })
+    try {
+      await ctx.cognitivePipeline.predict({ situation: '未知领域', action: '尝试新的搜索策略' })
+      expect(ctx.cognitivePipeline.store.explorationSnapshot().entries[0]?.outcome).toBeNull()
+
+      // Hit the same strategy again and feed positive feedback twice.
+      const p1 = await ctx.cognitivePipeline.predict({ situation: '未知领域', action: '尝试新的搜索策略' })
+      await ctx.cognitivePipeline.report({ predictionId: p1.predictionId, actualOutcome: '有效', outcomeQuality: 8 })
+      const p2 = await ctx.cognitivePipeline.predict({ situation: '未知领域', action: '尝试新的搜索策略' })
+      await ctx.cognitivePipeline.report({ predictionId: p2.predictionId, actualOutcome: '有效', outcomeQuality: 8 })
+
+      expect(ctx.cognitivePipeline.store.explorationSnapshot().entries[0]?.outcome).toBe('graduated')
+      const insp = ctx.cognitivePipeline.inspect()
+      expect(insp.exploration.graduated).toBe(1)
+    } finally {
+      await teardown()
+    }
+  })
 })

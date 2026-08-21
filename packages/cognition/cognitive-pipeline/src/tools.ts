@@ -504,6 +504,18 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
               updated_at: { type: 'number', required: true },
             },
           },
+          exploration: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            properties: {
+              budget: { type: 'number', required: true },
+              used: { type: 'number', required: true },
+              total: { type: 'number', required: true },
+              graduated: { type: 'number', required: true },
+              expired: { type: 'number', required: true },
+            },
+          },
         },
       },
       render: renderJson,
@@ -526,6 +538,13 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           version: result.taxonomy.version,
           summary_short: result.taxonomy.summaryShort,
           updated_at: result.taxonomy.updatedAt,
+        },
+        exploration: {
+          budget: result.exploration.budget,
+          used: result.exploration.used,
+          total: result.exploration.total,
+          graduated: result.exploration.graduated,
+          expired: result.exploration.expired,
         },
       })
     },

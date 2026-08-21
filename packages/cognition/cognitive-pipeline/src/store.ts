@@ -13,6 +13,8 @@ import type {
   ChannelWeights,
   Cluster,
   Experience,
+  ExploreEntry,
+  ExplorationState,
   Prediction,
   TaxonomyState,
   TempStrategy,
@@ -21,6 +23,14 @@ import { ACTION_VECTOR_DIM, actionVector } from './vectorizer.ts'
 
 /** How many calibration deciles the lifetime stats keep. */
 export const CALIBRATION_BUCKETS = 10
+
+/** Local date key of the exploration budget window (`YYYY-MM-DD`). */
+export function todayKey(): string {
+  const now = new Date()
+  const month = String(now.getMonth() + 1).padStart(2, '0')
+  const day = String(now.getDate()).padStart(2, '0')
+  return `${now.getFullYear()}-${month}-${day}`
+}
 
 /**
  * Index a probability into its decile bucket.
@@ -89,6 +99,7 @@ export class CognitiveStore {
   private clusterList: Cluster[] = []
   private calibration = emptyBuckets()
   private channelWeights: ChannelWeights = { semantic: 1, situational: 1, symptom: 1, outcome: 1 }
+  private explorationState: ExplorationState = { date: todayKey(), used: 0, entries: [] }
   private taxonomyState: TaxonomyState | null = null
   private nextExpSeq = 1
   private nextPredictionSeq = 1
@@ -108,13 +119,14 @@ export class CognitiveStore {
   /** Create the root and load every table. Missing files start empty. */
   async load(): Promise<void> {
     await mkdir(this.root, { recursive: true })
-    const [experiences, predictions, tempStrategies, clusters, calibration, channelWeights, taxonomy] = await Promise.all([
+    const [experiences, predictions, tempStrategies, clusters, calibration, channelWeights, exploration, taxonomy] = await Promise.all([
       readFile(this.file('experiences.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('predictions.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('temp_strategies.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('clusters.json'), 'utf8').catch(() => ''),
       readFile(this.file('calibration.json'), 'utf8').catch(() => ''),
       readFile(this.file('channel_weights.json'), 'utf8').catch(() => ''),
+      readFile(this.file('exploration.json'), 'utf8').catch(() => ''),
       readFile(this.file('taxonomy.json'), 'utf8').catch(() => ''),
     ])
     for (const record of parseLines(experiences)) {
@@ -164,6 +176,21 @@ export class CognitiveStore {
           situational: clampWeight(parsed.situational),
           symptom: clampWeight(parsed.symptom),
           outcome: clampWeight(parsed.outcome),
+        }
+      }
+    }
+    if (exploration !== '') {
+      const parsed = JSON.parse(exploration) as { date?: unknown; used?: unknown; entries?: unknown } | null
+      if (typeof parsed === 'object' && parsed !== null && typeof parsed.date === 'string') {
+        const entries = Array.isArray(parsed.entries) ? parsed.entries : []
+        this.explorationState = {
+          date: parsed.date,
+          used: typeof parsed.used === 'number' && Number.isFinite(parsed.used) ? parsed.used : 0,
+          entries: entries.filter((entry): entry is ExploreEntry => {
+            if (typeof entry !== 'object' || entry === null) return false
+            const e = entry as Record<string, unknown>
+            return typeof e.ts === 'number' && typeof e.action === 'string' && typeof e.scratchpadHash === 'string'
+          }),
         }
       }
     }
@@ -537,6 +564,47 @@ export class CognitiveStore {
   updateChannelWeights(weights: ChannelWeights): void {
     this.channelWeights = { ...weights }
     this.enqueue('channel_weights.json', this.channelWeights)
+  }
+
+  // ── active exploration ───────────────────────────────────────────────────
+
+  /** Snapshot of the exploration state with the current window's usage.
+   * @returns the exploration state (used counts reset for a stale date).
+   */
+  explorationSnapshot(): ExplorationState {
+    if (this.explorationState.date !== todayKey()) {
+      return { date: todayKey(), used: 0, entries: [...this.explorationState.entries] }
+    }
+    return { date: this.explorationState.date, used: this.explorationState.used, entries: [...this.explorationState.entries] }
+  }
+
+  /** Record one exploration attempt within the current budget window.
+   * @param entry - the exploration entry to append.
+   */
+  recordExploration(entry: ExploreEntry): void {
+    const current = this.explorationSnapshot()
+    this.explorationState = {
+      date: current.date,
+      used: current.used + 1,
+      entries: [...current.entries, entry],
+    }
+    this.enqueue('exploration.json', this.explorationState)
+  }
+
+  /** Mark an exploration entry's scratchpad terminal outcome.
+   * @param scratchpadHash - the tracked scratchpad signature hash.
+   * @param outcome - 'graduated' or 'expired'.
+   */
+  resolveExploration(scratchpadHash: string, outcome: 'graduated' | 'expired'): void {
+    const current = this.explorationSnapshot()
+    const updated = current.entries.map(entry =>
+      entry.scratchpadHash === scratchpadHash && entry.outcome === null
+        ? { ...entry, outcome }
+        : entry)
+    if (updated.some((entry, index) => entry !== current.entries[index])) {
+      this.explorationState = { date: current.date, used: current.used, entries: updated }
+      this.enqueue('exploration.json', this.explorationState)
+    }
   }
 
   // ── clusters + taxonomy ──────────────────────────────────────────────────

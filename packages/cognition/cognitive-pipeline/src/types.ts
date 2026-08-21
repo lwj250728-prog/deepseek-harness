@@ -154,6 +154,31 @@ export interface TempStrategy {
   readonly sourceExpId: string | null
 }
 
+/** One active-exploration attempt (scheme 2): a scratchpad created within the
+ * curiosity budget. ROI is tracked from the strategy's terminal state. */
+export interface ExploreEntry {
+  /** Epoch milliseconds at creation. */
+  readonly ts: number
+  /** The trial action that was explored. */
+  readonly action: string
+  /** The scratchpad signature hash this entry tracks. */
+  readonly scratchpadHash: string
+  /** Whether the action passed the reversibility safety gate. */
+  readonly reversible: boolean
+  /** Terminal outcome: 'graduated' | 'expired' | null while active. */
+  readonly outcome: 'graduated' | 'expired' | null
+}
+
+/** Persisted active-exploration state (one per pipeline store). */
+export interface ExplorationState {
+  /** Local date key (`YYYY-MM-DD`) of the current budget window. */
+  readonly date: string
+  /** How many entries the window has consumed. */
+  readonly used: number
+  /** Every exploration attempt, newest last. */
+  readonly entries: readonly ExploreEntry[]
+}
+
 /** Lifetime calibration statistics for one confidence decile. */
 export interface CalibrationBucket {
   /** Decile index 0–9 covering [bucketIndex*10, (bucketIndex+1)*10) percent. */
@@ -357,6 +382,14 @@ export interface InspectResult {
   readonly taxonomy: TaxonomyState
   /** Learned multi-channel retrieval weights (feedback-driven). */
   readonly channelWeights: ChannelWeights
+  /** Active-exploration statistics (scheme 2): budget, usage, ROI. */
+  readonly exploration: {
+    readonly budget: number
+    readonly used: number
+    readonly total: number
+    readonly graduated: number
+    readonly expired: number
+  }
   /** Recent resolved predictions, newest first. */
   readonly recentResolved: readonly Prediction[]
 }

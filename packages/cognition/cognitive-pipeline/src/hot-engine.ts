@@ -46,6 +46,11 @@ export interface HotEngineConfig {
   /** Bounded LLM-refine drops: how many inapplicable top candidates may be
    * removed in one prediction (default 2). */
   readonly refineMaxDrops: number
+  /** Active-exploration daily budget (scheme 2, default 3). */
+  readonly exploreDailyBudget: number
+  /** Irreversible-action markers that exclude a novel attempt from the
+   * exploration budget (scheme 2 safety gate). */
+  readonly exploreRiskWords: readonly string[]
   readonly tempStrategyTtlMs: number
   readonly tempStrategyMatchThreshold: number
 }
@@ -479,7 +484,10 @@ export class HotEngine {
     refineNote: string | null,
   ): Promise<PredictResult> {
     const hash = String(signatureHash(input.action))
-    this.store.expireTempStrategies()
+    const expired = this.store.expireTempStrategies()
+    // ROI tracking: strategies that expired never graduated — a failed
+    // exploration attempt.
+    for (const expiredHash of expired) this.store.resolveExploration(expiredHash, 'expired')
     let strategy = this.store.getTempStrategy(hash)
     let usedTempStrategy = false
 
@@ -514,7 +522,28 @@ export class HotEngine {
     if (usedTempStrategy && strategy !== undefined) {
       advice = `⚠️ 全新现象（命中临时试行方案）：${strategy.trialAction}。此为临时试行方案，尚未晋升为主记忆。`
     } else {
-      advice = `⚠️ 全新现象：历史库无匹配（Top1相似度 ${top1.toFixed(3)}，信号 ${oodSignal}）。建议小步试探：${calibration.advicePreview}`
+      // Active exploration (scheme 2): a novel scratchpad creation counts
+      // against the daily curiosity budget ONLY when the action is reversible
+      // (safety gate) and the window has budget left. Irreversible actions
+      // still get a scratchpad but are never flagged as exploration.
+      const reversible = !this.config.exploreRiskWords.some(word => input.action.includes(word))
+      const exploration = this.store.explorationSnapshot()
+      const budgetLeft = exploration.used < this.config.exploreDailyBudget
+      if (reversible && budgetLeft) {
+        this.store.recordExploration({
+          ts: Date.now(),
+          action: input.action,
+          scratchpadHash: hash,
+          reversible: true,
+          outcome: null,
+        })
+      }
+      const budgetNote = reversible
+        ? (budgetLeft
+          ? `主动探索（今日预算 ${exploration.used + 1}/${this.config.exploreDailyBudget}）`
+          : '探索预算已耗尽，本次谨慎试探')
+        : '动作不可逆，不纳入主动探索预算'
+      advice = `⚠️ 全新现象：历史库无匹配（Top1相似度 ${top1.toFixed(3)}，信号 ${oodSignal}）。建议小步试探：${calibration.advicePreview} | ${budgetNote}`
       this.store.addTempStrategy({
         signatureHash: hash,
         trialAction: input.action,

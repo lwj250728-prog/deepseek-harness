@@ -75,6 +75,12 @@ export interface CognitivePipelineConfig {
   tempStrategyPositiveRatio?: number
   /** Scratchpad fuzzy-match cosine (default 0.5). */
   tempStrategyMatchThreshold?: number
+  /** Active-exploration daily budget (scheme 2): how many reversible novel
+   * attempts count as exploration per day (default 3). */
+  exploreDailyBudget?: number
+  /** Words marking an action as irreversible; such actions are never counted
+   * as active exploration (default: 删除/清空/覆盖/发布/推送/rm/移除/迁移/重置/格式化…). */
+  exploreRiskWords?: string[]
   /** Layer-2 shrinkage alpha (default 50). */
   shrinkageAlpha?: number
   /** Minimum 80%-interval width (default 0.2). */
@@ -161,6 +167,10 @@ export interface ResolvedCognitivePipelineConfig {
   readonly autoAccumulate: boolean
   /** Real-embedding configuration, or null when the seam is disabled. */
   readonly embedding: ResolvedEmbeddingConfig | null
+  /** Active-exploration budget (scheme 2). */
+  readonly exploreDailyBudget: number
+  /** Irreversible-action markers that exclude an attempt from the budget. */
+  readonly exploreRiskWords: readonly string[]
 }
 
 /** Config schema for Loader validation and defaulting. */
@@ -177,6 +187,8 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   tempStrategyHitThreshold: z.number().step(1).min(1).default(3),
   tempStrategyPositiveRatio: z.number().min(0).max(1).default(0.667),
   tempStrategyMatchThreshold: z.number().min(0).max(1).default(0.5),
+  exploreDailyBudget: z.number().step(1).min(0).max(100).default(3),
+  exploreRiskWords: z.array(z.string()).default(['删除', '清空', '覆盖', '发布', '推送', 'rm', '移除', '迁移', '重置', '格式化']),
   shrinkageAlpha: z.number().min(0).default(50),
   minConfidenceIntervalWidth: z.number().min(0).max(1).default(0.2),
   successReferenceThreshold: z.number().min(0).max(1).default(0.4),
@@ -235,6 +247,8 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
       channelLearningRate: config.channelLearningRate ?? 0.2,
       channelErrorThreshold: config.channelErrorThreshold ?? 0.3,
       refineMaxDrops: config.refineMaxDrops ?? 2,
+      exploreDailyBudget: config.exploreDailyBudget ?? 3,
+      exploreRiskWords: Object.freeze(config.exploreRiskWords ?? ['删除', '清空', '覆盖', '发布', '推送', 'rm', '移除', '迁移', '重置', '格式化']),
       tempStrategyTtlMs: config.tempStrategyTtlMs ?? 24 * 60 * 60 * 1000,
       tempStrategyMatchThreshold: config.tempStrategyMatchThreshold ?? 0.5,
     }),
@@ -268,6 +282,8 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
         apiKeyEnv: config.embedding.apiKeyEnv ?? 'DEEPSEEK_API_KEY',
         ...config.embedding.apiKey === undefined ? {} : { apiKey: config.embedding.apiKey },
       }),
+    exploreDailyBudget: config.exploreDailyBudget ?? 3,
+    exploreRiskWords: Object.freeze(config.exploreRiskWords ?? ['删除', '清空', '覆盖', '发布', '推送', 'rm', '移除', '迁移', '重置', '格式化']),
   })
 }
 
@@ -732,6 +748,7 @@ export class CognitivePipelineService extends Service {
         .filter(strategy => strategy.status === 'active').length,
       calibrationBuckets: this.store.calibrationBucketsSnapshot(),
       channelWeights: this.store.channelWeightsSnapshot(),
+      exploration: this.explorationStats(),
       taxonomy: this.store.taxonomySnapshot() ?? {
         version: 0,
         summaryShort: '（尚未完成首次重构）',
@@ -802,7 +819,25 @@ export class CognitivePipelineService extends Service {
       })
       if (graduated) {
         this.ctx.logger.info(`cognitive-pipeline: 临时策略 ${strategy.signatureHash} 晋升为主库种子（命中${hitCount}次，正反馈率${(ratio * 100).toFixed(0)}%）`)
+        // ROI tracking: a graduated scratchpad is a successful exploration.
+        this.store.resolveExploration(strategy.signatureHash, 'graduated')
       }
+    }
+  }
+
+  /** Active-exploration statistics for inspection.
+   * @returns budget window usage and terminal-outcome counts.
+   */
+  private explorationStats(): InspectResult['exploration'] {
+    const state = this.store.explorationSnapshot()
+    const graduated = state.entries.filter(entry => entry.outcome === 'graduated').length
+    const expired = state.entries.filter(entry => entry.outcome === 'expired').length
+    return {
+      budget: this.resolved.exploreDailyBudget,
+      used: state.used,
+      total: state.entries.length,
+      graduated,
+      expired,
     }
   }
 }
