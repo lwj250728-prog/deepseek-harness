@@ -389,6 +389,41 @@ export interface MetaLoopSpec {
   readonly name: string
   /** One-line description surfaced in inspection. */
   readonly description: string
+  /** Optional execution sinks: when a decision approves, an execution request
+   * is submitted to each sink. The loop only APPLIES — the sink decides
+   * whether and how to execute under its own discipline (budgets, safety
+   * gates). This is what truly closes the loop: 意志提交申请，执行层按纪律受理. */
+  readonly execution?: readonly LoopExecutionSink[]
+}
+
+/** A loop decision submitted to an execution sink. The loop never commands —
+ * it requests, and the sink enforces its own discipline. */
+export interface LoopExecutionRequest {
+  readonly loopName: string
+  /** The decision action text. */
+  readonly decision: string
+  /** The situation the decision was made in (with the loop: prefix). */
+  readonly situation: string
+  /** Whether the decision approved (calibrated probability ≥ threshold). */
+  readonly approved: boolean
+  readonly probability: number
+  readonly confidenceLow: number
+  readonly confidenceHigh: number
+  /** The decision's prediction id, for later feedback. */
+  readonly predictionId: string
+}
+
+/** One execution access point a loop can drive. */
+export interface LoopExecutionSink {
+  /** Execution-point identifier (e.g. `hot-engine.explore-create`) for diagnostics. */
+  readonly target: string
+  /**
+   * Accept (or refuse) one execution request under the sink's own discipline.
+   * @param request - the loop's approved/refused decision.
+   * @returns a human-readable rejection reason (non-null refuses execution),
+   *   null/undefined accepts.
+   */
+  readonly apply: (request: LoopExecutionRequest) => string | null | void | Promise<string | null | void>
 }
 
 /** Per-loop aggregation for inspection: the loop's decision history under

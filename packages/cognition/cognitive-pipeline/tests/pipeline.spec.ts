@@ -647,4 +647,139 @@ describe('cognitive pipeline integration', () => {
       await teardown()
     }
   })
+
+  it('submits an approved loop decision as an execution request, honoring the sink discipline', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const accepted: string[] = []
+      const refused: string[] = []
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-archive',
+        description: '是否归档该会话',
+        execution: [{
+          target: 'test.archive-sink',
+          // The sink enforces its own discipline: it refuses when the decision
+          // text mentions a protected keyword, regardless of the loop's approval.
+          apply(request) {
+            if (request.decision.includes('保留')) {
+              refused.push(request.decision)
+              return 'protected: 该会话需保留'
+            }
+            accepted.push(request.decision)
+            return null
+          },
+        }],
+      })
+
+      // First decision approves and reaches the sink (accepted).
+      const first = await ctx.cognitivePipeline.decideAndExecute('when-to-archive', '归档会话', '会话已空闲', 0.5)
+      expect(first.approved).toBe(true)
+      expect(first.executions).toEqual([{ target: 'test.archive-sink', rejected: false, reason: null }])
+      expect(accepted).toEqual(['归档会话'])
+
+      // Second decision approves but the sink refuses under its discipline.
+      const second = await ctx.cognitivePipeline.decideAndExecute('when-to-archive', '归档并保留会话', '会话已空闲', 0.5)
+      expect(second.approved).toBe(true)
+      expect(second.executions).toEqual([{
+        target: 'test.archive-sink',
+        rejected: true,
+        reason: 'protected: 该会话需保留',
+      }])
+      expect(refused).toEqual(['归档并保留会话'])
+      // The loop only requested; the sink decided — no execution happened.
+      expect(accepted).toEqual(['归档会话'])
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('does not submit execution requests for a declined decision', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const seen: string[] = []
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-clear',
+        description: '是否清空缓存',
+        execution: [{
+          target: 'test.clear-sink',
+          apply(request) {
+            seen.push(request.decision)
+            return null
+          },
+        }],
+      })
+      // Without an LLM route the calibrated probability shrinks to 0.5; a high
+      // threshold makes the decision decline, so no request reaches the sink.
+      const result = await ctx.cognitivePipeline.decideAndExecute('when-to-clear', '清空缓存', '缓存膨胀', 0.99)
+      expect(result.approved).toBe(false)
+      expect(result.executions).toEqual([])
+      expect(seen).toEqual([])
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('drives real exploration execution through a loop-attached exploration sink', async () => {
+    const { ctx, teardown } = await pipelineHarness({
+      exploreDailyBudget: 2,
+      exploreAutoDispatch: true,
+    })
+    try {
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-explore',
+        description: '该不该主动探索这个未知行动',
+        execution: [ctx.cognitivePipeline.createExplorationSink()],
+      })
+
+      // An approved decision reaches the exploration sink. The predict call
+      // itself already created the entry via its novel branch, so the sink
+      // treats it as handled (no double-record); the exploration exists once.
+      const result = await ctx.cognitivePipeline.decideAndExecute('when-to-explore', '尝试新的检索策略', '未知领域', 0.5)
+      expect(result.approved).toBe(true)
+      expect(result.executions).toEqual([{ target: 'hot-engine.explore-create', rejected: false, reason: null }])
+      expect(ctx.cognitivePipeline.store.explorationSnapshot().entries).toHaveLength(1)
+      expect(ctx.cognitivePipeline.store.tempStrategiesSnapshot()).toHaveLength(1)
+      expect(ctx.cognitivePipeline.store.explorationTasksSnapshot()).toHaveLength(1)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('refuses exploration execution under the sink discipline (safety gate + budget)', async () => {
+    const { ctx, teardown } = await pipelineHarness({
+      exploreDailyBudget: 1,
+      exploreRiskWords: ['删除'],
+    })
+    try {
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-explore',
+        description: '该不该主动探索',
+        execution: [ctx.cognitivePipeline.createExplorationSink()],
+      })
+
+      // Irreversible action: the loop approves but the sink refuses (safety
+      // gate) BEFORE any exploration is recorded.
+      const unsafe = await ctx.cognitivePipeline.decideAndExecute('when-to-explore', '删除全部记录', '未知领域', 0.5)
+      expect(unsafe.approved).toBe(true)
+      expect(unsafe.executions[0]?.rejected).toBe(true)
+      expect(unsafe.executions[0]?.reason).toContain('不可逆')
+      expect(ctx.cognitivePipeline.store.explorationSnapshot().entries).toHaveLength(0)
+
+      // A reversible action: predict's own novel branch consumes the budget and
+      // creates the entry; the sink sees it exists and treats it as handled.
+      const first = await ctx.cognitivePipeline.decideAndExecute('when-to-explore', '尝试新的检索策略', '未知领域', 0.5)
+      expect(first.executions[0]?.rejected).toBe(false)
+      expect(ctx.cognitivePipeline.store.explorationSnapshot().entries).toHaveLength(1)
+
+      // A second reversible action: predict's novel branch skips it (budget
+      // exhausted), so the sink's own budget discipline refuses it.
+      const second = await ctx.cognitivePipeline.decideAndExecute('when-to-explore', '尝试另一种策略', '另一个未知领域', 0.5)
+      expect(second.approved).toBe(true)
+      expect(second.executions[0]?.rejected).toBe(true)
+      expect(second.executions[0]?.reason).toContain('预算已耗尽')
+      expect(ctx.cognitivePipeline.store.explorationSnapshot().entries).toHaveLength(1)
+    } finally {
+      await teardown()
+    }
+  })
 })

@@ -30,6 +30,8 @@ import type {
   FeedbackInput,
   FeedbackResult,
   InspectResult,
+  LoopExecutionRequest,
+  LoopExecutionSink,
   MetaLoopSpec,
   OutcomeUtility,
   PredictInput,
@@ -42,7 +44,7 @@ import type {
   TempStrategy,
   TurnEpisode,
 } from './types.ts'
-import { actionVector, cosine, outcomeVector, tokenize, utilityScore } from './vectorizer.ts'
+import { actionVector, cosine, outcomeVector, signatureHash, tokenize, utilityScore } from './vectorizer.ts'
 
 /** Meta-experience deduplication: skip recording a routing-failure when an
  * action-vector-identical meta experience already exists (default 0.8). */
@@ -339,7 +341,7 @@ export class CognitiveLoopRegistry {
   /**
    * Register one meta-cognition loop. Re-registering the same name replaces
    * the description (identity is the name).
-   * @param spec - the loop's identity and description.
+   * @param spec - the loop's identity, description, and optional execution sinks.
    * @returns the registry, for chaining.
    */
   register(spec: MetaLoopSpec): this {
@@ -352,7 +354,11 @@ export class CognitiveLoopRegistry {
         'INVALID_LOOP_NAME',
       )
     }
-    this.loops.set(spec.name, { name: spec.name, description: spec.description })
+    this.loops.set(spec.name, {
+      name: spec.name,
+      description: spec.description,
+      ...spec.execution === undefined ? {} : { execution: spec.execution },
+    })
     return this
   }
 
@@ -361,9 +367,36 @@ export class CognitiveLoopRegistry {
     return this.loops.has(name)
   }
 
+  /** The registered loop spec, or undefined. */
+  get(name: string): MetaLoopSpec | undefined {
+    return this.loops.get(name)
+  }
+
   /** Every registered loop, in registration order. */
   list(): readonly MetaLoopSpec[] {
     return [...this.loops.values()]
+  }
+
+  /**
+   * Submit one decision as an execution request to the loop's sinks (only
+   * when the decision approved and the loop declared sinks). Each sink
+   * applies its own discipline; a non-null return refuses that sink.
+   * @param request - the decision to submit.
+   * @returns one receipt per declared sink, in declaration order.
+   */
+  async requestExecution(request: LoopExecutionRequest): Promise<readonly { target: string; rejected: boolean; reason: string | null }[]> {
+    const spec = this.loops.get(request.loopName)
+    if (spec?.execution === undefined || !request.approved) return []
+    const receipts: { target: string; rejected: boolean; reason: string | null }[] = []
+    for (const sink of spec.execution) {
+      const reason = await sink.apply(request)
+      receipts.push({
+        target: sink.target,
+        rejected: reason !== null && reason !== undefined,
+        reason: reason === undefined || reason === null ? null : reason,
+      })
+    }
+    return receipts
   }
 
   /** Per-loop calibration statistics, aggregated from the prediction log.
@@ -911,6 +944,63 @@ export class CognitivePipelineService extends Service {
   }
 
   /**
+   * Build a ready-made execution sink that drives the ACTIVE-EXPLORATION
+   * execution layer under its own discipline (reversibility safety gate +
+   * daily budget). A loop that attaches this sink truly closes the loop: an
+   * approved decision creates a scratchpad and (when configured) queues an
+   * autonomous exploration task — 意志批准，执行层按纪律受理.
+   * @returns a sink targetable as `hot-engine.explore-create`.
+   */
+  createExplorationSink(): LoopExecutionSink {
+    return {
+      target: 'hot-engine.explore-create',
+      apply: (request): string | null => {
+        // The sink's discipline, NOT the loop's: irreversible actions and
+        // exhausted budgets refuse execution regardless of approval.
+        const action = request.decision
+        const reversible = !this.resolved.exploreRiskWords.some(word => action.includes(word))
+        if (!reversible) return '动作不可逆，探索执行被拒（安全闸）'
+        const state = this.store.explorationSnapshot()
+        const hash = String(signatureHash(action))
+        // The predict call that produced this decision may ALREADY have created
+        // the exploration entry through its own novel branch (budget
+        // permitting). Executing again would double-record — treat an existing
+        // entry as already-handled rather than refusing.
+        if (state.entries.some(entry => entry.scratchpadHash === hash)) {
+          return null
+        }
+        if (state.used >= this.resolved.exploreDailyBudget) {
+          return '探索预算已耗尽，探索执行被拒（预算纪律）'
+        }
+        this.store.recordExploration({
+          ts: Date.now(),
+          action,
+          scratchpadHash: hash,
+          reversible: true,
+          outcome: null,
+          validatedError: null,
+          validated: null,
+        })
+        this.store.addTempStrategy({
+          signatureHash: hash,
+          trialAction: action,
+          pendingResult: null,
+          hitCount: 1,
+          positiveCount: 0,
+          createdAt: Date.now(),
+          expiresAt: Date.now() + this.resolved.hot.tempStrategyTtlMs,
+          status: 'active',
+          sourceExpId: null,
+        })
+        if (this.resolved.exploreAutoDispatch) {
+          this.store.addExplorationTask(`探索行动：${action}\n情境：${request.situation}`)
+        }
+        return null
+      },
+    }
+  }
+
+  /**
    * Run one meta-cognition loop decision through the SAME calibration ruler as
    * every prediction. The loop's identity prefixes the situation
    * (`loop:<name> 决策=…`), so the decision's history forms that loop's own
@@ -963,6 +1053,43 @@ export class CognitivePipelineService extends Service {
       )
     }
     return this.report({ predictionId, actualOutcome, outcomeQuality }, call)
+  }
+
+  /**
+   * Decide through a loop and — when the decision approves and the loop
+   * declared execution sinks — submit the decision as an execution request
+   * to each sink. This is the closing of the loop: 意志决策，执行层按纪律受理.
+   * @param name - the registered loop name.
+   * @param decision - what the loop is deciding (becomes the action text).
+   * @param situation - the context the decision is made in.
+   * @param threshold - approval threshold on calibrated probability (default 0.55).
+   * @param call - optional session/signal context.
+   * @returns the decision result plus one execution receipt per declared sink.
+   */
+  async decideAndExecute(
+    name: string,
+    decision: string,
+    situation: string,
+    threshold = 0.55,
+    call?: PipelineCallContext,
+  ): Promise<{
+    decision: PredictResult
+    approved: boolean
+    executions: readonly { target: string; rejected: boolean; reason: string | null }[]
+  }> {
+    const decisionResult = await this.decideLoop(name, decision, situation, call)
+    const approved = decisionResult.calibratedProbability >= threshold
+    const executions = await this.loops.requestExecution({
+      loopName: name,
+      decision,
+      situation: `loop:${name} 情境=${situation}`,
+      approved,
+      probability: decisionResult.calibratedProbability,
+      confidenceLow: decisionResult.confidenceLow,
+      confidenceHigh: decisionResult.confidenceHigh,
+      predictionId: decisionResult.predictionId,
+    })
+    return { decision: decisionResult, approved, executions }
   }
 
   /** The dynamic cognition prefix for the system-prompt section.
