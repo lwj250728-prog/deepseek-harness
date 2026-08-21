@@ -106,7 +106,20 @@ function situationText(messages: readonly UserMessage[], depth: number): string 
 /** The per-agent most recent tool outcome: true when the last tool result was a failure. */
 const lastFailed = new WeakMap<Agent, boolean>()
 
-/** Retrieve experiences related to the current situation on both axes. */
+/**
+ * How much a failure-signature overlap may add on top of the semantic cosine,
+ * scaled by the semantic score itself: a literal "失败" match sharpens recall
+ * only for experiences that are already semantically relevant, so an unrelated
+ * experience (measured: semantic 0.11) can never be dragged across the
+ * threshold by the marker alone.
+ */
+const SYMPTOM_BONUS = 0.3
+
+/** Retrieve experiences related to the current situation on both axes. The
+ * semantic axes (action/situation cosine) dominate; a failure-signature
+ * overlap adds a capped bonus proportional to the semantic score, so the
+ * current setback surfaces related past experience without letting literal
+ * markers override relevance. */
 function retrieve(
   service: CognitivePipelineService,
   situation: string,
@@ -117,14 +130,14 @@ function retrieve(
   return service.store.experiencesSnapshot()
     .map((exp) => {
       const text = `${exp.sar.situation}。${exp.sar.action}。${exp.sar.outcome}`
+      const semantic = Math.max(
+        cosine(vector, exp.actionVector),
+        cosine(vector, actionVector(exp.sar.situation, [])),
+      )
       return {
         expId: exp.expId,
         text,
-        similarity: Math.max(
-          cosine(vector, exp.actionVector),
-          cosine(vector, actionVector(exp.sar.situation, [])),
-          symptomOverlap(situation, text),
-        ),
+        similarity: semantic + symptomOverlap(situation, text) * SYMPTOM_BONUS * semantic,
       }
     })
     .filter(hit => hit.similarity >= minSimilarity)

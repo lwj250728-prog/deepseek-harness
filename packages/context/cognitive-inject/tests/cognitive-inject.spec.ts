@@ -198,4 +198,27 @@ describe('cognitive-inject priming', () => {
       await ctx.fiber.dispose()
     }
   })
+
+  it('ranks the semantically relevant experience above a symptom-only literal hit', async () => {
+    const { ctx, fiber } = await mount()
+    try {
+      // exp_1 shares only the 失败 literal marker with the query (irrelevant);
+      // exp_2 matches the situation semantically (web boot needing a dependency
+      // link) without carrying the marker. The symptom channel must be a
+      // capped bonus, not a full-score channel that drowns relevance.
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '库存系统凌晨故障', '重启数据库服务器', '恢复，失败交易全部回滚')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_2', 'web启动需要补充依赖链接', '把插件加入bundle依赖并重新安装', '解析成功插件正常加载')
+      const { agent, session } = stubAgent('rank')
+      session.append('turn/start', { turn: 1 })
+
+      const injected = await fire(ctx, agent, 1, 1, '启动失败了需要补充依赖链接')
+
+      expect(injected.length).toBe(1)
+      expect(injected[0]).toContain('exp_2')
+      expect(injected[0]).not.toContain('exp_1')
+    } finally {
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
 })

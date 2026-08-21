@@ -9,13 +9,13 @@ Step-level SAR experience priming for the cognitive pipeline. At every agent pre
 ```
 主对话 / 子任务 每步开始前
   → agent/pre-step → 提取当前情境文本（最近 N 条消息块）
-  → 情境向量检索经验库（行动轴 ∪ 情境轴，取 max）
+  → 情境向量检索经验库（行动轴 ∪ 情境轴，取 max；失败标记重叠为加成）
   → 命中超阈值 → 注入【认知经验参考】块（source: cognitive-inject）
   → 上一步工具失败 → 阈值放宽 + 注入条数提升 + "上一步执行失败"标记
 ```
 
 - **步骤级预热 (step-level priming)** — unlike the orchestrator's one-shot pre-task injection, this plugin recalls at every step of every agent, so an experience is surfaced exactly when the current situation resembles it — including mid-task, when a bug first appears.
-- **双轴检索 + 症状通道 (dual-axis retrieval plus symptom channel)** — the situation text is matched against both the experience's action vector and its situation vector, and the higher similarity wins. A task text like "tests suddenly hang" recalls the bug experience whose *situation* was "tests suddenly hang", even when the repair wording differs. A third exact-substring channel scores the query's failure-symptom markers (挂起/超时/编译失败…) against the experience text, so a short symptom query that dilutes in the hashed vectors still hits.
+- **双轴检索 + 症状加成 (dual-axis retrieval with symptom bonus)** — the situation text is matched against both the experience's action vector and its situation vector, and the higher similarity wins. A task text like "tests suddenly hang" recalls the bug experience whose *situation* was "tests suddenly hang", even when the repair wording differs. A failure-symptom overlap (挂起/超时/编译失败… in both the query and the experience text) adds a capped bonus (`SYMPTOM_BONUS = 0.3`) **proportional to the semantic score** on top of it — it sharpens recall for the current setback, but a literal marker match can never drag an unrelated experience across the threshold (measured: semantic 0.11 + marker 1.0 scored 0.41 under a flat bonus; proportional scoring drops it to 0.14, below the 0.4 floor, while a genuinely relevant 0.47 situational hit keeps a 0.61 score).
 - **失败强启动 (failure priming)** — when the most recent tool result for an agent was an error, the similarity threshold is multiplied by `failureThresholdFactor` and up to `failureTopK` experiences are injected, prefixed with an "上一步执行失败" marker.
 - **模型可见 ⟺ 已记录 (model-visible ⟺ logged)** — the reference block rides the step's `decision.messages`, so the agent loop appends it as a durable `user/message` event; replay and dispatch observe exactly what the model saw.
 
@@ -31,7 +31,7 @@ Compose the plugin next to the cognitive pipeline:
     minSimilarity: 0.4
 ```
 
-The `web` profile does not mount it by default; add it to your profile patch or bundle to enable step-level priming.
+The `web` profile mounts it after the cognitive pipeline (see its `cordis.patch.yml`); other profiles can add it to their patch or bundle to enable step-level priming.
 
 ## Configuration
 

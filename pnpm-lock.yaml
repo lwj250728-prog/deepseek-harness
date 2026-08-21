@@ -1384,6 +1384,15 @@ importers:
       '@deepseek-ai/dsh-code-runtime-worker-thread':
         specifier: workspace:^
         version: link:../../code-runtime/code-runtime-worker-thread
+      '@deepseek-ai/dsh-cognitive-inject':
+        specifier: workspace:^
+        version: link:../../context/cognitive-inject
+      '@deepseek-ai/dsh-cognitive-orchestration':
+        specifier: workspace:^
+        version: link:../../cognition/cognitive-orchestration
+      '@deepseek-ai/dsh-cognitive-pipeline':
+        specifier: workspace:^
+        version: link:../../cognition/cognitive-pipeline
       '@deepseek-ai/dsh-cordis-client-runner':
         specifier: workspace:^
         version: link:../../extensions/cordis-client-runner
