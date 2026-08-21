@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-19-cold-loop-real-data-verification.md
-2026-08-19-cold-loop-real-data-verification.md: 7e8b996bdce86594e17ffb0dbba4bdbee377d60f
-2026-08-19-cold-loop-real-data-verification.zh.md: 46b3369f76765ac81d83efd1e75c89842d921f48
+2026-08-19-cold-loop-real-data-verification.md: b7d267ab4b3b1b245aceada202b161ab109d8055
+2026-08-19-cold-loop-real-data-verification.zh.md: 36037044bdf82a4f33d5bf694278ca9ee163d583

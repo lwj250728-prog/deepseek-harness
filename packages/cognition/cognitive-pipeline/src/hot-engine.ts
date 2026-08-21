@@ -66,12 +66,17 @@ export class HashSemanticScorer implements SemanticScorer {
 }
 
 /** One ranked history hit: `fused` orders the list, `similarity` keeps the
- * classic semantic cosine semantics for OOD/advice consumers, and `channels`
- * records the per-channel contributions (w_c · s_c) for feedback learning. */
+ * classic semantic cosine for OOD/advice consumers, `channelMax` is the
+ * strongest raw channel score (the OOD novelty judgment — any channel strong
+ * enough means history is relevant even when the semantic cosine is diluted),
+ * and `channels` records the per-channel contributions (w_c · s_c) for
+ * feedback learning. */
 interface RankedHit {
   readonly exp: Experience
-  /** Semantic-channel cosine (the classic similarity; OOD thresholds live here). */
+  /** Semantic-channel cosine (the classic similarity). */
   readonly similarity: number
+  /** Strongest raw channel score of this hit, in [0, 1]. */
+  readonly channelMax: number
   /** Fused multi-channel score; the ranking axis. */
   readonly fused: number
   /** Per-channel contributions in [semantic, situational, symptom, outcome] order. */
@@ -143,22 +148,19 @@ export class HotEngine {
     return SYMPTOM_MARKERS.some(marker => lower.includes(marker))
   }
 
-  /** Per-channel contributions (w_c · s_c) of one experience for one query, in
-   * [semantic, situational, symptom, outcome] order.
+  /** Raw per-channel scores (w-independent) of one experience for one query,
+   * in [semantic, situational, symptom, outcome] order.
    * @param exp - the candidate experience.
    * @param queryAction - the query action text.
-   * @param querySituation - the query situation text.
    * @param situationVector - the precomputed query situation vector (null when the situation is empty).
    * @param queryText - action + situation, used for symptom/outcome channels.
-   * @param weights - the current learned channel weights.
-   * @returns the four weighted contributions.
+   * @returns the four raw channel scores.
    */
-  private channelContributions(
+  private channelScores(
     exp: Experience,
     queryAction: string,
     situationVector: number[] | null,
     queryText: string,
-    weights: ChannelWeights,
   ): readonly number[] {
     const semantic = this.scorer.score(queryAction, exp)
     const situational = situationVector === null
@@ -166,17 +168,15 @@ export class HotEngine {
       : cosine(situationVector, actionVector(exp.sar.situation, []))
     const symptom = symptomOverlap(queryText, `${exp.sar.situation}。${exp.sar.action}。${exp.sar.outcome}`)
     const outcome = this.queryHasFailureMarker(queryText) && outcomePolarity(exp.sar.outcomeUtility) === 'negative' ? 1 : 0
-    return [
-      weights.semantic * semantic,
-      weights.situational * situational,
-      weights.symptom * symptom,
-      weights.outcome * outcome,
-    ]
+    return [semantic, situational, symptom, outcome]
   }
 
   /** Retrieve the top-K experiences by fused multi-channel similarity. The
    * semantic channel alone decides the classic similarity reported downstream;
-   * the situational/symptom/outcome channels participate only in the ranking.
+   * the situational/symptom/outcome channels participate in the ranking, and
+   * `channelMax` (the strongest raw channel score) feeds the OOD novelty
+   * judgment so a strong situational/symptom hit is not drowned by a diluted
+   * semantic cosine.
    * @param action - the proposed action text.
    * @param k - how many hits to return.
    * @param situation - the situation text, feeding the situational channel.
@@ -186,12 +186,15 @@ export class HotEngine {
     const weights = this.store.channelWeightsSnapshot()
     const situationVector = situation.trim().length > 0 ? actionVector(situation, []) : null
     const queryText = `${action} ${situation}`.trim()
+    const keys: readonly (keyof ChannelWeights)[] = ['semantic', 'situational', 'symptom', 'outcome']
     const scored = this.store.experiencesSnapshot()
       .map((exp) => {
-        const channels = this.channelContributions(exp, action, situationVector, queryText, weights)
+        const raws = this.channelScores(exp, action, situationVector, queryText)
+        const channels = raws.map((raw, index) => raw * weights[keys[index] ?? 'semantic'])
         return {
           exp,
-          similarity: channels[0] === undefined ? 0 : channels[0] / weights.semantic,
+          similarity: raws[0] ?? 0,
+          channelMax: Math.max(...raws),
           fused: channels.reduce((sum, value) => sum + value, 0),
           channels,
         }
@@ -199,17 +202,26 @@ export class HotEngine {
     return scored
       .sort((a, b) => b.fused - a.fused)
       .slice(0, k)
-      .map(hit => ({ exp: hit.exp, similarity: hit.similarity, fused: hit.fused, channels: hit.channels }))
+      .map(hit => ({
+        exp: hit.exp,
+        similarity: hit.similarity,
+        channelMax: hit.channelMax,
+        fused: hit.fused,
+        channels: hit.channels,
+      }))
   }
 
-  /** Detect OOD signals from the top-K similarity set.
+  /** Detect OOD signals from the top-K similarity set. Novelty is judged on
+   * each hit's strongest channel (`channelMax`): a diluted semantic cosine
+   * must not declare history irrelevant when a situational or symptom channel
+   * strongly matches the same experience.
    * @param ranked - the retrieved hits, best first.
-   * @returns the strongest signal and the top-1 similarity.
+   * @returns the strongest signal and the top-1 strength.
    */
   detectOod(ranked: readonly RankedHit[]): { signal: PredictResult['oodSignal']; top1: number } {
-    const top1 = ranked[0]?.similarity ?? 0
+    const top1 = ranked[0]?.channelMax ?? 0
     if (ranked.length === 0) return { signal: 'low-similarity', top1 }
-    const scores = ranked.map(hit => hit.similarity)
+    const scores = ranked.map(hit => hit.channelMax)
     const spread = scores.length >= 3 ? (scores[0] ?? 0) - (scores[2] ?? 0) : 0
     const { mean, variance } = similarityStats(scores)
     const strangeness = variance / (mean + 1e-9)
@@ -259,7 +271,9 @@ export class HotEngine {
     const successReference = this.matchSuccessReference(input.situation)
     const adviceSuffix = this.taxonomyAdviceLine(taxonomyContext)
     if (isNovel) {
-      return this.predictNovel(input, sessionId, signal, oodSignal, top1, successReference, taxonomyContext, adviceSuffix, refineNote)
+      return this.predictNovel(
+        input, topChannels, sessionId, signal, oodSignal, top1, successReference, taxonomyContext, adviceSuffix, refineNote,
+      )
     }
     return this.predictKnown(
       input, samples, topChannels, sessionId, signal, oodSignal, top1, successReference, taxonomyContext, adviceSuffix, refineNote,
@@ -433,6 +447,7 @@ export class HotEngine {
   /** Novel branch: scratchpad lookup or creation, conservative calibration. */
   private async predictNovel(
     input: PredictInput,
+    topChannels: readonly number[] | null,
     sessionId: GenerateOptions['sessionId'] | undefined,
     signal: AbortSignal | undefined,
     oodSignal: PredictResult['oodSignal'],
@@ -515,7 +530,10 @@ export class HotEngine {
       actualOutcome: null,
       predictionError: null,
       resolvedAt: null,
-      fusion: null,
+      // A novel prediction with a fused top hit still records its channel
+      // contributions, so the feedback loop can reward/penalize the channel
+      // that surfaced the (possibly useful) near-miss.
+      fusion: topChannels === null ? null : { scores: [...topChannels] },
     })
 
     return {

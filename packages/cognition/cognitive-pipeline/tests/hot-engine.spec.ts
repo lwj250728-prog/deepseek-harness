@@ -372,6 +372,23 @@ describe('hot loop (predict_outcome)', () => {
     }
   })
 
+  it('does not declare a failure-flagged query novel when the symptom channel strongly matches', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const store = ctx.cognitivePipeline.store
+      // Semantic cosine is 0 (unrelated action text), but the query carries
+      // the 挂起 failure marker and the experience's text contains it, so the
+      // symptom/outcome channels fire: history is relevant despite the dilution.
+      seed(store, 'exp_1', '重启服务', '系统异常', { materialGain: 2, emotionalValence: 2, energyCost: 8 }, '系统挂起后恢复')
+      const result = await ctx.cognitivePipeline.predict({ situation: '测试挂起', action: '排查系统挂起' })
+      expect(result.isNovel).toBe(false)
+      expect(result.topHitCount).toBe(1)
+      expect(result.oodSignal).toBe('none')
+    } finally {
+      await teardown()
+    }
+  })
+
   it('uses the injected semantic scorer through the pluggable seam', async () => {
     const { ctx, teardown } = await pipelineHarness()
     try {
