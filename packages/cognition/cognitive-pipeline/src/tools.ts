@@ -11,6 +11,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { findToolCallEvidence } from './log-evidence.ts'
 import type { CognitivePipelineService } from './service.ts'
 import type { PipelineCallContext } from './service.ts'
 import type { PredictInput, RebuildResult } from './types.ts'
@@ -794,8 +795,12 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
     description: 'Audit one claim against the active acceptance criteria before treating it as settled. '
       + 'Applicable checks are those whose trigger marker appears in the claim or its situation; a claim with '
       + 'no applicable check audits as not-applicable. An applicable check is satisfied when the claim carries '
-      + 'evidence (non-empty), violated when it does not — presence, not truth. Violated checks accumulate in '
-      + 'the criterion ledger, and a criterion whose invoked count clears the evidence minimum while its '
+      + 'evidence (non-empty), violated when it does not — presence, not truth. When log_anchor is supplied, '
+      + 'the session ledger decides instead: the tool reads the executing session\'s log for the most recent '
+      + 'tool/call of that name and checks whether its tool/result matched the expectation — a missing or '
+      + 'mismatched anchor violates the claim regardless of self-reported evidence (the log is the witness, so '
+      + 'a claim anchored to the ledger cannot be validated by self-report alone). Violated checks accumulate '
+      + 'in the criterion ledger, and a criterion whose invoked count clears the evidence minimum while its '
       + 'deviation rate crosses the threshold flags rework_needed and records one deviation meta experience. '
       + 'Pass prediction_id when a predict_outcome exists for the claim: its report_outcome feedback then folds '
       + 'the prediction error into the violated criteria, measuring "claims without verification" on the same '
@@ -820,6 +825,25 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
         type: 'string',
         description: 'Optional prediction_id from predict_outcome that this claim is about; its feedback '
           + 'folds into violated criteria.',
+      },
+      log_anchor: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          tool_name: {
+            type: 'string',
+            required: true,
+            description: 'The tool name whose most recent call in this session\'s ledger is the witness.',
+          },
+          expect_succeeded: {
+            type: 'boolean',
+            required: true,
+            description: 'Whether the claim asserts the call succeeded (true) or failed (false).',
+          },
+        },
+        description: 'Anchor the claim to the session ledger: the ledger\'s tool/result mechanically decides '
+          + 'the audit instead of self-reported evidence. Set it when the verification is a tool call that '
+          + 'happened in this session.',
       },
     },
     output: {
@@ -848,18 +872,40 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
             required: true,
             items: { type: 'string' },
           },
+          log_verified: {
+            type: 'boolean',
+            required: true,
+            description: 'True when the audit was backed by a matched session-log anchor (the '
+              + 'non-self-referential witness), false for self-reported evidence or no anchor.',
+          },
           rework_needed: { type: 'boolean', required: true },
           deviation_exp_id: { type: 'string', required: true },
         },
       },
       render: renderJson,
     },
-    async execute(args) {
+    async execute(args, exec) {
+      let logEvidence: {
+        toolName: string
+        callId: string
+        expectedSucceeded: boolean
+        matched: boolean
+      } | null = null
+      if (args.log_anchor !== undefined && exec.agent !== undefined) {
+        const evidence = findToolCallEvidence(exec.agent.session, args.log_anchor.tool_name)
+        logEvidence = {
+          toolName: args.log_anchor.tool_name,
+          callId: evidence?.callId ?? '',
+          expectedSucceeded: args.log_anchor.expect_succeeded,
+          matched: evidence !== null && evidence.succeeded === args.log_anchor.expect_succeeded,
+        }
+      }
       const audit = await service.auditClaim({
         claim: args.claim,
         situation: args.situation,
         ...args.evidence === undefined || args.evidence.length === 0 ? {} : { evidence: args.evidence },
         ...args.prediction_id === undefined || args.prediction_id.length === 0 ? {} : { predictionId: args.prediction_id },
+        ...logEvidence === null ? {} : { logEvidence },
       })
       return {
         audit_id: audit.auditId,
@@ -867,6 +913,7 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
         applied_check_ids: [...audit.appliedCheckIds],
         satisfied_check_ids: [...audit.satisfiedCheckIds],
         violated_check_ids: [...audit.violatedCheckIds],
+        log_verified: audit.logVerified,
         rework_needed: audit.reworkNeeded,
         deviation_exp_id: audit.deviationExpId ?? '',
       }

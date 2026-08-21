@@ -2,13 +2,41 @@
  * Acceptance-criteria coverage: define/rewrite/retire criteria, deterministic
  * claim audits (evidence presence, not truth), the persistence round-trip of
  * `acceptance.json` + `claim_audits.jsonl`, the report-time feedback fold into
- * violated criteria, and the deviation gate that records one meta experience
- * per threshold crossing.
+ * violated criteria, the deviation gate that records one meta experience
+ * per threshold crossing, and log-anchored audits where the session ledger
+ * mechanically decides instead of self-reported evidence.
  */
 
 import { describe, expect, it } from 'vitest'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { CallId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { findToolCallEvidence } from '../src/index.ts'
 import { CognitiveStore } from '../src/store.ts'
 import { executeTool, pipelineHarness, stubAgent } from './helpers.ts'
+
+/** Seed a session ledger with a successful `pwsh` call and a failed `git` call. */
+function seedLedger(session: Session): void {
+  session.append('turn/start', { turn: 1 })
+  session.append('tool/call', { turn: 1, step: 1, callId: CallId('call-1'), name: 'pwsh', arguments: '{}' })
+  session.append('tool/result', {
+    turn: 1,
+    step: 1,
+    message: createToolResultMessage({ callId: CallId('call-1'), content: [{ type: 'text', text: 'ok' }], isError: false }),
+  }, { surfaceOp: 'append' })
+  session.append('tool/call', { turn: 1, step: 2, callId: CallId('call-2'), name: 'git', arguments: '{}' })
+  session.append('tool/result', {
+    turn: 1,
+    step: 2,
+    message: createToolResultMessage({ callId: CallId('call-2'), content: [{ type: 'text', text: 'failed' }], isError: true }),
+  }, { surfaceOp: 'append' })
+}
+
+/** A fresh session ledger with a successful `pwsh` call and a failed `git` call. */
+function ledgerWithToolResults(): Session {
+  const session = Session.create(SessionId('log-anchor-ledger'))
+  seedLedger(session)
+  return session
+}
 
 describe('acceptance criteria and claim audits', () => {
   it('defines criteria, audits claims deterministically, and persists both tables', async () => {
@@ -167,6 +195,94 @@ describe('acceptance criteria and claim audits', () => {
       const audit = await ctx.cognitivePipeline.auditClaim({ claim: 't1 声称', situation: 'x' })
       expect(audit.verdict).toBe('not-applicable')
       expect(audit.appliedCheckIds).toEqual([])
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('finds the most recent settled tool call in the ledger (findToolCallEvidence)', () => {
+    const session = ledgerWithToolResults()
+    const pwsh = findToolCallEvidence(session, 'pwsh')
+    expect(pwsh).toEqual({ callId: 'call-1', succeeded: true })
+    const git = findToolCallEvidence(session, 'git')
+    expect(git).toEqual({ callId: 'call-2', succeeded: false })
+    // Unknown tool and pending calls resolve to null.
+    expect(findToolCallEvidence(session, 'nonexistent')).toBeNull()
+    const pending = Session.create(SessionId('log-anchor-pending'))
+    pending.append('turn/start', { turn: 1 })
+    pending.append('tool/call', { turn: 1, step: 1, callId: CallId('call-9'), name: 'pwsh', arguments: '{}' })
+    expect(findToolCallEvidence(pending, 'pwsh')).toBeNull()
+  })
+
+  it('lets the session ledger decide log-anchored audits and persists the anchor', async () => {
+    const { ctx, root, teardown } = await pipelineHarness()
+    try {
+      const { agent } = stubAgent('log-anchor-agent')
+      ctx.agents.register(agent)
+      seedLedger(agent.session)
+      await ctx.cognitivePipeline.defineAcceptanceCheck({
+        criterion: '声称完成前必须给出证据来源',
+        trigger: '声称完成',
+        evidenceHint: '引用具体证据',
+      })
+
+      // A matched anchor satisfies: the ledger says pwsh succeeded.
+      const verified = await executeTool(ctx, 'verify_claim', {
+        claim: '已用 pwsh 验证完成，声称完成',
+        situation: '实现验收清单',
+        log_anchor: { tool_name: 'pwsh', expect_succeeded: true },
+      }, agent) as Record<string, unknown>
+      expect(verified.verdict).toBe('verified')
+      expect(verified.log_verified).toBe(true)
+
+      // A mismatched anchor violates even with self-reported evidence: the
+      // ledger says git FAILED, so the claim that it succeeded is a false
+      // verification the machine catches (the log is the witness).
+      const caught = await executeTool(ctx, 'verify_claim', {
+        claim: '已用 git 验证完成，声称完成',
+        situation: '实现验收清单',
+        evidence: '我确认 git 调用成功',
+        log_anchor: { tool_name: 'git', expect_succeeded: true },
+      }, agent) as Record<string, unknown>
+      expect(caught.verdict).toBe('violated')
+      expect(caught.log_verified).toBe(false)
+
+      // An anchor naming a tool that never ran also violates.
+      const missing = await executeTool(ctx, 'verify_claim', {
+        claim: '已用 grep 验证完成，声称完成',
+        situation: '实现验收清单',
+        log_anchor: { tool_name: 'grep', expect_succeeded: true },
+      }, agent) as Record<string, unknown>
+      expect(missing.verdict).toBe('violated')
+
+      // An anchor expecting failure matches the failed git call.
+      const failedOk = await executeTool(ctx, 'verify_claim', {
+        claim: 'git 调用确实失败，声称完成',
+        situation: '实现验收清单',
+        log_anchor: { tool_name: 'git', expect_succeeded: false },
+      }, agent) as Record<string, unknown>
+      expect(failedOk.verdict).toBe('verified')
+      expect(failedOk.log_verified).toBe(true)
+
+      // The ledger separates machine-witnessed passes from self-reported ones.
+      const check = ctx.cognitivePipeline.store.getAcceptanceCheck('check_1')!
+      expect(check.invokedCount).toBe(4)
+      expect(check.passedCount).toBe(2)
+      expect(check.violatedCount).toBe(2)
+      expect(check.logVerifiedCount).toBe(2)
+
+      // The anchor persists through the filesystem round-trip.
+      const store = new CognitiveStore(root)
+      await store.load()
+      const audits = store.claimAuditsSnapshot()
+      expect(audits.length).toBe(4)
+      const anchored = audits.find(audit => audit.logAnchor?.toolName === 'pwsh')
+      expect(anchored?.logVerified).toBe(true)
+      expect(anchored?.logAnchor).toEqual({ toolName: 'pwsh', callId: 'call-1', expectedSucceeded: true, matched: true })
+      const refuted = audits.find(audit => audit.logAnchor?.toolName === 'git' && audit.logAnchor.expectedSucceeded)
+      expect(refuted?.logVerified).toBe(false)
+      expect(refuted?.logAnchor?.matched).toBe(false)
+      expect(store.acceptanceSnapshot()[0]!.logVerifiedCount).toBe(2)
     } finally {
       await teardown()
     }

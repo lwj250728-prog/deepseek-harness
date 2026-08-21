@@ -1258,6 +1258,7 @@ export class CognitivePipelineService extends Service {
       invokedCount: 0,
       passedCount: 0,
       violatedCount: 0,
+      logVerifiedCount: 0,
       cumulativeError: 0,
       errorFoldCount: 0,
       revision: 1,
@@ -1274,15 +1275,20 @@ export class CognitivePipelineService extends Service {
    * are those whose trigger marker appears in the claim or its situation; a
    * claim with no applicable check audits as `not-applicable` and touches no
    * ledger. An applicable check is satisfied when the claim carries evidence
-   * (non-empty), violated when it does not — presence, not truth. Violated
-   * checks accumulate in the criterion's ledger, and a criterion whose invoked
-   * count clears the evidence minimum while its deviation rate crosses the
-   * threshold flags `reworkNeeded` and records one deviation meta experience
-   * so the cold loop can cluster the pipeline's own acceptance-failure
-   * patterns.
+   * (non-empty), violated when it does not — presence, not truth. When the
+   * claim carries a `logEvidence` anchor, the session ledger decides instead:
+   * a matched anchor satisfies, a missing or mismatched anchor violates
+   * regardless of self-reported evidence — the log is the non-self-referential
+   * witness, so a claim that anchors to the ledger cannot be validated by
+   * self-report alone. Violated checks accumulate in the criterion's ledger,
+   * and a criterion whose invoked count clears the evidence minimum while its
+   * deviation rate crosses the threshold flags `reworkNeeded` and records one
+   * deviation meta experience so the cold loop can cluster the pipeline's own
+   * acceptance-failure patterns.
    * @param input - the claim, its situation, the verification statement (empty
-   *   when the claim is made without evidence), and an optional prediction the
-   *   claim is about.
+   *   when the claim is made without evidence), an optional prediction the
+   *   claim is about, and an optional mechanically-verified session-log anchor
+   *   (computed by the tool layer from the executing session's ledger).
    * @returns the recorded audit.
    */
   async auditClaim(input: {
@@ -1290,6 +1296,12 @@ export class CognitivePipelineService extends Service {
     situation: string
     evidence?: string
     predictionId?: string
+    logEvidence?: {
+      toolName: string
+      callId: string
+      expectedSucceeded: boolean
+      matched: boolean
+    } | null
   }): Promise<ClaimAudit> {
     const claim = input.claim.trim()
     const situation = input.situation.trim()
@@ -1297,6 +1309,8 @@ export class CognitivePipelineService extends Service {
       throw new CognitivePipelineError('cognitive-pipeline: claim must not be empty', 'EMPTY_CLAIM')
     }
     const evidence = (input.evidence ?? '').trim()
+    const anchor = input.logEvidence ?? null
+    const logVerified = anchor !== null && anchor.matched
     const haystack = `${situation} ${claim}`
     const active = this.store.acceptanceSnapshot().filter(check => check.status === 'active')
     const applied = active.filter(check => check.trigger.length > 0 && haystack.includes(check.trigger))
@@ -1313,6 +1327,8 @@ export class CognitivePipelineService extends Service {
         satisfiedCheckIds: [],
         violatedCheckIds: [],
         evidence,
+        logAnchor: anchor,
+        logVerified: false,
         predictionId,
         reworkNeeded: false,
         deviationExpId: null,
@@ -1324,10 +1340,14 @@ export class CognitivePipelineService extends Service {
     }
     const satisfiedCheckIds: string[] = []
     const violatedCheckIds: string[] = []
-    const passed = evidence.length > 0
+    // When the claim anchors to the session ledger, the ledger decides: a
+    // matched anchor satisfies, a missing or mismatched anchor violates —
+    // regardless of self-reported evidence. Without an anchor, presence of
+    // self-reported evidence decides (presence, not truth).
+    const passed = anchor === null ? evidence.length > 0 : anchor.matched
     const firstCrossingChecks: AcceptanceCheck[] = []
     for (const check of applied) {
-      const updated = this.store.applyAuditStats(check.checkId, passed)
+      const updated = this.store.applyAuditStats(check.checkId, passed, logVerified)
       if (passed) satisfiedCheckIds.push(check.checkId)
       else violatedCheckIds.push(check.checkId)
       // Deviation gate: flag only on the audit where the criterion FIRST
@@ -1363,6 +1383,8 @@ export class CognitivePipelineService extends Service {
       satisfiedCheckIds,
       violatedCheckIds,
       evidence,
+      logAnchor: anchor,
+      logVerified,
       predictionId,
       reworkNeeded,
       deviationExpId,

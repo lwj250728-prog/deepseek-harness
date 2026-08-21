@@ -250,7 +250,14 @@ export class CognitiveStore {
           if (typeof record !== 'object' || record === null) continue
           const check = record as AcceptanceCheck
           if (typeof check.checkId !== 'string' || typeof check.criterion !== 'string') continue
-          this.acceptance.set(check.checkId, check)
+          // Rows predating the log-anchored ledger lack logVerifiedCount;
+          // normalize to zero so the counter fold starts clean instead of on NaN.
+          this.acceptance.set(check.checkId, {
+            ...check,
+            logVerifiedCount: Number.isInteger(check.logVerifiedCount) && check.logVerifiedCount >= 0
+              ? check.logVerifiedCount
+              : 0,
+          })
           const seq = Number(check.checkId.replace('check_', ''))
           if (Number.isFinite(seq)) this.nextAcceptanceSeq = Math.max(this.nextAcceptanceSeq, seq + 1)
         }
@@ -260,7 +267,12 @@ export class CognitiveStore {
       if (typeof record !== 'object' || record === null) continue
       const audit = record as ClaimAudit
       if (typeof audit.auditId !== 'string' || typeof audit.claim !== 'string') continue
-      this.claimAudits.set(audit.auditId, audit)
+      // Rows predating the log-anchored audit lack the anchor fields.
+      this.claimAudits.set(audit.auditId, {
+        ...audit,
+        logAnchor: audit.logAnchor ?? null,
+        logVerified: audit.logVerified === true,
+      })
       const seq = Number(audit.auditId.replace('audit_', ''))
       if (Number.isFinite(seq)) this.nextAuditSeq = Math.max(this.nextAuditSeq, seq + 1)
     }
@@ -880,12 +892,15 @@ export class CognitiveStore {
 
   /** Fold one audit's verdict into one criterion's evidence ledger: invoked
    * always increments, and the audit counts as passed (evidence present) or
-   * violated (no evidence).
+   * violated (no evidence). Passes backed by a matched session-log anchor
+   * additionally increment the log-verified counter, so the ledger separates
+   * machine-witnessed satisfaction from self-reported satisfaction.
    * @param checkId - the applied criterion.
    * @param passed - whether the claim carried evidence for it.
+   * @param logVerified - whether that evidence was a matched log anchor.
    * @returns the updated criterion.
    */
-  applyAuditStats(checkId: string, passed: boolean): AcceptanceCheck {
+  applyAuditStats(checkId: string, passed: boolean, logVerified = false): AcceptanceCheck {
     const current = this.acceptance.get(checkId)
     if (current === undefined) {
       throw new Error(`cognitive-pipeline: acceptance check "${checkId}" not found`)
@@ -895,6 +910,7 @@ export class CognitiveStore {
       invokedCount: current.invokedCount + 1,
       passedCount: current.passedCount + (passed ? 1 : 0),
       violatedCount: current.violatedCount + (passed ? 0 : 1),
+      logVerifiedCount: current.logVerifiedCount + (passed && logVerified ? 1 : 0),
     }
     this.acceptance.set(checkId, next)
     this.enqueue('acceptance.json', [...this.acceptance.values()])

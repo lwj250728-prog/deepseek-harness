@@ -40,6 +40,10 @@ export * from './vectorizer.ts'
  * as the pre-injection veto gate. */
 export { refineRetrieval, refineRetrievalFallback } from './llm.ts'
 export type { CognitiveLlmRoute } from './llm.ts'
+/** Session-ledger tool-call evidence: the non-self-referential witness used
+ * by log-anchored claim audits. */
+export { findToolCallEvidence } from './log-evidence.ts'
+export type { ToolCallEvidence } from './log-evidence.ts'
 
 /** Reconstruct one completed turn into candidate accumulation material.
  * Reads the turn's events back from the session ledger: the genuine user

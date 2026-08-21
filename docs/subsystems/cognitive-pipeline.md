@@ -202,7 +202,7 @@ The scratchpad strategy, the lifetime calibration decile, the cold-loop cluster,
 
 ## Acceptance criteria and claim audits
 
-Acceptance criteria are reusable verification norms the agent audits claims against before treating them as settled. The pipeline records evidence **presence**, never evidence truth — it cannot verify its own claims; truth is adjudicated by the resolved outcome and the user. Retired criteria are frozen: their evidence ledger is never reset and audits no longer apply them.
+Acceptance criteria are reusable verification norms the agent audits claims against before treating them as settled. The pipeline records evidence **presence**, never evidence truth — it cannot verify its own claims; truth is adjudicated by the resolved outcome and the user. When a claim anchors to the session ledger (`log_anchor`), the ledger mechanically decides instead: a matched `tool/result` satisfies, a missing or mismatched one violates regardless of self-report — the log is the non-self-referential witness, so an anchored claim cannot be validated by self-report alone. Retired criteria are frozen: their evidence ledger is never reset and audits no longer apply them.
 
 ```ts type-equiv
 /** One acceptance criterion: a reusable verification norm learned from
@@ -226,6 +226,11 @@ interface AcceptanceCheck {
   readonly passedCount: number
   /** Audits where the claim was made without evidence for this check. */
   readonly violatedCount: number
+  /** Passes backed by a mechanically-verified session-log anchor rather than
+   * self-reported evidence alone — the non-self-referential subset of the
+   * passed ledger, so the pipeline can see how much of its acceptance rests
+   * on external witnesses. */
+  readonly logVerifiedCount: number
   /** Rolling sum of |calibrated − observed| of resolved predictions whose
    * audit violated this check — "claims made without verification correlate
    * with bad outcomes" is measured on the same ruler as every prediction. */
@@ -252,6 +257,22 @@ interface ClaimAudit {
   /** The verification statement the claim carried; empty means the claim was
    * made without evidence. */
   readonly evidence: string
+  /** The mechanically-verified session-log anchor the claim referenced, when
+   * one was requested: the tool name, the matched call id, the expected
+   * success flag, and whether the ledger matched the expectation. The log is
+   * the witness — when the model anchors a claim to the ledger, the ledger
+   * decides, and a mismatch is a violation regardless of self-reported
+   * evidence. Null when no anchor was requested. */
+  readonly logAnchor: {
+    readonly toolName: string
+    readonly callId: string
+    readonly expectedSucceeded: boolean
+    readonly matched: boolean
+  } | null
+  /** True when the audit's satisfied checks were backed by a matched
+   * session-log anchor (the non-self-referential witness), false when they
+   * rested on self-reported evidence alone. */
+  readonly logVerified: boolean
   /** Optional prediction the claim is about; its report feedback folds into
    * the violated checks' error ledger. */
   readonly predictionId: string | null
