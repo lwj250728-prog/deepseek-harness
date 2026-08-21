@@ -12,6 +12,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-cognitive-pipeline'
@@ -25,7 +26,7 @@ import type { OrchestrationConfig } from './orchestrator.ts'
 export const name = 'cognitive-orchestration'
 
 /** Services required before the orchestration layer can mount. */
-export const inject = ['subagents', 'cognitivePipeline', 'tools']
+export const inject = ['subagents', 'cognitivePipeline', 'sessions', 'tools']
 
 /** Plugin configuration mirrors the orchestrator configuration. */
 export type Config = Partial<OrchestrationConfig>
@@ -58,12 +59,12 @@ export function apply(ctx: Context, config: Config): void {
       + 'place the delegate provider row before this plugin in the composition',
     )
   }
-  const orchestrator = new CognitiveOrchestrator(ctx, ctx.cognitivePipeline, resolved)
+  const orchestrator = new CognitiveOrchestrator(ctx, ctx.cognitivePipeline, ctx.sessions, resolved)
   ctx.subagents.registerProvider(orchestrator.wrap(delegate))
   const delegationTools = new Set(resolved.delegationToolNames)
   if (delegationTools.size > 0) {
     ctx.on('tools/result', (
-      exec: { callId: string; name: string; arguments?: unknown },
+      exec: { callId: string; name: string; arguments?: unknown; agent?: { session?: unknown } },
       result: { isError: boolean; content?: readonly { type?: string; text?: string }[] },
     ) => {
       if (!delegationTools.has(exec.name)) return
@@ -74,9 +75,10 @@ export function apply(ctx: Context, config: Config): void {
           ? { arguments: exec.arguments as Readonly<Record<string, unknown>> }
           : {}),
       }
-      void orchestrator.captureDelegation(delegationExec, result).catch((error: unknown) => {
-        ctx.logger.warn(`cognitive-orchestration: delegation capture failed: ${String(error)}`)
-      })
+      void orchestrator.captureDelegation(delegationExec, result, exec.agent?.session as Session | undefined)
+        .catch((error: unknown) => {
+          ctx.logger.warn(`cognitive-orchestration: delegation capture failed: ${String(error)}`)
+        })
     })
   }
 }

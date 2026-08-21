@@ -20,8 +20,8 @@ cognitive provider ──注入相关SAR经验──▶ delegate provider → ch
 ```
 
 - **注入（start 前）** — wrapper 从子任务提示词概括任务，按行动向量相似度检索相关经验，并把 `【认知经验参考】` 块前置到子任务提示词。策略模式下注入决策先经 `policy:inject` 预测，达到 `policyDecisionThreshold` 才放行。
-- **回写（settle 后）** — 子任务的输出与停止原因成为一条新经验（任务调度/子任务执行/结果）。策略模式下是否入库由 `policy:update` 预测决定；随后用观测到的结果质量校准该预测。
-- **委派捕获（tools/result）** — 绕过包装 provider 的子代理工具调用（`delegationToolNames` 中的工具名，默认 `['subagent']`）在 `tools/result` 被捕获：`policy:delegate` 预测（"把这个任务委派给子代理值不值"）用实际结果校准，并写回一条 `委派决策` 经验（任务、执行摘要、结果）。这让**普通 subagent 委派**也获得与包装 provider 相同的"何时委派"可学习策略，无需经过 cognitive provider。
+- **回写（settle 后）** — 子任务的输出与停止原因成为一条新经验（任务调度/子任务执行/结果）。策略模式下是否入库由 `policy:update` 预测决定；随后用观测到的结果质量校准该预测。当子代理会话报告了 token 计费时，经验的结果带一行 **token 摘要**（`token：输入 / 输出 / 缓存命中 / 缓存写入 / 推理`），由子代理会话的 `assistant/message` usage 累加——委派的成本与模式一起被记住。
+- **委派捕获（tools/result）** — 绕过包装 provider 的子代理工具调用（`delegationToolNames` 中的工具名，默认 `['subagent']`）在 `tools/result` 被捕获：`policy:delegate` 预测（"把这个任务委派给子代理值不值"）用实际结果校准，并写回一条 `委派决策` 经验（任务、执行摘要、结果）——当能定位到子代理会话（`parentSession` 指向委派 agent 的最新会话）时同样带上 token 摘要。这让**普通 subagent 委派**也获得与包装 provider 相同的"何时委派"可学习策略，无需经过 cognitive provider。
 - **决策学习** — `policy:*` 预测就是流水线中的普通预测：积累足够后，`rebuild_taxonomy` 会把它们重聚类成学到的"何时注入 / 何时入库 / 何时委派"策略。
 
 ## 安装

@@ -25,6 +25,7 @@ import type {
   SubagentStopReason,
 } from '@deepseek-ai/dsh-subagent'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import SessionStore from '@deepseek-ai/dsh-session'
 import * as cognitivePipeline from '@deepseek-ai/dsh-cognitive-pipeline'
 import * as cognitiveOrchestration from '../src/index.ts'
 
@@ -75,6 +76,7 @@ export async function harness(
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AgentRegistry)
+  await ctx.plugin(SessionStore)
   await ctx.plugin(SubagentRuntime)
   await ctx.plugin(cognitivePipeline, { root })
   const delegate = new FakeDelegate()

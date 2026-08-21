@@ -11,6 +11,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { Session } from '@deepseek-ai/dsh-session'
 import type {
   ResolvedSubagentStartRequest,
   SubagentProvider,
@@ -120,6 +122,40 @@ export function outputText(output: readonly ContentBlock[]): string {
     .trim()
 }
 
+/**
+ * Sum the token accounting of every assistant step in a session (each
+ * `assistant/message` event carries the adapter-reported `usage`, including
+ * the cache-read/cache-write split). Null when the session has no steps or
+ * the adapter reported none.
+ * @param session - the child session to sum over.
+ * @returns the totals, or null when nothing was reported.
+ */
+export function usageOf(session: Session | undefined): TokenUsage | null {
+  if (session === undefined) return null
+  const totals: TokenUsage = { inputTokens: 0, outputTokens: 0 }
+  for (const event of session.events) {
+    if (event.type !== 'assistant/message') continue
+    const usage = event.data.usage
+    if (usage === undefined) continue
+    totals.inputTokens += usage.inputTokens
+    totals.outputTokens += usage.outputTokens
+    totals.cacheReadTokens = (totals.cacheReadTokens ?? 0) + (usage.cacheReadTokens ?? 0)
+    totals.cacheWriteTokens = (totals.cacheWriteTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+    totals.reasoningTokens = (totals.reasoningTokens ?? 0) + (usage.reasoningTokens ?? 0)
+  }
+  if (totals.inputTokens === 0 && totals.outputTokens === 0) return null
+  return totals
+}
+
+/** One-line token accounting for an experience's outcome text. */
+export function usageLine(usage: TokenUsage): string {
+  const parts = [`token：输入 ${usage.inputTokens}`, `输出 ${usage.outputTokens}`]
+  if ((usage.cacheReadTokens ?? 0) > 0) parts.push(`缓存命中 ${usage.cacheReadTokens}`)
+  if ((usage.cacheWriteTokens ?? 0) > 0) parts.push(`缓存写入 ${usage.cacheWriteTokens}`)
+  if ((usage.reasoningTokens ?? 0) > 0) parts.push(`推理 ${usage.reasoningTokens}`)
+  return parts.join(' / ')
+}
+
 /** Pre-delegation decision state threaded to the settle-time write-back. */
 interface RunContext {
   readonly task: string
@@ -164,15 +200,23 @@ export function delegationOutput(result: ToolDelegationResult): string {
  */
 export class CognitiveOrchestrator {
   private readonly pipeline: CognitivePipelineService
+  private readonly sessions: { list(): readonly Session[] }
   private readonly config: OrchestrationConfig
 
   /**
    * @param _ctx - context carrying the subagent runtime (unused by the engine).
    * @param pipeline - the cognitive pipeline service to read and write.
+   * @param sessions - the session store, used to locate child sessions by parent.
    * @param config - resolved orchestration configuration.
    */
-  constructor(_ctx: Context, pipeline: CognitivePipelineService, config: OrchestrationConfig) {
+  constructor(
+    _ctx: Context,
+    pipeline: CognitivePipelineService,
+    sessions: { list(): readonly Session[] },
+    config: OrchestrationConfig,
+  ) {
     this.pipeline = pipeline
+    this.sessions = sessions
     this.config = config
   }
 
@@ -238,7 +282,7 @@ export class CognitiveOrchestrator {
     const run = await delegate.start({ ...request, prompt })
     return {
       ...run,
-      result: run.result.then(result => this.settle(context, result).then(() => result)),
+      result: run.result.then(result => this.settle(context, result, run.localAgent?.session).then(() => result)),
     }
   }
 
@@ -261,8 +305,10 @@ export class CognitiveOrchestrator {
   }
 
   /** Settle-time write-back: predict recording, store the outcome, calibrate. */
-  private async settle(context: RunContext, result: SubagentResult): Promise<void> {    const quality = stopReasonQuality(result.stopReason)
+  private async settle(context: RunContext, result: SubagentResult, childSession: Session | undefined): Promise<void> {
+    const quality = stopReasonQuality(result.stopReason)
     const output = outputText(result.output)
+    const usage = usageOf(childSession)
     let recordPredictionId: string | null = null
     let recordDecision = true
     if (this.config.policyEnabled) {
@@ -274,8 +320,9 @@ export class CognitiveOrchestrator {
       recordDecision = prediction.calibratedProbability >= this.config.policyDecisionThreshold
     }
     if (recordDecision && (output.length > 0 || context.hits.length > 0)) {
+      const usageSuffix = usage === null ? '' : `\n${usageLine(usage)}`
       await this.pipeline.remember({
-        rawText: `任务调度：${context.task}\n子任务执行：${output.slice(0, 300) || '（无文本输出）'}\n结果：${result.stopReason}。`,
+        rawText: `任务调度：${context.task}\n子任务执行：${output.slice(0, 300) || '（无文本输出）'}\n结果：${result.stopReason}。${usageSuffix}`,
       })
     }
     if (context.injectPredictionId !== null) {
@@ -305,8 +352,14 @@ export class CognitiveOrchestrator {
    *    that strategy.
    * @param exec - the tool execution facts (callId/name/arguments).
    * @param result - the tool outcome facts.
+   * @param parentSession - the parent agent's session, used to locate the
+   * child session (its `parentSession` points here) for token accounting.
    */
-  async captureDelegation(exec: ToolDelegationExec, result: ToolDelegationResult): Promise<void> {
+  async captureDelegation(
+    exec: ToolDelegationExec,
+    result: ToolDelegationResult,
+    parentSession: Session | undefined,
+  ): Promise<void> {
     const task = delegationTask(exec.arguments)
     const output = delegationOutput(result)
     if (this.config.policyEnabled && task.trim().length > 0) {
@@ -321,9 +374,23 @@ export class CognitiveOrchestrator {
       })
     }
     if (task.trim().length > 0) {
+      const usage = usageOf(this.childSessionOf(parentSession))
+      const usageSuffix = usage === null ? '' : `\n${usageLine(usage)}`
       await this.pipeline.remember({
-        rawText: `委派决策：${task}\n子代理执行：${output.slice(0, 300) || '（无文本输出）'}\n结果：${result.isError ? '失败' : '完成'}。`,
+        rawText: `委派决策：${task}\n子代理执行：${output.slice(0, 300) || '（无文本输出）'}\n结果：${result.isError ? '失败' : '完成'}。${usageSuffix}`,
       })
     }
+  }
+
+  /**
+   * Locate the child session of a parent session: the first session whose
+   * `parentSession` points at the parent. Null when the parent is unknown or
+   * no child was found (e.g. a remote or non-session parent).
+   * @param parent - the parent session, or undefined.
+   * @returns a child session, or undefined.
+   */
+  private childSessionOf(parent: Session | undefined): Session | undefined {
+    if (parent === undefined) return undefined
+    return this.sessions.list().find(session => session.header.parentSession === parent.id)
   }
 }

@@ -1,16 +1,27 @@
 import { describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { harness, runChild } from './helpers.ts'
 import * as cognitiveOrchestration from '../src/index.ts'
-import { delegationOutput, delegationTask, outputText, stopReasonQuality, taskSummary } from '../src/orchestrator.ts'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import {
+  delegationOutput,
+  delegationTask,
+  outputText,
+  stopReasonQuality,
+  taskSummary,
+  usageLine,
+  usageOf,
+} from '../src/orchestrator.ts'
+import { CallId, createMessage } from '@deepseek-ai/dsh-llm'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
 
 /** Emit a fake tool-level subagent delegation outcome. */
-function emitDelegation(ctx: Context, arguments_: Record<string, unknown>, result: Record<string, unknown>): void {
+function emitDelegation(ctx: Context, agent: Agent, arguments_: Record<string, unknown>, result: Record<string, unknown>): void {
   ctx.emit('tools/result', {
     callId: CallId('del-1'),
     name: 'subagent',
     arguments: arguments_,
+    agent,
   } as never, result as never)
 }
 
@@ -106,10 +117,10 @@ describe('cognitive-orchestration', () => {
   })
 
   it('captures a tool-level delegation: policy:delegate calibration and 委派决策 write-back', async () => {
-    const { ctx, teardown } = await harness({ policyEnabled: true })
+    const { ctx, parent, teardown } = await harness({ policyEnabled: true })
     try {
       const before = ctx.cognitivePipeline.store.experiencesSnapshot().length
-      emitDelegation(ctx, { description: '同步认知包', prompt: '把认知包同步到SAR仓库并推送' }, {
+      emitDelegation(ctx, parent, { description: '同步认知包', prompt: '把认知包同步到SAR仓库并推送' }, {
         isError: false,
         content: [{ type: 'text', text: '同步完成，推送成功' }],
       })
@@ -134,9 +145,9 @@ describe('cognitive-orchestration', () => {
   })
 
   it('records a failed delegation with a low calibration quality', async () => {
-    const { ctx, teardown } = await harness({ policyEnabled: true })
+    const { ctx, parent, teardown } = await harness({ policyEnabled: true })
     try {
-      emitDelegation(ctx, { prompt: '尝试一个会失败的任务' }, {
+      emitDelegation(ctx, parent, { prompt: '尝试一个会失败的任务' }, {
         isError: true,
         content: [{ type: 'text', text: 'boom' }],
       })
@@ -173,10 +184,10 @@ describe('cognitive-orchestration', () => {
   })
 
   it('skips policy calibration in conservative mode but still writes the delegation', async () => {
-    const { ctx, teardown } = await harness({ policyEnabled: false })
+    const { ctx, parent, teardown } = await harness({ policyEnabled: false })
     try {
       const before = ctx.cognitivePipeline.store.experiencesSnapshot().length
-      emitDelegation(ctx, { prompt: '直接执行任务' }, { isError: false, content: [{ type: 'text', text: 'done' }] })
+      emitDelegation(ctx, parent, { prompt: '直接执行任务' }, { isError: false, content: [{ type: 'text', text: 'done' }] })
       await settleAsync()
 
       expect(ctx.cognitivePipeline.store.experiencesSnapshot().length).toBe(before + 1)
@@ -218,5 +229,32 @@ describe('orchestration helpers', () => {
     expect(delegationOutput({ isError: false, content: [{ type: 'text', text: '同步完成' }, { type: 'text', text: '推送成功' }] }))
       .toBe('同步完成 推送成功')
     expect(delegationOutput({ isError: true })).toBe('')
+  })
+
+  it('sums the token accounting of a session, including cache splits', () => {
+    const session = Session.create(SessionId('usage-child'))
+    const step = (usage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number }) => session.append('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: createMessage({ role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'm', model: 'm' } }),
+      usage,
+    }, { surfaceOp: 'append' })
+    step({ inputTokens: 120, outputTokens: 30, cacheReadTokens: 900 })
+    step({ inputTokens: 40, outputTokens: 10, cacheWriteTokens: 5, reasoningTokens: 8 })
+
+    const totals = usageOf(session)
+    expect(totals?.inputTokens).toBe(160)
+    expect(totals?.outputTokens).toBe(40)
+    expect(totals?.cacheReadTokens).toBe(900)
+    expect(totals?.cacheWriteTokens).toBe(5)
+    expect(totals?.reasoningTokens).toBe(8)
+
+    expect(usageOf(Session.create(SessionId('empty')))).toBeNull()
+  })
+
+  it('renders the one-line usage summary', () => {
+    expect(usageLine({ inputTokens: 160, outputTokens: 40, cacheReadTokens: 900 }))
+      .toBe('token：输入 160 / 输出 40 / 缓存命中 900')
+    expect(usageLine({ inputTokens: 1, outputTokens: 2 })).toBe('token：输入 1 / 输出 2')
   })
 })
