@@ -10,6 +10,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type {
   CalibrationBucket,
+  ChannelWeights,
   Cluster,
   Experience,
   Prediction,
@@ -72,6 +73,12 @@ function emptyBuckets(): CalibrationBucket[] {
   }))
 }
 
+/** Clamp a persisted channel weight into the learnable band [0.2, 3]. */
+function clampWeight(value: unknown): number {
+  const n = typeof value === 'number' && Number.isFinite(value) ? value : 1
+  return Math.min(3, Math.max(0.2, n))
+}
+
 /** The complete persisted state of one pipeline store. */
 export class CognitiveStore {
   private readonly root: string
@@ -81,6 +88,7 @@ export class CognitiveStore {
   private tempStrategies = new Map<string, TempStrategy>()
   private clusterList: Cluster[] = []
   private calibration = emptyBuckets()
+  private channelWeights: ChannelWeights = { semantic: 1, situational: 1, symptom: 1, outcome: 1 }
   private taxonomyState: TaxonomyState | null = null
   private nextExpSeq = 1
   private nextPredictionSeq = 1
@@ -100,12 +108,13 @@ export class CognitiveStore {
   /** Create the root and load every table. Missing files start empty. */
   async load(): Promise<void> {
     await mkdir(this.root, { recursive: true })
-    const [experiences, predictions, tempStrategies, clusters, calibration, taxonomy] = await Promise.all([
+    const [experiences, predictions, tempStrategies, clusters, calibration, channelWeights, taxonomy] = await Promise.all([
       readFile(this.file('experiences.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('predictions.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('temp_strategies.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('clusters.json'), 'utf8').catch(() => ''),
       readFile(this.file('calibration.json'), 'utf8').catch(() => ''),
+      readFile(this.file('channel_weights.json'), 'utf8').catch(() => ''),
       readFile(this.file('taxonomy.json'), 'utf8').catch(() => ''),
     ])
     for (const record of parseLines(experiences)) {
@@ -119,7 +128,8 @@ export class CognitiveStore {
       if (typeof record !== 'object' || record === null) continue
       const prediction = record as Prediction
       if (typeof prediction.predictionId !== 'string') continue
-      this.predictions.set(prediction.predictionId, prediction)
+      // Older records predate the fusion field; normalize to null.
+      this.predictions.set(prediction.predictionId, { ...prediction, fusion: prediction.fusion ?? null })
       this.nextPredictionSeq = Math.max(this.nextPredictionSeq, predictionSeqOf(prediction.predictionId) + 1)
     }
     for (const record of parseLines(tempStrategies)) {
@@ -145,6 +155,17 @@ export class CognitiveStore {
     const parsedCalibration = calibration === '' ? null : JSON.parse(calibration) as CalibrationBucket[] | null
     if (Array.isArray(parsedCalibration) && parsedCalibration.length === CALIBRATION_BUCKETS) {
       this.calibration = parsedCalibration
+    }
+    if (channelWeights !== '') {
+      const parsed = JSON.parse(channelWeights) as Record<string, unknown> | null
+      if (typeof parsed === 'object' && parsed !== null) {
+        this.channelWeights = {
+          semantic: clampWeight(parsed.semantic),
+          situational: clampWeight(parsed.situational),
+          symptom: clampWeight(parsed.symptom),
+          outcome: clampWeight(parsed.outcome),
+        }
+      }
     }
     if (taxonomy !== '') {
       const parsed = JSON.parse(taxonomy) as unknown
@@ -499,6 +520,23 @@ export class CognitiveStore {
   empiricalAccuracyFor(probability: number): number | null {
     const bucket = this.calibration[bucketIndex(probability)]
     return bucket === undefined ? null : bucket.empiricalAccuracy
+  }
+
+  // ── multi-channel retrieval weights ──────────────────────────────────────
+
+  /** Snapshot of the learned retrieval channel weights.
+   * @returns a detached weight record.
+   */
+  channelWeightsSnapshot(): ChannelWeights {
+    return { ...this.channelWeights }
+  }
+
+  /** Apply one EWMA step to the learned retrieval channel weights.
+   * @param weights - the new weights; each must already be clamped.
+   */
+  updateChannelWeights(weights: ChannelWeights): void {
+    this.channelWeights = { ...weights }
+    this.enqueue('channel_weights.json', this.channelWeights)
   }
 
   // ── clusters + taxonomy ──────────────────────────────────────────────────

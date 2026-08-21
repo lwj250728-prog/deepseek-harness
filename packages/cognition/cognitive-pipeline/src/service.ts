@@ -83,6 +83,12 @@ export interface CognitivePipelineConfig {
   coverageThreshold?: number
   /** Routing margin below which a known-path prediction is SAR-ized as a retrieval failure (default 0.1). */
   retrievalFailureMargin?: number
+  /** EWMA step for the feedback-driven multi-channel retrieval weights (default 0.2). */
+  channelLearningRate?: number
+  /** Feedback error below which the dominant retrieval channel is rewarded, at/above penalized (default 0.3). */
+  channelErrorThreshold?: number
+  /** Bounded LLM-refine drops in one low-confidence prediction (default 2). */
+  refineMaxDrops?: number
   /** Cold-loop time-decay lambda per day (default 0.01). */
   decayLambda?: number
   /** Cold-loop minimum decay weight (default 0.1). */
@@ -158,6 +164,9 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   successReferenceThreshold: z.number().min(0).max(1).default(0.4),
   coverageThreshold: z.number().min(0).max(1).default(0.3),
   retrievalFailureMargin: z.number().min(0).max(1).default(0.1),
+  channelLearningRate: z.number().min(0).max(1).default(0.2),
+  channelErrorThreshold: z.number().min(0).max(1).default(0.3),
+  refineMaxDrops: z.number().step(1).min(0).max(5).default(2),
   decayLambda: z.number().min(0).default(0.01),
   minDecayWeight: z.number().min(0).max(1).default(0.1),
   predictionErrorThreshold: z.number().min(0).max(1).default(0.3),
@@ -199,6 +208,9 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
       successReferenceThreshold: config.successReferenceThreshold ?? 0.4,
       coverageThreshold: config.coverageThreshold ?? 0.3,
       retrievalFailureMargin: config.retrievalFailureMargin ?? 0.1,
+      channelLearningRate: config.channelLearningRate ?? 0.2,
+      channelErrorThreshold: config.channelErrorThreshold ?? 0.3,
+      refineMaxDrops: config.refineMaxDrops ?? 2,
       tempStrategyTtlMs: config.tempStrategyTtlMs ?? 24 * 60 * 60 * 1000,
       tempStrategyMatchThreshold: config.tempStrategyMatchThreshold ?? 0.5,
     }),
@@ -593,6 +605,10 @@ export class CognitivePipelineService extends Service {
     }
     const observed = this.observedOutcome(input)
     const error = Math.abs(prediction.calibratedProbability - observed)
+    // Feedback-driven channel-weight learning (第一性原理 |calibrated−observed|):
+    // the channel that dominated the fused top-1 is rewarded on small error,
+    // penalized on large error — "什么样的相似才可迁移" grows from feedback.
+    this.hot.learnFromFeedback(prediction, error)
     // Fold the feedback quality back into the bound experience's utility so
     // resolved experiences carry a real label, not just an error.
     this.store.resolvePrediction(input.predictionId, input.actualOutcome, error, input.outcomeQuality)
@@ -661,6 +677,7 @@ export class CognitivePipelineService extends Service {
       activeTempStrategyCount: this.store.tempStrategiesSnapshot()
         .filter(strategy => strategy.status === 'active').length,
       calibrationBuckets: this.store.calibrationBucketsSnapshot(),
+      channelWeights: this.store.channelWeightsSnapshot(),
       taxonomy: this.store.taxonomySnapshot() ?? {
         version: 0,
         summaryShort: '（尚未完成首次重构）',

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -56,6 +56,7 @@ function prediction(predictionId: string, probability: number, expId: string | n
     actualOutcome: null,
     predictionError: null,
     resolvedAt: null,
+    fusion: null,
   }
 }
 
@@ -97,6 +98,28 @@ describe('CognitiveStore', () => {
       expect(bucket?.totalCount).toBe(2)
       expect(bucket?.hitCount).toBe(1)
       expect(bucket?.empiricalAccuracy).toBe(0.5)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('round-trips the learned channel weights and clamps hostile values on load', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cognition-store-'))
+    try {
+      const first = new CognitiveStore(dir)
+      await first.load()
+      first.updateChannelWeights({ semantic: 2.5, situational: 0.4, symptom: 1.8, outcome: 0.3 })
+      await first.flush()
+
+      const second = new CognitiveStore(dir)
+      await second.load()
+      expect(second.channelWeightsSnapshot()).toEqual({ semantic: 2.5, situational: 0.4, symptom: 1.8, outcome: 0.3 })
+
+      // A hostile weights file is clamped into the learnable band [0.2, 3].
+      writeFileSync(join(dir, 'channel_weights.json'), JSON.stringify({ semantic: 99, situational: -5, symptom: 'x', outcome: 1 }))
+      const third = new CognitiveStore(dir)
+      await third.load()
+      expect(third.channelWeightsSnapshot()).toEqual({ semantic: 3, situational: 0.2, symptom: 1, outcome: 1 })
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

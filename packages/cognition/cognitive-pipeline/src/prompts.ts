@@ -249,3 +249,29 @@ export function frameDeriveReferenceInput(
       : '【相似历史经验】（按相似度排序）：\n'
         + similar.map(hit => `- [${hit.expId}] (相似度 ${hit.similarity.toFixed(2)}) ${hit.text}`).join('\n'))
 }
+
+/** Template 7: refine retrieval when the deterministic routing is
+ * low-confidence — the LLM route judges whether the fused top hit genuinely
+ * applies, instead of the hot loop blindly trusting the cosine ranking. */
+export const REFINE_RETRIEVAL_SYSTEM_PROMPT = [
+  '你是认知管线的"检索精排官"。现在给出当前情境/拟行动，以及按相似度排序的候选经验。',
+  '【精排任务】：',
+  '1. 判断排第一的候选经验是否【真正适用于】当前情境与行动——余弦相似不代表情境可迁移。',
+  '2. 重点关注前提是否一致：相同行动在不同前提（用户熟练度、环境约束、时间压力等）下可能策略相反。',
+  '3. 只有当你确信 Top1 会误导（前提矛盾、情境不可迁移）时才拒绝；否则保留。',
+  '【输出JSON格式】：',
+  '{',
+  '  "should_keep": true,',
+  '  "rejected_exp_id": "string|null（拒绝时填被拒经验的expId）",',
+  '  "reason": "string|null（拒绝理由，一句）"',
+  '}',
+].join('\n')
+
+/** Frame template-7 input with the query and the fused candidates. */
+export function frameRefineRetrievalInput(
+  query: { situation: string; action: string },
+  candidates: readonly { expId: string; text: string; similarity: number }[],
+): string {
+  return `【当前情境】：${query.situation}\n【拟采取行动】：${query.action}\n\n【候选经验】（按融合相似度排序）：\n`
+    + candidates.map(hit => `- [${hit.expId}] (语义相似度 ${hit.similarity.toFixed(2)}) ${hit.text}`).join('\n')
+}

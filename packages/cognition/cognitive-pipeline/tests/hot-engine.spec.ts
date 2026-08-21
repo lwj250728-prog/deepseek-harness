@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { pipelineHarness } from './helpers.ts'
+import { HashSemanticScorer, HotEngine } from '../src/hot-engine.ts'
+import type { SemanticScorer } from '../src/hot-engine.ts'
 import type { Experience } from '../src/types.ts'
 import { actionVector, outcomeVector } from '../src/vectorizer.ts'
 
@@ -15,18 +17,19 @@ function seed(
   action: string,
   situation: string,
   utility: { materialGain: number; emotionalValence: number; energyCost: number },
+  outcome = '结果',
 ): void {
   store.addExperience({
     expId,
     sar: {
       situation,
       action,
-      outcome: '结果',
+      outcome,
       actionKeywords: [],
       outcomeUtility: utility,
     },
     actionVector: actionVector(action, []),
-    outcomeVector: outcomeVector(utility, '结果'),
+    outcomeVector: outcomeVector(utility, outcome),
     clusterId: null,
     strategyLabel: null,
     timestamp: Date.now(),
@@ -264,6 +267,126 @@ describe('hot loop (predict_outcome)', () => {
       const result = await ctx.cognitivePipeline.predict({ situation: '任何情境', action: '任何行动' })
       expect(result.taxonomyContext.coverage).toBe('no-taxonomy')
       expect(result.taxonomyContext.cluster).toBeNull()
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('fuses the situational channel into the ranking when the situation matches', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const store = ctx.cognitivePipeline.store
+      // exp_1 wins the semantic channel (near-identical action, irrelevant situation);
+      // exp_2 wins the situational channel (identical situation, unrelated action).
+      seed(store, 'exp_1', '晨跑三公里', '深夜加班', { materialGain: 8, emotionalValence: 7, energyCost: 3 })
+      seed(store, 'exp_2', '原地拉伸', '清晨天气好', { materialGain: 8, emotionalValence: 7, energyCost: 3 })
+
+      // Action-only retrieval ranks by semantics: exp_1 first.
+      const byAction = ctx.cognitivePipeline.hot.retrieveTopK('晨跑五公里', 1)
+      expect(byAction[0]?.exp.expId).toBe('exp_1')
+
+      // Situation-aware retrieval lets the situational channel win: exp_2's
+      // situation is identical to the query's, exp_1's is irrelevant.
+      const fused = ctx.cognitivePipeline.hot.retrieveTopK('晨跑五公里', 1, '清晨天气好')
+      expect(fused[0]?.exp.expId).toBe('exp_2')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('recalls the failure lesson via the symptom and outcome channels', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const store = ctx.cognitivePipeline.store
+      // Identical action and situation: the channels must be broken by text
+      // signature and outcome polarity, not by cosine.
+      seed(store, 'exp_1', '重启服务', '服务异常', { materialGain: 5, emotionalValence: 5, energyCost: 5 }, '恢复')
+      seed(store, 'exp_2', '重启服务', '服务异常', { materialGain: 2, emotionalValence: 2, energyCost: 8 }, '系统挂起后恢复')
+
+      // Query carries a failure marker (挂起): the symptom channel fires for
+      // exp_2's text, and the outcome channel prefers its negative polarity.
+      const hits = ctx.cognitivePipeline.hot.retrieveTopK('排查系统挂起', 2, '服务异常')
+      expect(hits[0]?.exp.expId).toBe('exp_2')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('learns the channel weights from feedback error (reward small, penalize large)', async () => {
+    const { ctx, teardown } = await pipelineHarness({ channelLearningRate: 0.5 })
+    try {
+      await ctx.cognitivePipeline.remember({ rawText: '清晨天气晴朗。晨跑五公里。精力充沛一整天。' })
+      const before = ctx.cognitivePipeline.store.channelWeightsSnapshot()
+      expect(before).toEqual({ semantic: 1, situational: 1, symptom: 1, outcome: 1 })
+
+      // Small error (observed 0.5 ≈ calibrated 0.5) rewards the dominant
+      // semantic channel toward the 1.6 target: 1 + 0.5·0.6 = 1.3.
+      const first = await ctx.cognitivePipeline.predict({ situation: '清晨', action: '晨跑五公里' })
+      expect(ctx.cognitivePipeline.store.getPrediction(first.predictionId)?.fusion?.scores).toHaveLength(4)
+      await ctx.cognitivePipeline.report({ predictionId: first.predictionId, actualOutcome: '一般', outcomeQuality: 5 })
+      const rewarded = ctx.cognitivePipeline.store.channelWeightsSnapshot()
+      expect(rewarded.semantic).toBeGreaterThan(1)
+
+      // Large error (observed 0.1 vs calibrated ≈ 0.5) penalizes toward 0.5:
+      // 1.3 + 0.5·(0.5 − 1.3) = 0.9.
+      const second = await ctx.cognitivePipeline.predict({ situation: '清晨', action: '晨跑五公里' })
+      await ctx.cognitivePipeline.report({ predictionId: second.predictionId, actualOutcome: '很糟', outcomeQuality: 1 })
+      const penalized = ctx.cognitivePipeline.store.channelWeightsSnapshot()
+      expect(penalized.semantic).toBeLessThan(rewarded.semantic)
+      expect(penalized.semantic).toBeGreaterThanOrEqual(0.2)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('refines low-confidence retrieval: the LLM route drops an inapplicable top hit', async () => {
+    const reject = JSON.stringify({ should_keep: false, rejected_exp_id: 'exp_1', reason: '前提矛盾：资深直接推送，新手需教学' })
+    const keep = JSON.stringify({ should_keep: true, rejected_exp_id: null, reason: null })
+    const oodKnown = JSON.stringify({ is_known: true, confidence_score: 90, reasoning_short: 'near-identical', suggested_initial_risk_level: 'low' })
+    const calib = JSON.stringify({
+      base_success_rate: 80,
+      risk_factors: [],
+      final_confidence_interval_low: 60,
+      final_confidence_interval_high: 90,
+      final_calibrated_probability: 75,
+      advice_preview: '按计划行动',
+    })
+    const { ctx, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm' },
+      [reject, keep, oodKnown, calib],
+    )
+    try {
+      const store = ctx.cognitivePipeline.store
+      // Near-identical (but not exact) actions produce a flat-top OOD signal
+      // (top1 0.8 < 0.85, spread 0) → the refine pass triggers.
+      seed(store, 'exp_1', '晨跑三公里', '资深用户例行推送', { materialGain: 8, emotionalValence: 7, energyCost: 3 })
+      seed(store, 'exp_2', '晨跑四公里', '初学者学习推送', { materialGain: 8, emotionalValence: 7, energyCost: 3 })
+
+      const result = await ctx.cognitivePipeline.predict({ situation: '清晨', action: '晨跑五公里' })
+      expect(result.advice).toContain('检索复核')
+      const prediction = ctx.cognitivePipeline.store.getPrediction(result.predictionId)
+      // The LLM rejected exp_1; the bound experience is now exp_2.
+      expect(prediction?.expId).toBe('exp_2')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('uses the injected semantic scorer through the pluggable seam', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const store = ctx.cognitivePipeline.store
+      seed(store, 'exp_1', '晨跑五公里', '清晨', { materialGain: 8, emotionalValence: 7, energyCost: 3 })
+      seed(store, 'exp_2', '晨跑五公里', '清晨', { materialGain: 8, emotionalValence: 7, energyCost: 3 })
+      // A stub scorer that disagrees with the hash-bag cosine: exp_2 wins.
+      const stub: SemanticScorer = { score: (_query, exp) => exp.expId === 'exp_2' ? 0.9 : 0.1 }
+      const engine = new HotEngine(ctx, store, ctx.cognitivePipeline.resolved.hot, ctx.cognitivePipeline.resolved.route, stub)
+      const hits = engine.retrieveTopK('晨跑五公里', 1, '清晨')
+      expect(hits[0]?.exp.expId).toBe('exp_2')
+
+      // The default hash-bag scorer ranks them identically (same action/situation).
+      const defaultHits = new HashSemanticScorer().score('晨跑五公里', store.getExperience('exp_1') as Experience)
+      expect(defaultHits).toBeGreaterThan(0.9)
     } finally {
       await teardown()
     }

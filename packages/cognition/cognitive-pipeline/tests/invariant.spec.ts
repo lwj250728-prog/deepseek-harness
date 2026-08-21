@@ -76,6 +76,7 @@ async function setup(): Promise<{ ctx: Context; dispose: () => Promise<void> }> 
     actualOutcome: '成功',
     predictionError: 0.2,
     resolvedAt: Date.now(),
+    fusion: null,
   })
   // A success cluster whose situation centroid matches the seeded experience.
   service.store.applyTaxonomy(
@@ -145,6 +146,7 @@ describe('cognitive-pipeline invariants', () => {
         actualOutcome: null,
         predictionError: null,
         resolvedAt: null,
+        fusion: null,
       })
       await ctx.plugin(InvariantRegistry, { enabled: true })
       await expect(ctx.plugin(InvariantCompanion))
@@ -175,6 +177,7 @@ describe('cognitive-pipeline invariants', () => {
         actualOutcome: null,
         predictionError: null,
         resolvedAt: null,
+        fusion: null,
       })
       await ctx.plugin(InvariantRegistry, { enabled: true })
       await expect(ctx.plugin(InvariantCompanion))

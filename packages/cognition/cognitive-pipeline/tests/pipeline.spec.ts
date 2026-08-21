@@ -58,12 +58,15 @@ const RECON = JSON.stringify({
   taxonomy_summary_short: '重组为2簇：运动正向/熬夜负向',
 })
 
+const REFINE_KEEP = JSON.stringify({ should_keep: true, rejected_exp_id: null, reason: null })
+
 describe('cognitive pipeline integration', () => {
   it('runs the full remember → predict → report → rebuild loop with a scripted LLM', async () => {
     // LLM-extracted action vectors carry keyword tokens, so the retrieval is
-    // near-identical but not exact: the flat-top OOD signal fires, the review
-    // (response 6) confirms "known", then calibration and reconstruction run.
-    const script = [SAR_A, SAR_A, SAR_A, SAR_B, SAR_B, SAR_B, OOD_KNOWN, CALIB, RECON]
+    // near-identical but not exact: the flat-top OOD signal fires, the refine
+    // pass keeps the ranking, the review confirms "known", then calibration
+    // and reconstruction run.
+    const script = [SAR_A, SAR_A, SAR_A, SAR_B, SAR_B, SAR_B, REFINE_KEEP, OOD_KNOWN, CALIB, RECON]
     const { ctx, teardown } = await pipelineHarness(
       // 6 experiences leave a 1-sample validation slice; lower the acceptance
       // floor so this suite exercises the accept path rather than deferring.
@@ -257,7 +260,7 @@ describe('cognitive pipeline integration', () => {
   })
 
   it('generates a simulated experience and verifies it through report feedback', async () => {
-    const script = [SAR_A, OOD_KNOWN, CALIB]
+    const script = [SAR_A, REFINE_KEEP, OOD_KNOWN, CALIB]
     const { ctx, teardown } = await pipelineHarness(
       { provider: 'cognition-test', model: 'm', simulationFastTrackThreshold: 0.5, simulationPermanentThreshold: 2 },
       script,

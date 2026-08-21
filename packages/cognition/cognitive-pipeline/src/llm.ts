@@ -19,16 +19,18 @@ import type {
   GenerateOptions,
   Message,
 } from '@deepseek-ai/dsh-llm'
-import type { AccumulationDecision, DeriveReferenceDecision, Experience, OutcomeUtility, SarTriplet } from './types.ts'
+import type { AccumulationDecision, DeriveReferenceDecision, Experience, OutcomeUtility, RefineRetrievalDecision, SarTriplet } from './types.ts'
 import {
   ACCUMULATE_SYSTEM_PROMPT,
   CALIBRATION_SYSTEM_PROMPT,
   DERIVE_REFERENCE_SYSTEM_PROMPT,
+  REFINE_RETRIEVAL_SYSTEM_PROMPT,
   frameAccumulateInput,
   frameCalibrationInput,
   frameDeriveReferenceInput,
   frameOodInput,
   frameReconstructInput,
+  frameRefineRetrievalInput,
   frameSarInput,
   OOD_REVIEW_SYSTEM_PROMPT,
   RECONSTRUCT_SYSTEM_PROMPT,
@@ -708,5 +710,53 @@ export async function deriveReference(
   } catch (error) {
     ctx.logger.warn(`cognitive-pipeline: derive-reference degraded to fallback: ${String(error)}`)
     return deriveReferenceFallback()
+  }
+}
+
+/** Deterministic template-7 fallback: keep the fused ranking untouched. */
+export function refineRetrievalFallback(): RefineRetrievalDecision {
+  return { shouldKeep: true, rejectedExpId: null, reason: null }
+}
+
+/**
+ * Template 7: refine retrieval when the deterministic routing is
+ * low-confidence. The LLM route reads the query and the fused candidates and
+ * judges whether the fused top hit genuinely applies (cosine similarity does
+ * not imply premise transferability); without a route it keeps the ranking.
+ * @param ctx - plugin context for the LLM call.
+ * @param route - explicit model route.
+ * @param query - the current situation/action being predicted.
+ * @param candidates - the fused candidates, best first.
+ * @param options - call context (session/signal/maxTokens).
+ * @returns the refinement decision.
+ */
+export async function refineRetrieval(
+  ctx: Context,
+  route: CognitiveLlmRoute,
+  query: { situation: string; action: string },
+  candidates: readonly { expId: string; text: string; similarity: number }[],
+  options: CallOptions,
+): Promise<RefineRetrievalDecision> {
+  if (!hasExplicitRoute(route)) return refineRetrievalFallback()
+  try {
+    const parsed = asObject(await callJson(ctx, route, REFINE_RETRIEVAL_SYSTEM_PROMPT, frameRefineRetrievalInput(query, candidates), {
+      ...options,
+      maxTokens: 400,
+    }), 'refine-retrieval')
+    const shouldKeep = parsed.should_keep !== false
+    if (shouldKeep) return refineRetrievalFallback()
+    const rejectedExpId = parsed.rejected_exp_id
+    const reason = parsed.reason
+    if (typeof rejectedExpId !== 'string' || rejectedExpId.length === 0) {
+      throw new CognitivePipelineError('cognitive-pipeline: refine-retrieval rejected without an expId', 'REFINE_RETRIEVAL_SCHEMA_FAILED')
+    }
+    return {
+      shouldKeep: false,
+      rejectedExpId,
+      reason: typeof reason === 'string' && reason.length > 0 ? reason : null,
+    }
+  } catch (error) {
+    ctx.logger.warn(`cognitive-pipeline: refine-retrieval degraded to fallback: ${String(error)}`)
+    return refineRetrievalFallback()
   }
 }

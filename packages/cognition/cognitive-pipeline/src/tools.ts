@@ -483,6 +483,17 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           resolved_prediction_count: { type: 'number', required: true },
           cluster_count: { type: 'number', required: true },
           active_temp_strategy_count: { type: 'number', required: true },
+          channel_weights: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            properties: {
+              semantic: { type: 'number', required: true },
+              situational: { type: 'number', required: true },
+              symptom: { type: 'number', required: true },
+              outcome: { type: 'number', required: true },
+            },
+          },
           taxonomy: {
             type: 'object',
             additionalProperties: false,
@@ -505,6 +516,12 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
         resolved_prediction_count: result.resolvedPredictionCount,
         cluster_count: result.clusterCount,
         active_temp_strategy_count: result.activeTempStrategyCount,
+        channel_weights: {
+          semantic: result.channelWeights.semantic,
+          situational: result.channelWeights.situational,
+          symptom: result.channelWeights.symptom,
+          outcome: result.channelWeights.outcome,
+        },
         taxonomy: {
           version: result.taxonomy.version,
           summary_short: result.taxonomy.summaryShort,
