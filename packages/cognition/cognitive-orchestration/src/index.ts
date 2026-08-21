@@ -44,6 +44,9 @@ export const Config: z<Config> = z.object({
   exploreEnabled: z.boolean().default(true),
   exploreIntervalMs: z.number().step(1).min(60_000).default(60 * 60 * 1000),
   exploreMaxConcurrent: z.number().step(1).min(1).max(5).default(1),
+  delegateDailyBudget: z.number().step(1).min(0).max(100).default(5),
+  delegateMaxConcurrent: z.number().step(1).min(1).max(10).default(2),
+  delegateRiskWords: z.array(z.string()).default(['删除', '清空', '覆盖', '发布', '推送', 'rm', '移除', '迁移', '重置', '格式化']),
 })
 
 /**

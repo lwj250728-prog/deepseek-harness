@@ -24,6 +24,8 @@ import type {
 import type {
   CognitivePipelineService,
   ExplorationTask,
+  LoopExecutionRequest,
+  LoopExecutionSink,
 } from '@deepseek-ai/dsh-cognitive-pipeline'
 import { actionVector, cosine, symptomOverlap } from '@deepseek-ai/dsh-cognitive-pipeline'
 /** Orchestration configuration (all defaults conservative). */
@@ -56,6 +58,16 @@ export interface OrchestrationConfig {
   readonly exploreIntervalMs: number
   /** Maximum exploration tasks executing concurrently. */
   readonly exploreMaxConcurrent: number
+  /**
+   * Daily delegation budget for the loop-driven delegation sink
+   * (`createDelegationSink`): how many delegations the sink accepts per day.
+   */
+  readonly delegateDailyBudget: number
+  /** Maximum delegations executing concurrently through the sink. */
+  readonly delegateMaxConcurrent: number
+  /** Irreversible-action markers; a delegation decision containing one is
+   * refused by the sink's safety gate. */
+  readonly delegateRiskWords: string[]
 }
 
 /**
@@ -75,6 +87,9 @@ export function resolveOrchestrationConfig(config: Partial<OrchestrationConfig>)
     exploreEnabled: config.exploreEnabled ?? true,
     exploreIntervalMs: config.exploreIntervalMs ?? 60 * 60 * 1000,
     exploreMaxConcurrent: config.exploreMaxConcurrent ?? 1,
+    delegateDailyBudget: config.delegateDailyBudget ?? 5,
+    delegateMaxConcurrent: config.delegateMaxConcurrent ?? 2,
+    delegateRiskWords: config.delegateRiskWords ?? ['删除', '清空', '覆盖', '发布', '推送', 'rm', '移除', '迁移', '重置', '格式化'],
   }
 }
 
@@ -235,6 +250,10 @@ export class CognitiveOrchestrator {
   private readonly config: OrchestrationConfig
   /** Lazily created exploration anchor agent, reused across all tasks. */
   private explorerHandle: AgentHandle | undefined
+  /** Delegations currently running through the sink (concurrency gate). */
+  private activeDelegations = 0
+  /** Sink delegation budget consumed today (`YYYY-MM-DD` → count). */
+  private delegationBudget = new Map<string, number>()
 
   /**
    * @param ctx - context carrying the subagent runtime, agent registry, and timer.
@@ -326,6 +345,107 @@ export class CognitiveOrchestrator {
         status: 'failed',
         result: `探索异常：${String(error)}`,
       })
+    }
+  }
+
+  /**
+   * Build the ready-made loop-execution sink that drives REAL delegation
+   * (`orchestration.delegate-create`). A loop that attaches this sink closes
+   * the delegation loop: an approved decision passes the sink's discipline —
+   * daily budget, concurrency cap, and an irreversible-operation safety gate —
+   * and on acceptance a subagent is actually spawned with the decision as its
+   * task. When the child settles, the execution outcome flows back through
+   * `settleExecution` on the SAME |calibrated − observed| ruler, and the
+   * delegation pattern (task, execution, result) is written back as a
+   * `委派决策` experience — 意志提交申请，执行层按纪律受理并真正执行.
+   * @returns a sink targetable as `orchestration.delegate-create`.
+   */
+  createDelegationSink(): LoopExecutionSink {
+    return {
+      target: 'orchestration.delegate-create',
+      apply: (request): string | null => {
+        const task = request.decision
+        // The sink's discipline, NOT the loop's: budgets, concurrency, and
+        // safety gates refuse execution regardless of the loop's approval.
+        const day = this.delegationDay()
+        const usedToday = this.delegationBudget.get(day) ?? 0
+        if (usedToday >= this.config.delegateDailyBudget) {
+          return '当日委派预算已耗尽，委派执行被拒（预算纪律）'
+        }
+        if (this.activeDelegations >= this.config.delegateMaxConcurrent) {
+          return '委派并发已满，委派执行被拒（并发纪律）'
+        }
+        const risk = this.config.delegateRiskWords.find(word => task.includes(word))
+        if (risk !== undefined) {
+          return `委派任务含不可逆操作「${risk}」，委派执行被拒（安全闸）`
+        }
+        // Accepted: reserve the budget slot, charge the concurrency slot, and
+        // spawn the child asynchronously. The receipt id matches the durable
+        // one decideAndExecute persists (`<predictionId>@<target>`), so the
+        // settle below links this execution back to the loop decision.
+        this.delegationBudget.set(day, usedToday + 1)
+        this.activeDelegations += 1
+        void this.runDelegation(request, `${request.predictionId}@orchestration.delegate-create`)
+          .catch((error: unknown) => {
+            this.ctx.logger.warn(`cognitive-orchestration: delegation execution failed: ${String(error)}`)
+          })
+        return null
+      },
+    }
+  }
+
+  /** Local date key of the delegation budget window (`YYYY-MM-DD`). */
+  private delegationDay(): string {
+    const now = new Date()
+    const month = String(now.getMonth() + 1).padStart(2, '0')
+    const day = String(now.getDate()).padStart(2, '0')
+    return `${now.getFullYear()}-${month}-${day}`
+  }
+
+  /**
+   * Execute one accepted delegation request to completion and flow the result
+   * back: spawn a cognitive child with the decision as its task, then settle
+   * the execution receipt with the actual outcome (executed on `completed`,
+   * failed otherwise) and write the delegation pattern back as an experience.
+   * @param request - the approved loop decision being executed.
+   * @param receiptId - the durable receipt id the decision persisted.
+   */
+  private async runDelegation(request: LoopExecutionRequest, receiptId: string): Promise<void> {
+    const task = request.decision
+    // Yield once so the caller's receipt-persist loop lands before we settle
+    // (guaranteed ordering even when the delegate resolves synchronously).
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const parent = await this.explorerParent()
+    if (parent === undefined) {
+      await this.pipeline.settleExecution(receiptId, '委派未执行：无可用的父代理', 1, 'failed')
+      this.activeDelegations -= 1
+      return
+    }
+    try {
+      const run = await this.ctx.subagents.start(this.config.providerName, {
+        label: `委派：${task.slice(0, 30)}`,
+        prompt: [{ type: 'text', text: task }],
+        parent,
+        signal: new AbortController().signal,
+      })
+      const result = await run.result
+      await run.dispose()
+      const output = outputText(result.output)
+      const quality = stopReasonQuality(result.stopReason)
+      const status: 'executed' | 'failed' = result.stopReason === 'completed' ? 'executed' : 'failed'
+      const summary = `委派执行：${output.slice(0, 300) || '（无文本输出）'}\n结果：${result.stopReason}`
+      await this.pipeline.settleExecution(receiptId, summary, quality, status)
+      // The delegation pattern itself is training data: same write-back as the
+      // tool-level capture path, so "when to delegate" learns from both routes.
+      if (task.trim().length > 0) {
+        await this.pipeline.remember({
+          rawText: `委派决策：${task}\n${summary}`,
+        })
+      }
+    } catch (error) {
+      await this.pipeline.settleExecution(receiptId, `委派异常：${String(error)}`, 1, 'failed').catch(() => {})
+    } finally {
+      this.activeDelegations -= 1
     }
   }
 

@@ -22,6 +22,7 @@ cognitive provider ──注入相关SAR经验──▶ delegate provider → ch
 - **注入（start 前）** — wrapper 从子任务提示词概括任务，按行动向量相似度检索相关经验，并把 `【认知经验参考】` 块前置到子任务提示词。策略模式下注入决策先经 `policy:inject` 预测，达到 `policyDecisionThreshold` 才放行。
 - **回写（settle 后）** — 子任务的输出与停止原因成为一条新经验（任务调度/子任务执行/结果）。策略模式下是否入库由 `policy:update` 预测决定；随后用观测到的结果质量校准该预测。当子代理会话报告了 token 计费时，经验的结果带一行 **token 摘要**（`token：输入 / 输出 / 缓存命中 / 缓存写入 / 推理`），由子代理会话的 `assistant/message` usage 累加——委派的成本与模式一起被记住。
 - **委派捕获（tools/result）** — 绕过包装 provider 的子代理工具调用（`delegationToolNames` 中的工具名，默认 `['subagent']`）在 `tools/result` 被捕获：`policy:delegate` 预测（"把这个任务委派给子代理值不值"）用实际结果校准，并写回一条 `委派决策` 经验（任务、执行摘要、结果）——当能定位到子代理会话（`parentSession` 指向委派 agent 的最新会话）时同样带上 token 摘要。这让**普通 subagent 委派**也获得与包装 provider 相同的"何时委派"可学习策略，无需经过 cognitive provider。
+- **委派执行环（loop-driven delegation）** — `createDelegationSink()` 构建一个现成的 `LoopExecutionSink`（`orchestration.delegate-create`），把元认知环路变成**真正的委派者**：当环路的 `decideAndExecute` 批准时，sink 执行自己的纪律——每日预算（`delegateDailyBudget`）、并发上限（`delegateMaxConcurrent`）、不可逆操作安全闸（`delegateRiskWords`）——受理后**真正启动 cognitive 子任务**，以该决策为任务。子任务落定后，执行结果经 `settleExecution` 沿同一把 `|calibrated − observed|` 尺子回流（回执 executed/failed），委派模式写回 `委派决策` 经验——环路的意志提交申请，执行层按纪律受理并真正执行。用 `execution: [orchestrator.createDelegationSink()]` 挂到环路即可（子任务挂在专用锚点会话 `cognitive-explorer` 下）。
 - **决策学习** — `policy:*` 预测就是流水线中的普通预测：积累足够后，`rebuild_taxonomy` 会把它们重聚类成学到的"何时注入 / 何时入库 / 何时委派"策略。
 - **自主探索调度（跨会话执行）** — `exploreEnabled`（默认 true）开启时，一个定时器按 `exploreIntervalMs` 轮询 `exploration_tasks.json`（流水线的自主任务队列，由流水线的 `explore()` API 或 `exploreAutoDispatch` 填充）。待处理任务被拾取——同时最多 `exploreMaxConcurrent` 个——标记为 running，并作为**静默 cognitive 子任务**在专用探索锚点会话（`cognitive-explorer`）下执行：子任务提示词要求模型不问用户直接完成目标，结果回写为经验（探索目标/探索执行/结果），任务落定为 completed/failed。队列及其状态计数通过流水线的 `inspect` 可见。这就是 scheme-2 主动探索背后的跨会话执行环：会话自动启动并静默完成探索。
 
@@ -58,6 +59,9 @@ ctx.subagents.start('cognitive', { prompt, parent, signal })
 | `exploreEnabled` | `true` | 是否运行定时驱动的探索调度器（轮询待处理任务并静默执行） |
 | `exploreIntervalMs` | `3600000` | 待处理探索任务的轮询间隔（毫秒） |
 | `exploreMaxConcurrent` | `1` | 同时执行的探索任务上限 |
+| `delegateDailyBudget` | `5` | 环路委派 sink 强制的每日委派预算 |
+| `delegateMaxConcurrent` | `2` | sink 同时执行的委派上限 |
+| `delegateRiskWords` | `['删除','清空','覆盖','发布','推送','rm','移除','迁移','重置','格式化']` | 不可逆操作标记；含任一标记的委派决策被 sink 的安全闸拒绝 |
 
 ## Model Experience
 

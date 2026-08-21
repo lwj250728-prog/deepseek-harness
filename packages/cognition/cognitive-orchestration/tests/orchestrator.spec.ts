@@ -301,6 +301,132 @@ describe('cognitive-orchestration', () => {
       await teardown()
     }
   })
+
+  it('drives a real delegation through a loop-attached delegation sink', async () => {
+    const { ctx, delegate, orchestrator, teardown } = await harness()
+    try {
+      registerExplorer(ctx)
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-delegate',
+        description: '该不该委派给子代理',
+        execution: [orchestrator.createDelegationSink()],
+      })
+
+      // An approved decision passes the sink's discipline and actually spawns
+      // a cognitive child with the decision as its task.
+      const result = await ctx.cognitivePipeline.decideAndExecute('when-to-delegate', '同步认知包到SAR仓库并验证构建', '任务复杂', 0.5)
+      expect(result.approved).toBe(true)
+      expect(result.executions[0]?.rejected).toBe(false)
+      expect(result.executions[0]?.target).toBe('orchestration.delegate-create')
+      await settleAsync()
+
+      // The child really ran (the delegate provider saw the task prompt).
+      expect(delegate.prompts.length).toBe(1)
+      const promptText = outputText(delegate.prompts[0] ?? [])
+      expect(promptText).toContain('同步认知包到SAR仓库并验证构建')
+
+      // The execution outcome flowed back: the receipt settled executed and
+      // the loop decision prediction resolved on the same calibration ruler.
+      const receipt = ctx.cognitivePipeline.store.loopExecutionsSnapshot()[0]
+      expect(receipt?.status).toBe('executed')
+      expect(receipt?.receiptId).toBe(`${result.decision.predictionId}@orchestration.delegate-create`)
+      const resolved = ctx.cognitivePipeline.store.getPrediction(result.decision.predictionId)
+      expect(resolved?.resolvedAt).not.toBeNull()
+      expect(resolved?.actualOutcome).toContain('completed')
+
+      // The delegation pattern is training data, like the tool-level path.
+      const latest = ctx.cognitivePipeline.store.experiencesSnapshot().at(-1)
+      expect(latest?.sar.situation).toContain('委派决策')
+      const loop = ctx.cognitivePipeline.inspect().loops.find(item => item.name === 'when-to-delegate')
+      expect(loop?.executedCount).toBe(1)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('settles a failed delegation child as a failed receipt', async () => {
+    const { ctx, delegate, orchestrator, teardown } = await harness()
+    try {
+      registerExplorer(ctx)
+      delegate.script('error', '模型调用失败')
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-delegate',
+        description: '该不该委派给子代理',
+        execution: [orchestrator.createDelegationSink()],
+      })
+      const result = await ctx.cognitivePipeline.decideAndExecute('when-to-delegate', '尝试一个有风险的委派', '任务复杂', 0.5)
+      await settleAsync()
+
+      const receipt = ctx.cognitivePipeline.store.loopExecutionsSnapshot()[0]
+      expect(receipt?.status).toBe('failed')
+      expect(receipt?.outcomeQuality).toBe(2)
+      const resolved = ctx.cognitivePipeline.store.getPrediction(result.decision.predictionId)
+      expect(resolved?.resolvedAt).not.toBeNull()
+      const loop = ctx.cognitivePipeline.inspect().loops.find(item => item.name === 'when-to-delegate')
+      expect(loop?.failedCount).toBe(1)
+      expect(loop?.executedCount).toBe(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('refuses delegation under the sink discipline (safety gate, budget, concurrency)', async () => {
+    const { ctx, delegate, orchestrator, teardown } = await harness({
+      delegateDailyBudget: 1,
+      delegateMaxConcurrent: 1,
+    })
+    try {
+      registerExplorer(ctx)
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-delegate',
+        description: '该不该委派给子代理',
+        execution: [orchestrator.createDelegationSink()],
+      })
+
+      // Safety gate: a decision containing an irreversible marker is refused
+      // BEFORE anything executes.
+      const unsafe = await ctx.cognitivePipeline.decideAndExecute('when-to-delegate', '删除全部记录并推送', '任务复杂', 0.5)
+      expect(unsafe.executions[0]?.rejected).toBe(true)
+      expect(unsafe.executions[0]?.reason).toContain('不可逆')
+      await settleAsync()
+      expect(delegate.prompts.length).toBe(0)
+
+      // Budget: the first accepted delegation consumes the only daily slot.
+      const first = await ctx.cognitivePipeline.decideAndExecute('when-to-delegate', '同步认知包到SAR仓库', '任务复杂', 0.5)
+      expect(first.executions[0]?.rejected).toBe(false)
+      const second = await ctx.cognitivePipeline.decideAndExecute('when-to-delegate', '验证构建产物', '任务复杂', 0.5)
+      expect(second.approved).toBe(true)
+      expect(second.executions[0]?.rejected).toBe(true)
+      expect(second.executions[0]?.reason).toContain('预算已耗尽')
+      await settleAsync()
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('refuses a second delegation under the sink concurrency cap', async () => {
+    const { orchestrator, teardown } = await harness({ delegateMaxConcurrent: 1 })
+    try {
+      const sink = orchestrator.createDelegationSink()
+      const request = (predictionId: string, decision: string) => ({
+        loopName: 'when-to-delegate',
+        decision,
+        situation: 'loop:when-to-delegate 情境=直接调用',
+        approved: true,
+        probability: 0.8,
+        confidenceLow: 0.6,
+        confidenceHigh: 0.95,
+        predictionId,
+      })
+      // Two in-flight applications: the cap refuses the second synchronously.
+      const accepted = sink.apply(request('p-concurrent-1', '任务甲'))
+      expect(accepted).toBeNull()
+      const refused = sink.apply(request('p-concurrent-2', '任务乙'))
+      expect(refused).toContain('并发已满')
+    } finally {
+      await teardown()
+    }
+  })
 })
 
 describe('orchestration helpers', () => {

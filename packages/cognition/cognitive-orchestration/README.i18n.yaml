@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/cognition/cognitive-orchestration/README.md
-README.md: 350a0ecb79bbd34f57fcdaabf30b6293e5a790e7
-README.zh.md: e7509bb68017295c2d4fbf86c0de4a5259370ac7
+README.md: c5873cc638026618a470a982c7d0bd716f36935a
+README.zh.md: bf9efdf4167bf3786a21ab2edd6f73e214542bcb
