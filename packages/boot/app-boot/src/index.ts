@@ -725,6 +725,32 @@ export async function assertEntriesActivated(ctx: Context, binName: string): Pro
 }
 
 /**
+ * A startup failure's facts for the self-healing hook: which stage failed,
+ * the wrapped diagnostic, and the plugin names whose entries did not load.
+ */
+export interface StartupFailure {
+  /** 'host preparation failed' or 'plugin tree failed to load'. */
+  readonly stage: string
+  /** The wrapped diagnostic message. */
+  readonly detail: string
+  /** Plugin names with no settled fiber (unresolved or failed to activate). */
+  readonly failedPlugins: readonly string[]
+}
+
+/**
+ * The outcome of one automatic startup repair: what was done, where the
+ * repair log was appended, and whether a retry is advised.
+ */
+export interface StartupRepair {
+  /** One-line summary of the applied repairs. */
+  readonly summary: string
+  /** Absolute path of the repair log (JSONL) this entry was appended to. */
+  readonly logPath: string
+  /** Whether the caller should retry the boot with the repairs in effect. */
+  readonly retry: boolean
+}
+
+/**
  * Boot the Loader against `absoluteConfigPath` and return only after the whole
  * tree settles. Relative entry names resolve against the config directory;
  * bare package names resolve there by default or against an explicit
@@ -748,11 +774,18 @@ export async function assertEntriesActivated(ctx: Context, binName: string): Pro
  * @param bareModuleBaseUrl - optional installed-host base for bare package
  * names; use it when the host, rather than the configuration project, owns the
  * complete plugin set.
+ * @param onStartupFailure - optional self-healing hook. When the tree fails
+ * to load, the failure facts (stage, diagnostic, failed plugin names) are
+ * handed here BEFORE the partial context is disposed; the hook may apply a
+ * reversible repair (e.g. a temporary disable overlay) and append a repair
+ * log entry. A non-null return rewrites the thrown error to carry the repair
+ * summary and log path and advise a retry; null keeps the original error.
  * @returns the root context once every entry has started, or as soon as a
  * surface disposed the tree while startup was still in flight.
  * @throws a labelled error after disposing the partial context — `host
  * preparation failed` when `prepare` threw before any config-tree entry
- * mounted, `plugin tree failed to load` afterwards.
+ * mounted, `plugin tree failed to load` afterwards; when `onStartupFailure`
+ * returned a repair, the error additionally reports the repair and log path.
  */
 export async function boot(
   binName: string,
@@ -760,6 +793,7 @@ export async function boot(
   patches?: PatchOptions[],
   prepare?: (ctx: Context) => Promise<void> | void,
   bareModuleBaseUrl?: string,
+  onStartupFailure?: (failure: StartupFailure) => Promise<StartupRepair | null> | StartupRepair | null,
 ): Promise<Context> {
   const ctx = new Context()
   // Two failure labels: `prepare` runs before any config-tree entry mounts,
@@ -784,6 +818,24 @@ export async function boot(
     await assertEntriesActivated(ctx, binName)
     return ctx
   } catch (cause) {
+    // Self-healing hook: extract the failed plugin names and offer the
+    // failure facts BEFORE disposing, so a reversible repair (disable overlay)
+    // and its log entry can still be produced. The loader service is already
+    // gone here (a failing include rolls the tree back), so the names come
+    // from the diagnostic text, not from loader entries.
+    let repair: StartupRepair | null = null
+    if (onStartupFailure !== undefined) {
+      const detail = cause instanceof Error ? cause.message : String(cause)
+      const failedPlugins = failedPluginNames(detail)
+      try {
+        repair = await onStartupFailure({ stage, detail, failedPlugins })
+      } catch (repairError) {
+        // A failing repair must not mask the original startup failure; the
+        // original error (with the failure detail) stays the thrown outcome.
+        repair = null
+        ctx.logger.warn(`${binName}: startup repair hook failed: ${String(repairError)}`)
+      }
+    }
     // Root-fiber disposal contains cleanup failures per observer (Cordis
     // fiber.ts hardening) and a repeated call returns the settled single-shot
     // result, so this await cannot reject and replace `cause`.
@@ -797,8 +849,41 @@ export async function boot(
     let deepest: unknown = cause
     while (deepest instanceof Error && deepest.cause !== undefined) deepest = deepest.cause
     const stack = deepest instanceof Error && deepest !== cause ? `\n${deepest.stack ?? deepest.message}` : ''
+    if (repair !== null) {
+      const retry = repair.retry ? '请修复后重新启动。' : ''
+      throw new Error(
+        `${binName}: ${stage}: ${detail}${stack}\n已自动执行临时修复：${repair.summary}（修复日志：${repair.logPath}）${retry}`,
+        { cause },
+      )
+    }
     throw new Error(`${binName}: ${stage}: ${detail}${stack}`, { cause })
   }
+}
+
+/**
+ * Collect the failed plugin entry ids from a startup diagnostic. The loader
+ * service is rolled back with the failing include, so the names are parsed
+ * from the wrapped message instead: `loader entry <id> (<specifier>)` names
+ * every entry in the failing chain, and `plugin(s) failed to load: a, b` names
+ * unresolved bare plugins. The innermost failing entry (the last `loader
+ * entry` hit) is the repair target; the built-in `include` entry is excluded.
+ * @param detail - the wrapped startup failure diagnostic.
+ * @returns the failed plugin entry ids, deduplicated.
+ */
+function failedPluginNames(detail: string): readonly string[] {
+  const names = new Set<string>()
+  for (const match of detail.matchAll(/loader entry ([^ (]+)/g)) {
+    const name = match[1]
+    if (name !== undefined && name !== 'include' && name.length > 0) names.add(name)
+  }
+  const unresolved = detail.match(/plugin\(s\) failed to load: ([^;]+)/)
+  if (unresolved?.[1] !== undefined) {
+    for (const name of unresolved[1].split(',')) {
+      const trimmed = name.trim()
+      if (trimmed.length > 0) names.add(trimmed)
+    }
+  }
+  return [...names]
 }
 
 /** Prompt-section name for the harness-source location line an app bin adds after boot. */

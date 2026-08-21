@@ -8,7 +8,8 @@ import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import {
   addHarnessSourceSection, assertEntriesActivated, assertEntriesLoaded, boot,
   FAIL_LOUD_RELEASE_TIMEOUT_MS, HARNESS_SOURCE_SECTION,
-  installFailLoud, loadEnv, loadLayeredEnv, loadOverlayPatches, resolveConfigPath, type FailLoudProcess,
+  installFailLoud, loadEnv, loadLayeredEnv, loadOverlayPatches, resolveConfigPath,
+  type FailLoudProcess, type StartupFailure, type StartupRepair,
 } from '../src/index.ts'
 
 const NAME = 'dsh-test-bin'
@@ -721,6 +722,44 @@ describe('boot', () => {
     await expect(boot(NAME, join(dir, 'cordis.yml'))).rejects.toThrow(
       `${NAME}: plugin tree failed to load: failed to apply loader entry`,
     )
+  })
+
+  it('hands the failure facts to the self-healing hook before disposing', async () => {
+    const dir = tmp()
+    // An activation failure keeps the plugin entry in the loader (fiber never
+    // settles), which is what the repair hook needs to act on.
+    writeFileSync(join(dir, 'failing.mjs'), 'export function apply() { throw new Error("boom") }\n')
+    writeFileSync(join(dir, 'cordis.yml'), '- id: bad\n  name: ./failing.mjs\n')
+    const seen: StartupFailure[] = []
+    await expect(boot(
+      NAME, join(dir, 'cordis.yml'), undefined, undefined, undefined,
+      async (failure) => {
+        seen.push(failure)
+        return null
+      },
+    )).rejects.toThrow('plugin tree failed to load')
+    expect(seen.length).toBe(1)
+    expect(seen[0]?.stage).toBe('plugin tree failed to load')
+    expect(seen[0]?.failedPlugins.length).toBeGreaterThan(0)
+  })
+
+  it('rewrites the thrown error with the repair summary and log path when the hook repairs', async () => {
+    const dir = tmp()
+    writeFileSync(join(dir, 'cordis.yml'), '- id: ghost\n  name: ./missing.mjs\n')
+    const repair: StartupRepair = { summary: '临时禁用 ghost', logPath: '/tmp/repair.log', retry: true }
+    await expect(boot(
+      NAME, join(dir, 'cordis.yml'), undefined, undefined, undefined,
+      () => repair,
+    )).rejects.toThrow(/已自动执行临时修复：临时禁用 ghost（修复日志：\/tmp\/repair\.log）请修复后重新启动/)
+  })
+
+  it('keeps the original failure when the repair hook itself throws', async () => {
+    const dir = tmp()
+    writeFileSync(join(dir, 'cordis.yml'), '- id: ghost\n  name: ./missing.mjs\n')
+    await expect(boot(
+      NAME, join(dir, 'cordis.yml'), undefined, undefined, undefined,
+      () => { throw new Error('repair exploded') },
+    )).rejects.toThrow('plugin tree failed to load')
   })
 
   it('labels a deferred config failure with its row and leaves the source file unchanged', async () => {
