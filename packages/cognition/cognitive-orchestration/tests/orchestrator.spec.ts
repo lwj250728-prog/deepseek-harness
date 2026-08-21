@@ -1,7 +1,23 @@
 import { describe, expect, it } from 'vitest'
+import type { Context } from '@deepseek-ai/cordis'
 import { harness, runChild } from './helpers.ts'
 import * as cognitiveOrchestration from '../src/index.ts'
-import { outputText, stopReasonQuality, taskSummary } from '../src/orchestrator.ts'
+import { delegationOutput, delegationTask, outputText, stopReasonQuality, taskSummary } from '../src/orchestrator.ts'
+import { CallId } from '@deepseek-ai/dsh-llm'
+
+/** Emit a fake tool-level subagent delegation outcome. */
+function emitDelegation(ctx: Context, arguments_: Record<string, unknown>, result: Record<string, unknown>): void {
+  ctx.emit('tools/result', {
+    callId: CallId('del-1'),
+    name: 'subagent',
+    arguments: arguments_,
+  } as never, result as never)
+}
+
+/** Wait for the async delegation-capture chain (predict/report/remember) to settle. */
+async function settleAsync(): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, 80))
+}
 
 describe('cognitive-orchestration', () => {
   it('registers the wrapper provider with delegated capabilities', async () => {
@@ -88,6 +104,88 @@ describe('cognitive-orchestration', () => {
       await teardown()
     }
   })
+
+  it('captures a tool-level delegation: policy:delegate calibration and 委派决策 write-back', async () => {
+    const { ctx, teardown } = await harness({ policyEnabled: true })
+    try {
+      const before = ctx.cognitivePipeline.store.experiencesSnapshot().length
+      emitDelegation(ctx, { description: '同步认知包', prompt: '把认知包同步到SAR仓库并推送' }, {
+        isError: false,
+        content: [{ type: 'text', text: '同步完成，推送成功' }],
+      })
+      await settleAsync()
+
+      // The delegation pattern was written back as an experience.
+      const after = ctx.cognitivePipeline.store.experiencesSnapshot().length
+      expect(after).toBe(before + 1)
+      const latest = ctx.cognitivePipeline.store.experiencesSnapshot().at(-1)
+      expect(latest?.sar.situation).toContain('委派决策')
+      expect(latest?.sar.situation).toContain('同步到SAR仓库')
+
+      // The policy:delegate decision was predicted and calibrated.
+      const delegatePredictions = ctx.cognitivePipeline.store.predictionsSnapshot()
+        .filter(p => p.situation.startsWith('policy:delegate'))
+      expect(delegatePredictions.length).toBe(1)
+      expect(delegatePredictions[0]?.resolvedAt).not.toBeNull()
+      expect(delegatePredictions[0]?.predictionError).not.toBeNull()
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('records a failed delegation with a low calibration quality', async () => {
+    const { ctx, teardown } = await harness({ policyEnabled: true })
+    try {
+      emitDelegation(ctx, { prompt: '尝试一个会失败的任务' }, {
+        isError: true,
+        content: [{ type: 'text', text: 'boom' }],
+      })
+      await settleAsync()
+
+      const latest = ctx.cognitivePipeline.store.experiencesSnapshot().at(-1)
+      expect(latest?.sar.outcome).toContain('失败')
+      const delegatePredictions = ctx.cognitivePipeline.store.predictionsSnapshot()
+        .filter(p => p.situation.startsWith('policy:delegate'))
+      // Outcome quality 2 drives the calibration error signal.
+      expect(delegatePredictions[0]?.resolvedAt).not.toBeNull()
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('ignores tool calls outside the delegation tool names', async () => {
+    const { ctx, teardown } = await harness({ policyEnabled: true })
+    try {
+      const before = ctx.cognitivePipeline.store.experiencesSnapshot().length
+      ctx.emit('tools/result', {
+        callId: CallId('pwsh-1'),
+        name: 'pwsh',
+        arguments: { command: 'ls' },
+      } as never, { isError: false, content: [{ type: 'text', text: 'ok' }] } as never)
+      await settleAsync()
+
+      expect(ctx.cognitivePipeline.store.experiencesSnapshot().length).toBe(before)
+      expect(ctx.cognitivePipeline.store.predictionsSnapshot()
+        .filter(p => p.situation.startsWith('policy:delegate'))).toHaveLength(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('skips policy calibration in conservative mode but still writes the delegation', async () => {
+    const { ctx, teardown } = await harness({ policyEnabled: false })
+    try {
+      const before = ctx.cognitivePipeline.store.experiencesSnapshot().length
+      emitDelegation(ctx, { prompt: '直接执行任务' }, { isError: false, content: [{ type: 'text', text: 'done' }] })
+      await settleAsync()
+
+      expect(ctx.cognitivePipeline.store.experiencesSnapshot().length).toBe(before + 1)
+      expect(ctx.cognitivePipeline.store.predictionsSnapshot()
+        .filter(p => p.situation.startsWith('policy:delegate'))).toHaveLength(0)
+    } finally {
+      await teardown()
+    }
+  })
 })
 
 describe('orchestration helpers', () => {
@@ -107,5 +205,18 @@ describe('orchestration helpers', () => {
   it('joins text blocks into output text', () => {
     expect(outputText([{ type: 'text', text: '完成' }, { type: 'text', text: '结果' }])).toBe('完成 结果')
     expect(outputText([])).toBe('')
+  })
+
+  it('extracts the delegation task from prompt or description', () => {
+    expect(delegationTask({ prompt: '  把认知包同步到SAR仓库并推送  ' })).toBe('把认知包同步到SAR仓库并推送')
+    expect(delegationTask({ description: '同步认知包', prompt: '' })).toBe('同步认知包')
+    expect(delegationTask({})).toBe('')
+    expect(delegationTask(undefined)).toBe('')
+  })
+
+  it('joins delegation result text blocks', () => {
+    expect(delegationOutput({ isError: false, content: [{ type: 'text', text: '同步完成' }, { type: 'text', text: '推送成功' }] }))
+      .toBe('同步完成 推送成功')
+    expect(delegationOutput({ isError: true })).toBe('')
   })
 })

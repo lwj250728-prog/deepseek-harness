@@ -34,6 +34,16 @@ export interface OrchestrationConfig {
   readonly policyEnabled: boolean
   /** Probability at/above which a policy prediction approves the action. */
   readonly policyDecisionThreshold: number
+  /**
+   * Tool names whose calls are captured as tool-level delegations. These are
+   * subagent tools that bypass the wrapped provider (their `settle()` never
+   * runs), so the orchestrator captures the delegation itself: a
+   * `policy:delegate` prediction is calibrated against the outcome and a
+   * "委派决策" experience is written back. The cognitive-wrapped tool (the
+   * provider under `providerName`) is excluded by default because its children
+   * already write back through `settle()`.
+   */
+  readonly delegationToolNames: string[]
 }
 
 /**
@@ -49,6 +59,7 @@ export function resolveOrchestrationConfig(config: Partial<OrchestrationConfig>)
     minSimilarity: config.minSimilarity ?? 0.3,
     policyEnabled: config.policyEnabled ?? true,
     policyDecisionThreshold: config.policyDecisionThreshold ?? 0.55,
+    delegationToolNames: config.delegationToolNames ?? ['subagent'],
   }
 }
 
@@ -114,6 +125,37 @@ interface RunContext {
   readonly task: string
   readonly hits: readonly ExperienceHit[]
   readonly injectPredictionId: string | null
+}
+
+/** One tool-level delegation execution observed at `tools/result`. */
+export interface ToolDelegationExec {
+  readonly callId: string
+  readonly name: string
+  readonly arguments?: Readonly<Record<string, unknown>>
+}
+
+/** The outcome of one tool-level delegation. */
+export interface ToolDelegationResult {
+  readonly isError: boolean
+  readonly content?: readonly { type?: string; text?: string }[]
+}
+
+/** Extract the delegation task summary from the tool arguments. */
+export function delegationTask(arguments_: Readonly<Record<string, unknown>> | undefined): string {
+  const prompt = arguments_?.prompt
+  if (typeof prompt === 'string' && prompt.trim().length > 0) return prompt.trim().slice(0, 200)
+  const description = arguments_?.description
+  if (typeof description === 'string' && description.trim().length > 0) return description.trim().slice(0, 200)
+  return ''
+}
+
+/** Join the delegation result text blocks. */
+export function delegationOutput(result: ToolDelegationResult): string {
+  return (result.content ?? [])
+    .filter((block): block is { type: string; text: string } => block.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text)
+    .join(' ')
+    .trim()
 }
 
 /**
@@ -219,8 +261,7 @@ export class CognitiveOrchestrator {
   }
 
   /** Settle-time write-back: predict recording, store the outcome, calibrate. */
-  private async settle(context: RunContext, result: SubagentResult): Promise<void> {
-    const quality = stopReasonQuality(result.stopReason)
+  private async settle(context: RunContext, result: SubagentResult): Promise<void> {    const quality = stopReasonQuality(result.stopReason)
     const output = outputText(result.output)
     let recordPredictionId: string | null = null
     let recordDecision = true
@@ -249,6 +290,39 @@ export class CognitiveOrchestrator {
         predictionId: recordPredictionId,
         actualOutcome: `记录决策，实际${recordDecision ? '入库' : '未入库'}`,
         outcomeQuality: quality,
+      })
+    }
+  }
+
+  /**
+   * Capture a tool-level delegation (a subagent tool call that bypassed the
+   * wrapped provider, so `settle()` never ran). Two things happen:
+   * 1. A `policy:delegate` prediction — "is delegating this task to a
+   *    subagent worth it" — is calibrated against the actual outcome, so
+   *    "when to delegate" becomes a learned strategy like `policy:inject`.
+   * 2. A "委派决策" experience (task, execution summary, outcome) is written
+   *    back, recording the delegation pattern itself as training data for
+   *    that strategy.
+   * @param exec - the tool execution facts (callId/name/arguments).
+   * @param result - the tool outcome facts.
+   */
+  async captureDelegation(exec: ToolDelegationExec, result: ToolDelegationResult): Promise<void> {
+    const task = delegationTask(exec.arguments)
+    const output = delegationOutput(result)
+    if (this.config.policyEnabled && task.trim().length > 0) {
+      const prediction = await this.pipeline.predict({
+        situation: `policy:delegate 任务特征=${task.slice(0, 120)}`,
+        action: '将任务委派给子代理执行',
+      })
+      await this.pipeline.report({
+        predictionId: prediction.predictionId,
+        actualOutcome: `委派${result.isError ? '失败' : '完成'}`,
+        outcomeQuality: result.isError ? 2 : 8,
+      })
+    }
+    if (task.trim().length > 0) {
+      await this.pipeline.remember({
+        rawText: `委派决策：${task}\n子代理执行：${output.slice(0, 300) || '（无文本输出）'}\n结果：${result.isError ? '失败' : '完成'}。`,
       })
     }
   }

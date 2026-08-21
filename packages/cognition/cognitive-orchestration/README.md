@@ -20,7 +20,8 @@ cognitive provider ──注入相关SAR经验──▶ delegate provider → ch
 
 - **注入（start 前）** — the wrapper summarizes the task from the child prompt, retrieves related experiences by action-vector similarity, and prepends a `【认知经验参考】` block to the child prompt. In policy mode the inject decision is first predicted (`policy:inject`) and only approved at/above `policyDecisionThreshold`.
 - **回写（settle 后）** — the child's output and stop reason become a new experience (`任务调度/子任务执行/结果`). In policy mode whether to record is predicted (`policy:update`); the prediction is then calibrated with the observed outcome quality.
-- **决策学习** — `policy:*` predictions are ordinary predictions in the pipeline: with enough of them, `rebuild_taxonomy` re-clusters them into learned "when to inject / when to record" strategies.
+- **委派捕获（tools/result）** — subagent tool calls that bypass the wrapped provider (the tool names in `delegationToolNames`, default `['subagent']`) are captured at `tools/result`: a `policy:delegate` prediction ("is delegating this task worth it") is calibrated against the actual outcome, and a `委派决策` experience (task, execution summary, outcome) is written back. This gives **ordinary subagent delegations** the same learnable "when to delegate" strategy the wrapped provider already has, without requiring the cognitive provider.
+- **决策学习** — `policy:*` predictions are ordinary predictions in the pipeline: with enough of them, `rebuild_taxonomy` re-clusters them into learned "when to inject / when to record / when to delegate" strategies.
 
 ## Install
 
@@ -51,6 +52,7 @@ ctx.subagents.start('cognitive', { prompt, parent, signal })
 | `minSimilarity` | `0.3` | Minimum action-vector similarity to consider a memory related |
 | `policyEnabled` | `true` | Whether inject/record decisions are predicted and calibrated |
 | `policyDecisionThreshold` | `0.55` | Probability at/above which a policy prediction approves the action |
+| `delegationToolNames` | `['subagent']` | Tool names captured at `tools/result` as tool-level delegations (predict `policy:delegate`, write back a `委派决策` experience). The cognitive-wrapped tool is excluded by default because its children already write back through the provider's settle path |
 
 ## Model Experience
 

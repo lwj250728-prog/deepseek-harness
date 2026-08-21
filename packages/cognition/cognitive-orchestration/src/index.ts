@@ -25,7 +25,7 @@ import type { OrchestrationConfig } from './orchestrator.ts'
 export const name = 'cognitive-orchestration'
 
 /** Services required before the orchestration layer can mount. */
-export const inject = ['subagents', 'cognitivePipeline']
+export const inject = ['subagents', 'cognitivePipeline', 'tools']
 
 /** Plugin configuration mirrors the orchestrator configuration. */
 export type Config = Partial<OrchestrationConfig>
@@ -38,12 +38,14 @@ export const Config: z<Config> = z.object({
   minSimilarity: z.number().min(0).max(1).default(0.3),
   policyEnabled: z.boolean().default(true),
   policyDecisionThreshold: z.number().min(0).max(1).default(0.55),
+  delegationToolNames: z.array(z.string()).default(['subagent']),
 })
 
 /**
  * Mount the orchestration layer: resolve the delegate provider (it must
  * already be registered — place this row after the delegate provider's row),
- * wrap it, and register the wrapper under its own name.
+ * wrap it, register the wrapper under its own name, and capture tool-level
+ * delegations (subagent tool calls that bypass the wrapper) at `tools/result`.
  * @param ctx - plugin context carrying subagents and cognitivePipeline.
  * @param config - orchestration configuration.
  */
@@ -58,8 +60,28 @@ export function apply(ctx: Context, config: Config): void {
   }
   const orchestrator = new CognitiveOrchestrator(ctx, ctx.cognitivePipeline, resolved)
   ctx.subagents.registerProvider(orchestrator.wrap(delegate))
+  const delegationTools = new Set(resolved.delegationToolNames)
+  if (delegationTools.size > 0) {
+    ctx.on('tools/result', (
+      exec: { callId: string; name: string; arguments?: unknown },
+      result: { isError: boolean; content?: readonly { type?: string; text?: string }[] },
+    ) => {
+      if (!delegationTools.has(exec.name)) return
+      const delegationExec: { callId: string; name: string; arguments?: Readonly<Record<string, unknown>> } = {
+        callId: exec.callId,
+        name: exec.name,
+        ...(typeof exec.arguments === 'object' && exec.arguments !== null
+          ? { arguments: exec.arguments as Readonly<Record<string, unknown>> }
+          : {}),
+      }
+      void orchestrator.captureDelegation(delegationExec, result).catch((error: unknown) => {
+        ctx.logger.warn(`cognitive-orchestration: delegation capture failed: ${String(error)}`)
+      })
+    })
+  }
 }
 
 /** Re-export the orchestrator and its helpers for programmatic use. */
 export { CognitiveOrchestrator, resolveOrchestrationConfig } from './orchestrator.ts'
 export type { OrchestrationConfig, ExperienceHit } from './orchestrator.ts'
+export type { ToolDelegationExec, ToolDelegationResult } from './orchestrator.ts'
