@@ -426,8 +426,39 @@ export interface LoopExecutionSink {
   readonly apply: (request: LoopExecutionRequest) => string | null | void | Promise<string | null | void>
 }
 
+/** Durable record of one loop decision's execution request. The receipt is the
+ * audit link between a decision and its execution outcome: `decideAndExecute`
+ * persists one receipt per declared sink (id = `<predictionId>@<target>`), and
+ * `settleExecution` marks the terminal outcome (executed/failed) and feeds it
+ * back through the same report path — the execution result calibrates the loop
+ * decision on the SAME |calibrated − observed| ruler as every prediction. */
+export interface LoopExecutionReceipt {
+  /** Stable identity: `<predictionId>@<target>`, unique per decision/sink. */
+  readonly receiptId: string
+  readonly loopName: string
+  /** The decision prediction this execution belongs to. */
+  readonly predictionId: string
+  /** The sink target that handled (or refused) the request. */
+  readonly target: string
+  /** The decision action text. */
+  readonly decision: string
+  /** The situation the decision was made in (with the loop: prefix). */
+  readonly situation: string
+  /** Whether the sink refused under its own discipline. */
+  readonly rejected: boolean
+  /** The sink's refusal reason; null when accepted. */
+  readonly reason: string | null
+  readonly createdAt: number
+  /** Terminal execution outcome once settled; null while pending. */
+  readonly status: 'executed' | 'failed' | null
+  readonly settledAt: number | null
+  readonly outcomeText: string | null
+  readonly outcomeQuality: number | null
+}
+
 /** Per-loop aggregation for inspection: the loop's decision history under
- * the same |calibrated − observed| ruler as every other prediction. */
+ * the same |calibrated − observed| ruler as every other prediction, plus the
+ * execution ledger (how many requests were executed, refused, or failed). */
 export interface CognitiveLoopStats {
   readonly name: string
   readonly description: string
@@ -435,6 +466,12 @@ export interface CognitiveLoopStats {
   readonly resolvedCount: number
   /** Mean |calibrated − observed| over resolved predictions, null when none. */
   readonly avgPredictionError: number | null
+  /** Execution receipts settled as executed. */
+  readonly executedCount: number
+  /** Execution receipts refused by a sink under its discipline. */
+  readonly refusedCount: number
+  /** Execution receipts settled as failed. */
+  readonly failedCount: number
 }
 
 /** Outcome of one cold-loop rebuild (the `/rebuild/trigger` contract). */
@@ -489,6 +526,8 @@ export interface InspectResult {
   }
   /** Registered meta-cognition loops and their per-loop calibration history. */
   readonly loops: readonly CognitiveLoopStats[]
+  /** Recent loop-execution receipts, newest first (the 决策→申请→受理/拒绝→结算 audit chain). */
+  readonly loopExecutions: readonly LoopExecutionReceipt[]
   /** Recent resolved predictions, newest first. */
   readonly recentResolved: readonly Prediction[]
 }

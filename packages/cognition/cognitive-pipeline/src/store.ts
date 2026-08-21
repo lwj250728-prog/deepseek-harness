@@ -17,6 +17,7 @@ import type {
   ExplorationState,
   ExplorationTask,
   ExplorationTaskStatus,
+  LoopExecutionReceipt,
   Prediction,
   TaxonomyState,
   TempStrategy,
@@ -103,6 +104,7 @@ export class CognitiveStore {
   private channelWeights: ChannelWeights = { semantic: 1, situational: 1, symptom: 1, outcome: 1 }
   private explorationState: ExplorationState = { date: todayKey(), used: 0, entries: [] }
   private explorationTasks = new Map<string, ExplorationTask>()
+  private loopExecutions = new Map<string, LoopExecutionReceipt>()
   private taxonomyState: TaxonomyState | null = null
   private nextExpSeq = 1
   private nextPredictionSeq = 1
@@ -125,7 +127,7 @@ export class CognitiveStore {
     await mkdir(this.root, { recursive: true })
     const [
       experiences, predictions, tempStrategies, clusters, calibration,
-      channelWeights, exploration, tasks, taxonomy,
+      channelWeights, exploration, tasks, loopExecutions, taxonomy,
     ] = await Promise.all([
       readFile(this.file('experiences.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('predictions.jsonl'), 'utf8').catch(() => ''),
@@ -135,6 +137,7 @@ export class CognitiveStore {
       readFile(this.file('channel_weights.json'), 'utf8').catch(() => ''),
       readFile(this.file('exploration.json'), 'utf8').catch(() => ''),
       readFile(this.file('exploration_tasks.json'), 'utf8').catch(() => ''),
+      readFile(this.file('loop_executions.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('taxonomy.json'), 'utf8').catch(() => ''),
     ])
     for (const record of parseLines(experiences)) {
@@ -224,6 +227,12 @@ export class CognitiveStore {
           if (Number.isFinite(seq)) this.nextTaskSeq = Math.max(this.nextTaskSeq, seq + 1)
         }
       }
+    }
+    for (const record of parseLines(loopExecutions)) {
+      if (typeof record !== 'object' || record === null) continue
+      const receipt = record as LoopExecutionReceipt
+      if (typeof receipt.receiptId !== 'string' || typeof receipt.predictionId !== 'string') continue
+      this.loopExecutions.set(receipt.receiptId, receipt)
     }
     if (taxonomy !== '') {
       const parsed = JSON.parse(taxonomy) as unknown
@@ -713,6 +722,57 @@ export class CognitiveStore {
     const next: ExplorationTask = { ...current, ...patch }
     this.explorationTasks.set(taskId, next)
     this.enqueue('exploration_tasks.json', [...this.explorationTasks.values()])
+    return next
+  }
+
+  // ── loop execution receipts ──────────────────────────────────────────────
+
+  /** Store one loop-execution receipt and enqueue its persistence.
+   * @param receipt - the receipt to add (id must be unique).
+   */
+  addLoopExecution(receipt: LoopExecutionReceipt): void {
+    this.loopExecutions.set(receipt.receiptId, receipt)
+    this.enqueueLines('loop_executions.jsonl', [...this.loopExecutions.values()])
+  }
+
+  /** Read one loop-execution receipt by id.
+   * @param receiptId - the receipt id (`<predictionId>@<target>`).
+   * @returns the receipt, or undefined when unknown.
+   */
+  getLoopExecution(receiptId: string): LoopExecutionReceipt | undefined {
+    return this.loopExecutions.get(receiptId)
+  }
+
+  /** Snapshot of every loop-execution receipt, insertion order. */
+  loopExecutionsSnapshot(): readonly LoopExecutionReceipt[] {
+    return [...this.loopExecutions.values()]
+  }
+
+  /** Mark one accepted receipt's terminal execution outcome. Refused receipts
+   * are terminal by construction and are never settled.
+   * @param receiptId - the receipt to settle.
+   * @param status - the terminal outcome ('executed' or 'failed').
+   * @param outcomeText - what the execution actually produced.
+   * @param outcomeQuality - the outcome quality 0–10.
+   * @returns the updated receipt, or undefined when unknown.
+   */
+  settleLoopExecution(
+    receiptId: string,
+    status: 'executed' | 'failed',
+    outcomeText: string,
+    outcomeQuality: number,
+  ): LoopExecutionReceipt | undefined {
+    const current = this.loopExecutions.get(receiptId)
+    if (current === undefined) return undefined
+    const next: LoopExecutionReceipt = {
+      ...current,
+      status,
+      settledAt: Date.now(),
+      outcomeText,
+      outcomeQuality,
+    }
+    this.loopExecutions.set(receiptId, next)
+    this.enqueueLines('loop_executions.jsonl', [...this.loopExecutions.values()])
     return next
   }
 

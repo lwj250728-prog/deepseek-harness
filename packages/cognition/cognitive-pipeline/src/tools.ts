@@ -543,6 +543,27 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
                 prediction_count: { type: 'number', required: true },
                 resolved_count: { type: 'number', required: true },
                 avg_prediction_error: { type: 'number', required: true },
+                executed_count: { type: 'number', required: true },
+                refused_count: { type: 'number', required: true },
+                failed_count: { type: 'number', required: true },
+              },
+            },
+          },
+          loop_executions: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                receipt_id: { type: 'string', required: true },
+                loop_name: { type: 'string', required: true },
+                target: { type: 'string', required: true },
+                decision: { type: 'string', required: true },
+                rejected: { type: 'boolean', required: true },
+                reason: { type: 'string', required: true },
+                status: { type: 'string', required: true },
+                outcome_quality: { type: 'number', required: true },
               },
             },
           },
@@ -595,6 +616,19 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           avg_prediction_error: loop.avgPredictionError === null
             ? -1
             : Number(loop.avgPredictionError.toFixed(3)),
+          executed_count: loop.executedCount,
+          refused_count: loop.refusedCount,
+          failed_count: loop.failedCount,
+        })),
+        loop_executions: result.loopExecutions.map(receipt => ({
+          receipt_id: receipt.receiptId,
+          loop_name: receipt.loopName,
+          target: receipt.target,
+          decision: receipt.decision,
+          rejected: receipt.rejected,
+          reason: receipt.reason ?? '',
+          status: receipt.status ?? 'submitted',
+          outcome_quality: receipt.outcomeQuality ?? -1,
         })),
       })
     },

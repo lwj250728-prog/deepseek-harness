@@ -674,20 +674,33 @@ describe('cognitive pipeline integration', () => {
       // First decision approves and reaches the sink (accepted).
       const first = await ctx.cognitivePipeline.decideAndExecute('when-to-archive', '归档会话', '会话已空闲', 0.5)
       expect(first.approved).toBe(true)
-      expect(first.executions).toEqual([{ target: 'test.archive-sink', rejected: false, reason: null }])
+      expect(first.executions).toHaveLength(1)
+      expect(first.executions[0]).toMatchObject({
+        loopName: 'when-to-archive',
+        target: 'test.archive-sink',
+        rejected: false,
+        reason: null,
+        status: null,
+        settledAt: null,
+      })
+      // Every attempt yields a durable receipt linking decision to execution.
+      expect(first.executions[0]?.receiptId).toBe(`${first.decision.predictionId}@test.archive-sink`)
+      expect(ctx.cognitivePipeline.store.loopExecutionsSnapshot()).toHaveLength(1)
       expect(accepted).toEqual(['归档会话'])
 
       // Second decision approves but the sink refuses under its discipline.
       const second = await ctx.cognitivePipeline.decideAndExecute('when-to-archive', '归档并保留会话', '会话已空闲', 0.5)
       expect(second.approved).toBe(true)
-      expect(second.executions).toEqual([{
+      expect(second.executions[0]).toMatchObject({
         target: 'test.archive-sink',
         rejected: true,
         reason: 'protected: 该会话需保留',
-      }])
+        status: null,
+      })
       expect(refused).toEqual(['归档并保留会话'])
       // The loop only requested; the sink decided — no execution happened.
       expect(accepted).toEqual(['归档会话'])
+      expect(ctx.cognitivePipeline.store.loopExecutionsSnapshot()).toHaveLength(2)
     } finally {
       await teardown()
     }
@@ -736,7 +749,11 @@ describe('cognitive pipeline integration', () => {
       // treats it as handled (no double-record); the exploration exists once.
       const result = await ctx.cognitivePipeline.decideAndExecute('when-to-explore', '尝试新的检索策略', '未知领域', 0.5)
       expect(result.approved).toBe(true)
-      expect(result.executions).toEqual([{ target: 'hot-engine.explore-create', rejected: false, reason: null }])
+      expect(result.executions[0]).toMatchObject({
+        target: 'hot-engine.explore-create',
+        rejected: false,
+        reason: null,
+      })
       expect(ctx.cognitivePipeline.store.explorationSnapshot().entries).toHaveLength(1)
       expect(ctx.cognitivePipeline.store.tempStrategiesSnapshot()).toHaveLength(1)
       expect(ctx.cognitivePipeline.store.explorationTasksSnapshot()).toHaveLength(1)
@@ -778,6 +795,120 @@ describe('cognitive pipeline integration', () => {
       expect(second.executions[0]?.rejected).toBe(true)
       expect(second.executions[0]?.reason).toContain('预算已耗尽')
       expect(ctx.cognitivePipeline.store.explorationSnapshot().entries).toHaveLength(1)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('settles an accepted receipt and flows the execution outcome back into the loop calibration', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-delegate',
+        description: '该不该委派给子代理',
+        execution: [{
+          target: 'test.delegate-sink',
+          apply() {
+            return null
+          },
+        }],
+      })
+      const result = await ctx.cognitivePipeline.decideAndExecute('when-to-delegate', '委派任务A', '任务复杂', 0.5)
+      expect(result.approved).toBe(true)
+      const receiptId = result.executions[0]?.receiptId
+      expect(receiptId).toBeTruthy()
+
+      // The receipt is durable and starts unsettled.
+      expect(ctx.cognitivePipeline.store.getLoopExecution(receiptId!)?.status).toBeNull()
+
+      // Settlement marks the terminal outcome AND resolves the decision
+      // prediction through the same report path (执行结果回流).
+      const settled = await ctx.cognitivePipeline.settleExecution(receiptId!, '子代理完成，输出可用', 8)
+      expect(settled.receipt.status).toBe('executed')
+      expect(settled.receipt.settledAt).not.toBeNull()
+      expect(settled.receipt.outcomeText).toBe('子代理完成，输出可用')
+      const resolved = ctx.cognitivePipeline.store.getPrediction(result.decision.predictionId)
+      expect(resolved?.resolvedAt).not.toBeNull()
+      expect(resolved?.actualOutcome).toBe('子代理完成，输出可用')
+
+      // The loop's stats now carry the execution ledger.
+      const loop = ctx.cognitivePipeline.inspect().loops.find(item => item.name === 'when-to-delegate')
+      expect(loop?.executedCount).toBe(1)
+      expect(loop?.refusedCount).toBe(0)
+      expect(loop?.failedCount).toBe(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('settles a failed execution as feedback, and refuses to double-settle or settle a refused receipt', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const seen: string[] = []
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-delegate',
+        description: '该不该委派给子代理',
+        execution: [{
+          target: 'test.delegate-sink',
+          apply(request) {
+            // The sink's discipline: refuse dangerous delegations.
+            if (request.decision.includes('危险')) {
+              seen.push('refused')
+              return '危险操作不委派'
+            }
+            seen.push('accepted')
+            return null
+          },
+        }],
+      })
+
+      // A refused receipt is terminal by construction — settling it is an error.
+      const refused = await ctx.cognitivePipeline.decideAndExecute('when-to-delegate', '委派危险操作', '任务复杂', 0.5)
+      expect(refused.executions[0]?.rejected).toBe(true)
+      await expect(ctx.cognitivePipeline.settleExecution(refused.executions[0]!.receiptId, '未执行', 1))
+        .rejects.toThrow(/refused/)
+
+      // An accepted receipt can settle as failed; double-settlement is rejected.
+      const accepted = await ctx.cognitivePipeline.decideAndExecute('when-to-delegate', '委派任务B', '任务复杂', 0.5)
+      const receiptId = accepted.executions[0]!.receiptId
+      const failed = await ctx.cognitivePipeline.settleExecution(receiptId, '子代理崩溃', 2, 'failed')
+      expect(failed.receipt.status).toBe('failed')
+      await expect(ctx.cognitivePipeline.settleExecution(receiptId, '重复结算', 8))
+        .rejects.toThrow(/already settled/)
+      // Unknown receipts are loud errors, not silent no-ops.
+      await expect(ctx.cognitivePipeline.settleExecution('missing@test.delegate-sink', 'x', 5))
+        .rejects.toThrow(/not found/)
+
+      const loop = ctx.cognitivePipeline.inspect().loops.find(item => item.name === 'when-to-delegate')
+      expect(loop?.refusedCount).toBe(1)
+      expect(loop?.failedCount).toBe(1)
+      expect(loop?.executedCount).toBe(0)
+      expect(seen).toEqual(['refused', 'accepted'])
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('exposes the loop-execution audit chain through inspect', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-explore',
+        description: '该不该主动探索',
+        execution: [ctx.cognitivePipeline.createExplorationSink()],
+      })
+      // One accepted + one refused (irreversible) execution.
+      await ctx.cognitivePipeline.decideAndExecute('when-to-explore', '删除全部记录', '未知领域', 0.5)
+      const accepted = await ctx.cognitivePipeline.decideAndExecute('when-to-explore', '尝试新的检索策略', '未知领域', 0.5)
+      await ctx.cognitivePipeline.settleExecution(accepted.executions[0]!.receiptId, '探索完成', 7)
+
+      const insp = ctx.cognitivePipeline.inspect()
+      expect(insp.loopExecutions).toHaveLength(2)
+      // Newest first.
+      expect(insp.loopExecutions[0]?.status).toBe('executed')
+      expect(insp.loopExecutions[1]?.rejected).toBe(true)
+      // Every receipt links decision → execution with a stable id.
+      expect(insp.loopExecutions[0]?.receiptId).toBe(`${accepted.decision.predictionId}@hot-engine.explore-create`)
     } finally {
       await teardown()
     }

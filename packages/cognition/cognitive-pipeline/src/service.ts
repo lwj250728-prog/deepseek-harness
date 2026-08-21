@@ -30,6 +30,7 @@ import type {
   FeedbackInput,
   FeedbackResult,
   InspectResult,
+  LoopExecutionReceipt,
   LoopExecutionRequest,
   LoopExecutionSink,
   MetaLoopSpec,
@@ -380,20 +381,32 @@ export class CognitiveLoopRegistry {
   /**
    * Submit one decision as an execution request to the loop's sinks (only
    * when the decision approved and the loop declared sinks). Each sink
-   * applies its own discipline; a non-null return refuses that sink.
+   * applies its own discipline; a non-null return refuses that sink. Every
+   * attempt — accepted or refused — yields one durable receipt whose id
+   * (`<predictionId>@<target>`) links the decision to its execution outcome.
    * @param request - the decision to submit.
    * @returns one receipt per declared sink, in declaration order.
    */
-  async requestExecution(request: LoopExecutionRequest): Promise<readonly { target: string; rejected: boolean; reason: string | null }[]> {
+  async requestExecution(request: LoopExecutionRequest): Promise<readonly LoopExecutionReceipt[]> {
     const spec = this.loops.get(request.loopName)
     if (spec?.execution === undefined || !request.approved) return []
-    const receipts: { target: string; rejected: boolean; reason: string | null }[] = []
+    const receipts: LoopExecutionReceipt[] = []
     for (const sink of spec.execution) {
       const reason = await sink.apply(request)
       receipts.push({
+        receiptId: `${request.predictionId}@${sink.target}`,
+        loopName: request.loopName,
+        predictionId: request.predictionId,
         target: sink.target,
+        decision: request.decision,
+        situation: request.situation,
         rejected: reason !== null && reason !== undefined,
         reason: reason === undefined || reason === null ? null : reason,
+        createdAt: Date.now(),
+        status: null,
+        settledAt: null,
+        outcomeText: null,
+        outcomeQuality: null,
       })
     }
     return receipts
@@ -401,22 +414,30 @@ export class CognitiveLoopRegistry {
 
   /** Per-loop calibration statistics, aggregated from the prediction log.
    * @param predictions - the full prediction snapshot.
+   * @param executions - the full loop-execution receipt snapshot.
    * @returns one stats row per registered loop, in registration order.
    */
   stats(
     predictions: readonly { situation: string; resolvedAt: number | null; predictionError: number | null }[],
+    executions: readonly LoopExecutionReceipt[],
   ): readonly CognitiveLoopStats[] {
     return [...this.loops.values()].map((spec) => {
       const prefix = `loop:${spec.name} `
       const own = predictions.filter(prediction => prediction.situation.startsWith(prefix))
       const resolved = own.filter(prediction => prediction.resolvedAt !== null && prediction.predictionError !== null)
       const errorSum = resolved.reduce((sum, prediction) => sum + (prediction.predictionError ?? 0), 0)
+      const ownExecutions = executions.filter(execution => execution.loopName === spec.name)
       return {
         name: spec.name,
         description: spec.description,
         predictionCount: own.length,
         resolvedCount: resolved.length,
         avgPredictionError: resolved.length === 0 ? null : errorSum / resolved.length,
+        executedCount: ownExecutions
+          .filter(execution => !execution.rejected && execution.status === 'executed').length,
+        refusedCount: ownExecutions.filter(execution => execution.rejected).length,
+        failedCount: ownExecutions
+          .filter(execution => !execution.rejected && execution.status === 'failed').length,
       }
     })
   }
@@ -884,6 +905,9 @@ export class CognitivePipelineService extends Service {
       .filter(prediction => prediction.resolvedAt !== null)
       .sort((a, b) => (b.resolvedAt ?? 0) - (a.resolvedAt ?? 0))
       .slice(0, 10)
+    const loopExecutions = [...this.store.loopExecutionsSnapshot()]
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, 20)
     return {
       experienceCount: stats.experienceCount,
       predictionCount: stats.predictionCount,
@@ -894,7 +918,8 @@ export class CognitivePipelineService extends Service {
       calibrationBuckets: this.store.calibrationBucketsSnapshot(),
       channelWeights: this.store.channelWeightsSnapshot(),
       exploration: this.explorationStats(),
-      loops: this.loops.stats(this.store.predictionsSnapshot()),
+      loops: this.loops.stats(this.store.predictionsSnapshot(), this.store.loopExecutionsSnapshot()),
+      loopExecutions,
       taxonomy: this.store.taxonomySnapshot() ?? {
         version: 0,
         summaryShort: '（尚未完成首次重构）',
@@ -1058,13 +1083,16 @@ export class CognitivePipelineService extends Service {
   /**
    * Decide through a loop and — when the decision approves and the loop
    * declared execution sinks — submit the decision as an execution request
-   * to each sink. This is the closing of the loop: 意志决策，执行层按纪律受理.
+   * to each sink and persist one durable receipt per sink. This is the
+   * closing of the loop: 意志决策，执行层按纪律受理，回执可结算回流.
    * @param name - the registered loop name.
    * @param decision - what the loop is deciding (becomes the action text).
    * @param situation - the context the decision is made in.
    * @param threshold - approval threshold on calibrated probability (default 0.55).
    * @param call - optional session/signal context.
-   * @returns the decision result plus one execution receipt per declared sink.
+   * @returns the decision result plus one persisted execution receipt per
+   *   declared sink (id `<predictionId>@<target>`), which `settleExecution`
+   *   later resolves with the actual execution outcome.
    */
   async decideAndExecute(
     name: string,
@@ -1075,7 +1103,7 @@ export class CognitivePipelineService extends Service {
   ): Promise<{
     decision: PredictResult
     approved: boolean
-    executions: readonly { target: string; rejected: boolean; reason: string | null }[]
+    executions: readonly LoopExecutionReceipt[]
   }> {
     const decisionResult = await this.decideLoop(name, decision, situation, call)
     const approved = decisionResult.calibratedProbability >= threshold
@@ -1089,7 +1117,72 @@ export class CognitivePipelineService extends Service {
       confidenceHigh: decisionResult.confidenceHigh,
       predictionId: decisionResult.predictionId,
     })
+    for (const receipt of executions) {
+      this.store.addLoopExecution(receipt)
+    }
+    await this.store.flush()
     return { decision: decisionResult, approved, executions }
+  }
+
+  /**
+   * Settle one loop-execution receipt with its actual execution outcome. The
+   * receipt must exist and must have been accepted (refused receipts are
+   * terminal by construction — the sink declined, nothing executed). The
+   * outcome feeds back through the SAME report path as every prediction: it
+   * resolves the decision's prediction on the |calibrated − observed| ruler,
+   * so what the execution actually did calibrates the loop that requested it —
+   * 执行结果回流，意志与执行共用同一把尺子.
+   * @param receiptId - the receipt id (`<predictionId>@<target>`).
+   * @param outcomeText - what the execution actually produced.
+   * @param outcomeQuality - the outcome quality 0–10.
+   * @param status - the terminal outcome ('executed' or 'failed'; default executed).
+   * @param call - optional session/signal context.
+   * @returns the settled receipt and the feedback result.
+   */
+  async settleExecution(
+    receiptId: string,
+    outcomeText: string,
+    outcomeQuality: number,
+    status: 'executed' | 'failed' = 'executed',
+    call?: PipelineCallContext,
+  ): Promise<{ receipt: LoopExecutionReceipt; feedback: FeedbackResult }> {
+    const receipt = this.store.getLoopExecution(receiptId)
+    if (receipt === undefined) {
+      throw new CognitivePipelineError(
+        `cognitive-pipeline: execution receipt "${receiptId}" not found`,
+        'EXECUTION_RECEIPT_NOT_FOUND',
+      )
+    }
+    if (receipt.rejected) {
+      throw new CognitivePipelineError(
+        `cognitive-pipeline: receipt "${receiptId}" was refused by the sink and cannot be settled`,
+        'EXECUTION_RECEIPT_REFUSED',
+      )
+    }
+    if (receipt.settledAt !== null) {
+      throw new CognitivePipelineError(
+        `cognitive-pipeline: execution receipt "${receiptId}" is already settled`,
+        'EXECUTION_RECEIPT_ALREADY_SETTLED',
+      )
+    }
+    const settled = this.store.settleLoopExecution(receiptId, status, outcomeText, outcomeQuality)
+    if (settled === undefined) {
+      // The store returned undefined only when the receipt vanished mid-flight;
+      // the lookup above already established it exists, so this is unreachable.
+      throw new CognitivePipelineError(
+        `cognitive-pipeline: execution receipt "${receiptId}" disappeared during settlement`,
+        'EXECUTION_RECEIPT_NOT_FOUND',
+      )
+    }
+    // Execution outcome is feedback: resolve the decision prediction exactly
+    // like feedbackLoop would, so the loop learns from what actually happened.
+    const feedback = await this.report({
+      predictionId: receipt.predictionId,
+      actualOutcome: outcomeText,
+      outcomeQuality,
+    }, call)
+    await this.store.flush()
+    return { receipt: settled, feedback }
   }
 
   /** The dynamic cognition prefix for the system-prompt section.
