@@ -59,14 +59,14 @@
 
 #### What the model sees
 
-在符合条件的步骤，模型会收到一条额外的 `user/message` 参考块：
+在符合条件的步骤，模型会收到一条额外的 `user/message` 参考块，归属 `cognitive-inject` source，仅在命中超过阈值时注入（大多数步骤不产生额外 token）：
 
-```
+##### 参考块
+
+```markdown
 【认知经验参考】以下是与当前情境相关的历史经验，供参考借鉴（不要虚构为当前事实）：
 - [exp_8] (相关度 0.52) 深夜出现了一个会死循环的浮点 bug。紧急修复了该浮点 bug。测试全部恢复…
 ```
-
-块归属 `cognitive-inject` source，仅在命中超过阈值时注入，因此大多数步骤不产生额外 token。
 
 #### Token effect
 

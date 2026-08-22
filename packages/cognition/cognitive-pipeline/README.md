@@ -26,6 +26,8 @@ This package implements the DCA-PED design documents — `01-计划书.md` (tech
 - **冷环路 (cold loop)** — `rebuild_taxonomy`: decay-weighted sampling `W = e^(−λ·Δt)` of high-error experiences **plus proven successes** (utility score ≥ `successUtilityThreshold`), agglomerative clustering on **outcome utility vectors** (utility-first, not semantic), LLM causal anchoring with a hard ≥3-evidence constraint (backend-verified pairwise distance ≤ 0.85, hallucinated clusters rejected; the deterministic fallback groups pass the *same* evidence gate before write-back — a rejected cluster is never resurrected), and a sandbox backtest on the newest 20%. The reconstruction prompt anchors on **situation–strategy recurrence patterns**, so premise differentiation (e.g. the same action under a novice-teaching premise vs an expert-direct premise) **emerges from accumulation** without any hardcoded actor/environment fields — a pattern needs ≥3 in-sample instances to form its own cluster. The reconstruct route is stochastic, so a draw that yields nothing verified is retried up to `reconstructRetries` extra times. Acceptance measures the **continuous material-gain axis** — the taxonomy's predicted utility versus each experience's real gain (normalized to [0,1]) — aligning the acceptance metric with the pipeline's first-principle `|calibrated − observed|` error rather than a 0/1 polarity bucket. Acceptance has **two regimes**: a first build (no stored clusters) compares against the empty-view baseRate baseline and is accepted when it is not measured worse (`Δerr ≤ 0`), because the 15% margin is statistically meaningless on a young store's 2-3 sample validation slice and would block cold start; iteration keeps the `Δerr ≤ −0.15` bar against the existing taxonomy. When the labeled validation slice falls below `minValidationCount` the rebuild **defers** with a diagnosable reason instead of rejecting on merit. Experiences with a real material-gain label (resolved ones after feedback-backfill) participate in the denominator; unverified simulated experiences never enter the sample — only verified or provisional samples may shape clusters. Each accepted cluster carries a `success`/`risk` polarity and a **situation centroid derived from its evidence experiences** (not from every outcome-similar member, which would dilute premise-differentiated centroids into a mixture), and the taxonomy rules are annotated with it. Structured LLM template calls (SAR/OOD/calibration/reconstruction) explicitly request `reasoningEffort: off` — chain-of-thought would consume the small token budgets and starve the JSON answer.
 - **动态认知摘要** — an accepted rebuild compresses into a taxonomy summary injected into the session system prompt (附录B), so the model's hot-loop advice reflects what the pipeline has learned.
 - **跳转词 (trigger-jump lexicon)** — the associative layer over the injection trigger words: `learn_trigger_jumps` builds, from the experience store, words whose presence opens the injection gate even when no literal trigger is present (发版 → 发布). Co-occurrence jumps are deterministic — a token appearing with a trigger across ≥ `triggerJumpEvidenceMin` distinct important experiences becomes a jump toward it, normalized to [0.3, 1], capped per trigger and in total; with an explicit LLM route, template 9 additionally proposes synonym variants (卡住↔卡壳) that enter at zero evidence. Every jump carries its evidence, its measured utility (the citation loop: `recordInjection` at injection time and `settleInjectionCitations` at turn end fold "was the injected experience actually cited?" back into the jump's hit/cited ledger), and reinforcement on rebuild — jumps whose injections are cited are boosted, never-cited ones are pruned. In the gate, each jump's contribution is scaled by `triggerJumpWeightScale` (default 0.5), so a single weak jump never opens the gate alone.
+- **经验链 (goal-anchored chains)** — the fifth derived cognition object, and the first declarative instance of the **derived-object abstraction** (`CognitionObjectKind`: project/persist/measure/reinforce/expose — a new special-experience layer costs a declaration, and the generic `rebuild_cognition_object` driver serves every kind). `consolidate_chain` assembles a goal-anchored causal skeleton from chain-tagged experiences (`chainId`/`parentNodeId`/`sequence` on the experience): failure steps and cross-agent delegation nodes (receipts) stay structural, routine successes collapse into a bounded summary (memory organizes around surprises), and the chain-level citation rate (an injection of the chain is cited when the model references it) measures whether the whole goal execution was worth remembering. Chains are consolidated offline (at goal completion / agent idle — the consolidation analogue), gated by `chainMinMembers` evidence, persisted in `chains.json`, and rendered structurally via `chainExpose` for the injection path. Chains form a **goal tree**: a delegated sub-goal's chain hangs under the delegating chain (its root member references the parent's receipt), so `chainChildren`/`chainTreeExpose` expose the structure for goal-structured diffusion — a hit on the parent can walk down to sub-goal outcomes.
+- **链模式 (chain patterns)** — the sixth derived cognition object and the abstraction's first **recursive** consumer: patterns project from the chain table the way chains project from experiences. Chains sharing a structural signature (coarse goal domain + step polarity sequence, e.g. `发布:失败,失败,成功`) aggregate into a recurring goal-execution pattern (the TOPS analogue: from similar MOPs, extract the cross-situation thematic pattern), gated by `chainPatternMinMembers`, persisted in `chain_patterns.json`. Measured utility is aggregated from the member chains' citation stats through the same generic measure dispatch, so a pattern's cited rate retroactively measures whether the grouping was useful. Rebuild it with `rebuild_cognition_object('chain-pattern')`.
 
 ## Quick start
 
@@ -42,7 +44,7 @@ Compose the plugin (it is already wired into the `web` profile):
     provider: deepseek
     model: deepseek-v4-flash
 ```
-The model can then use the thirteen tools:
+The model can then use the fourteen tools:
 
 - `remember_experience` — encode a raw experience into SAR memory (utility fields are required; a partial extraction degrades to the fallback instead of a fake neutral score).
 - `simulate_experience` — generate a retrieval-only simulated experience via the LLM route when real testing is costly or impossible.
@@ -57,6 +59,8 @@ The model can then use the thirteen tools:
 - `update_acceptance_check` — rewrite an active criterion or retire it (retired criteria are frozen).
 - `propose_acceptance_update` — ask the LLM route to propose rewrites/retirements of demonstrably failing criteria and apply only the proposals that pass the experience gate (criteria self-amend from evidence).
 - `learn_trigger_jumps` — learn the trigger-jump lexicon from the experience store (co-occurrence + optional LLM synonym variants) and apply citation-rate reinforcement; call it after meaningful new experiences accumulate.
+- `consolidate_chain` — assemble one goal-anchored chain from its chain-tagged experiences into a causal skeleton (failure steps and delegation nodes structural, routine collapsed); call it when a tagged goal execution completes.
+- `rebuild_cognition_object` — drive any registered derived cognition object through its lifecycle generically (currently `chain` and `chain-pattern`); a new kind costs a declaration, this one driver serves every kind.
 
 ## Service API
 
@@ -86,9 +90,15 @@ ctx.cognitivePipeline.auditClaim({ claim, situation, evidence?, predictionId? })
 ctx.cognitivePipeline.updateAcceptanceCheck({ checkId, criterion?, evidenceHint?, retire? }) // → AcceptanceCheck
 ctx.cognitivePipeline.acceptanceChecks()                         // → readonly AcceptanceCheck[]
 ctx.cognitivePipeline.claimAudits(limit?)                        // → readonly ClaimAudit[]
+// chains + chain patterns
+ctx.cognitivePipeline.consolidateChain(chainId, goal?)           // → ChainExperience | null
+ctx.cognitivePipeline.chainExpose(chainId)                       // → string | null
+ctx.cognitivePipeline.chainChildren(chainId)                     // → readonly string[]
+ctx.cognitivePipeline.chainTreeExpose(chainId, depth?)           // → string | null
+ctx.cognitivePipeline.rebuildCognitionObject(name)               // → { kind, built, pruned }
 ```
 
-Every method accepts an optional `{ sessionId?, signal? }` call context used for LLM-assisted steps. All persisted state lives under `root` (`experiences.jsonl`, `predictions.jsonl`, `temp_strategies.jsonl`, `clusters.json`, `calibration.json`, `taxonomy.json`, `acceptance.json`, `claim_audits.jsonl`).
+Every method accepts an optional `{ sessionId?, signal? }` call context used for LLM-assisted steps. All persisted state lives under `root` (`experiences.jsonl`, `predictions.jsonl`, `temp_strategies.jsonl`, `clusters.json`, `calibration.json`, `taxonomy.json`, `acceptance.json`, `claim_audits.jsonl`, `chains.json`, `chain_patterns.json`).
 
 ## Configuration
 
@@ -141,6 +151,8 @@ All fields optional; engine defaults follow the design documents.
 | `triggerJumpCitationBoost` | `0.2` | Citation-rate boost added to a jump's weight during reinforcement |
 | `triggerJumpPruneRate` | `0.1` | Citation rate at/below which a measured jump is pruned |
 | `triggerJumpPruneHits` | `5` | Minimum hits before a jump is eligible for pruning |
+| `chainMinMembers` | `3` | Minimum distinct member experiences before a goal-anchored chain is consolidated |
+| `chainPatternMinMembers` | `2` | Minimum member chains before a structural chain pattern is projected |
 | `exploreDailyBudget` | `3` | Active-exploration daily budget (scheme 2): how many reversible novel scratchpad creations count as exploration per day |
 | `exploreRiskWords` | `['删除','清空','覆盖','发布','推送','rm','移除','迁移','重置','格式化']` | Irreversible-action markers; a novel attempt containing one is never counted as active exploration (safety gate) |
 | `exploreAutoDispatch` | `false` | Queue an autonomous exploration task (`exploration_tasks.json`) for each budgeted reversible novel attempt; a scheduler session picks it up and writes the outcome back as an experience (conservative default: queueing only when explicitly enabled) |
@@ -166,11 +178,11 @@ Failures are logged at `warn`; the pipeline never throws for model outages.
 
 ## Model Experience
 
-### The thirteen model-facing tools
+### The fourteen model-facing tools
 
 #### What the model sees
 
-`remember_experience`, `simulate_experience`, `reference_experience`, `predict_outcome`, `report_outcome`, `rebuild_taxonomy`, `inspect_memory`, `register_loop`, `define_acceptance_check`, `verify_claim`, `update_acceptance_check`, `propose_acceptance_update`, and `learn_trigger_jumps` register with the tool registry (`ctx.tools.register` + `defineTool`); their schemas flow into the system-prompt tool catalog automatically, each tool returns one canonical JSON value mirrored into model-facing text by `output.render`, and the tool descriptions defined in `src/tools.ts` are the only static prompt text this package owns (surfaced in the generated [tool catalog](../../../docs/tool-catalog.md)).
+`remember_experience`, `simulate_experience`, `reference_experience`, `predict_outcome`, `report_outcome`, `rebuild_taxonomy`, `inspect_memory`, `register_loop`, `define_acceptance_check`, `verify_claim`, `update_acceptance_check`, `propose_acceptance_update`, `learn_trigger_jumps`, `consolidate_chain`, and `rebuild_cognition_object` register with the tool registry (`ctx.tools.register` + `defineTool`); their schemas flow into the system-prompt tool catalog automatically, each tool returns one canonical JSON value mirrored into model-facing text by `output.render`, and the tool descriptions defined in `src/tools.ts` are the only static prompt text this package owns (surfaced in the generated [tool catalog](../../../docs/tool-catalog.md)).
 
 #### Token effect
 

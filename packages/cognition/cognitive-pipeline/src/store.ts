@@ -12,6 +12,8 @@ import type {
   AcceptanceCheck,
   CalibrationBucket,
   ChannelWeights,
+  ChainExperience,
+  ChainPattern,
   ClaimAudit,
   Cluster,
   Experience,
@@ -113,6 +115,8 @@ export class CognitiveStore {
   private claimAudits = new Map<string, ClaimAudit>()
   private triggerJumps = new Map<string, TriggerJump>()
   private injections = new Map<string, InjectionRecord>()
+  private chains = new Map<string, ChainExperience>()
+  private chainPatterns = new Map<string, ChainPattern>()
   private taxonomyState: TaxonomyState | null = null
   private nextExpSeq = 1
   private nextPredictionSeq = 1
@@ -139,7 +143,7 @@ export class CognitiveStore {
     const [
       experiences, predictions, tempStrategies, clusters, calibration,
       channelWeights, exploration, tasks, loopExecutions, acceptance,
-      claimAudits, triggerJumps, injections, taxonomy,
+      claimAudits, triggerJumps, injections, chains, chainPatterns, taxonomy,
     ] = await Promise.all([
       readFile(this.file('experiences.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('predictions.jsonl'), 'utf8').catch(() => ''),
@@ -154,13 +158,22 @@ export class CognitiveStore {
       readFile(this.file('claim_audits.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('trigger_jumps.json'), 'utf8').catch(() => ''),
       readFile(this.file('injections.jsonl'), 'utf8').catch(() => ''),
+      readFile(this.file('chains.json'), 'utf8').catch(() => ''),
+      readFile(this.file('chain_patterns.json'), 'utf8').catch(() => ''),
       readFile(this.file('taxonomy.json'), 'utf8').catch(() => ''),
     ])
     for (const record of parseLines(experiences)) {
       if (typeof record !== 'object' || record === null) continue
       const exp = record as Experience
       if (typeof exp.expId !== 'string') continue
-      this.experiences.set(exp.expId, exp)
+      // Chain-tag fields are optional on legacy rows; normalize missing values
+      // to explicit absences so chain assembly reads them cleanly.
+      this.experiences.set(exp.expId, {
+        ...exp,
+        ...typeof exp.chainId === 'string' ? { chainId: exp.chainId } : {},
+        ...typeof exp.parentNodeId === 'string' ? { parentNodeId: exp.parentNodeId } : {},
+        ...Number.isInteger(exp.sequence) ? { sequence: exp.sequence } : {},
+      })
       this.nextExpSeq = Math.max(this.nextExpSeq, expSeqOf(exp.expId) + 1)
     }
     for (const record of parseLines(predictions)) {
@@ -325,6 +338,33 @@ export class CognitiveStore {
       this.injections.set(injection.injectionId, injection)
       const seq = Number(injection.injectionId.replace('inject_', ''))
       if (Number.isFinite(seq)) this.nextInjectionSeq = Math.max(this.nextInjectionSeq, seq + 1)
+    }
+    if (chains !== '') {
+      const parsed = JSON.parse(chains) as unknown
+      if (Array.isArray(parsed)) {
+        for (const record of parsed) {
+          if (typeof record !== 'object' || record === null) continue
+          const chain = record as ChainExperience
+          if (typeof chain.chainId !== 'string' || chain.chainId.length === 0) continue
+          // Legacy rows predate the tree edges; normalize the required field.
+          const rawChain = record as { childChainIds?: readonly string[] }
+          this.chains.set(chain.chainId, {
+            ...chain,
+            childChainIds: rawChain.childChainIds === undefined ? [] : rawChain.childChainIds,
+          })
+        }
+      }
+    }
+    if (chainPatterns !== '') {
+      const parsed = JSON.parse(chainPatterns) as unknown
+      if (Array.isArray(parsed)) {
+        for (const record of parsed) {
+          if (typeof record !== 'object' || record === null) continue
+          const pattern = record as ChainPattern
+          if (typeof pattern.patternId !== 'string' || pattern.patternId.length === 0) continue
+          this.chainPatterns.set(pattern.patternId, pattern)
+        }
+      }
     }
     if (taxonomy !== '') {
       const parsed = JSON.parse(taxonomy) as unknown
@@ -1076,6 +1116,97 @@ export class CognitiveStore {
       changed = true
     }
     if (changed) this.enqueue('trigger_jumps.json', [...this.triggerJumps.values()])
+  }
+
+  // ── chains (the derived cognition object: goal-anchored causal skeletons) ──
+
+  /** Upsert one chain (keyed by chain id).
+   * @param chain - the chain to add or replace.
+   */
+  upsertChain(chain: ChainExperience): void {
+    this.chains.set(chain.chainId, chain)
+    this.enqueue('chains.json', [...this.chains.values()])
+  }
+
+  /** Read one chain by id.
+   * @param chainId - the chain id.
+   * @returns the chain, or undefined.
+   */
+  getChain(chainId: string): ChainExperience | undefined {
+    return this.chains.get(chainId)
+  }
+
+  /** Snapshot of every chain, insertion order. */
+  chainsSnapshot(): readonly ChainExperience[] {
+    return [...this.chains.values()]
+  }
+
+  /** Replace the whole chain table (a rebuild re-projects chains from tagged
+   * experiences; the service carries citation stats across the rebuild).
+   * @param chains - the new table.
+   */
+  replaceChains(chains: readonly ChainExperience[]): void {
+    this.chains = new Map(chains.map(chain => [chain.chainId, chain]))
+    this.enqueue('chains.json', [...this.chains.values()])
+  }
+
+  /** Fold one settled chain injection's citation outcome into the chain's
+   * measured-utility ledger (hitCount always, citedCount when cited).
+   * @param chainId - the chain that was injected.
+   * @param cited - whether the injection was cited.
+   */
+  foldChainCitation(chainId: string, cited: boolean): void {
+    const chain = this.chains.get(chainId)
+    if (chain === undefined) return
+    this.chains.set(chainId, {
+      ...chain,
+      hitCount: chain.hitCount + 1,
+      citedCount: chain.citedCount + (cited ? 1 : 0),
+      updatedAt: Date.now(),
+    })
+    this.enqueue('chains.json', [...this.chains.values()])
+  }
+
+  /** Read one chain pattern by id (its structural signature).
+   * @param patternId - the signature-based pattern id.
+   * @returns the pattern, or undefined.
+   */
+  getChainPattern(patternId: string): ChainPattern | undefined {
+    return this.chainPatterns.get(patternId)
+  }
+
+  /** Snapshot of every chain pattern, insertion order. */
+  chainPatternsSnapshot(): readonly ChainPattern[] {
+    return [...this.chainPatterns.values()]
+  }
+
+  /** Replace the whole chain-pattern table (a rebuild re-projects patterns
+   * from chains).
+   * @param patterns - the new table.
+   */
+  replaceChainPatterns(patterns: readonly ChainPattern[]): void {
+    this.chainPatterns = new Map(patterns.map(pattern => [pattern.patternId, pattern]))
+    this.enqueue('chain_patterns.json', [...this.chainPatterns.values()])
+  }
+
+  /** Recompute one pattern's measured utility from its member chains' current
+   * citation stats (called by the pattern kind's measure, so a chain citation
+   * settlement refreshes the pattern aggregate).
+   * @param patternId - the signature-based pattern id.
+   */
+  recomputeChainPatternStats(patternId: string): void {
+    const pattern = this.chainPatterns.get(patternId)
+    if (pattern === undefined) return
+    let hitCount = 0
+    let citedCount = 0
+    for (const chainId of pattern.chainIds) {
+      const chain = this.chains.get(chainId)
+      if (chain === undefined) continue
+      hitCount += chain.hitCount
+      citedCount += chain.citedCount
+    }
+    this.chainPatterns.set(patternId, { ...pattern, hitCount, citedCount, updatedAt: Date.now() })
+    this.enqueue('chain_patterns.json', [...this.chainPatterns.values()])
   }
 
   // ── clusters + taxonomy ──────────────────────────────────────────────────

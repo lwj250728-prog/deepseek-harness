@@ -206,11 +206,11 @@ describe('cognitive pipeline integration', () => {
   it('unregisters tools and the prompt section on dispose', async () => {
     const harness = await pipelineHarness()
     try {
-      for (const name of ['remember_experience', 'simulate_experience', 'reference_experience', 'predict_outcome', 'report_outcome', 'rebuild_taxonomy', 'inspect_memory', 'define_acceptance_check', 'verify_claim', 'update_acceptance_check', 'propose_acceptance_update', 'learn_trigger_jumps']) {
+      for (const name of ['remember_experience', 'simulate_experience', 'reference_experience', 'predict_outcome', 'report_outcome', 'rebuild_taxonomy', 'inspect_memory', 'define_acceptance_check', 'verify_claim', 'update_acceptance_check', 'propose_acceptance_update', 'learn_trigger_jumps', 'consolidate_chain', 'rebuild_cognition_object']) {
         expect(harness.ctx.tools.get(name)?.name).toBe(name)
       }
       await harness.fiber.dispose()
-      for (const name of ['remember_experience', 'simulate_experience', 'reference_experience', 'predict_outcome', 'report_outcome', 'rebuild_taxonomy', 'inspect_memory', 'define_acceptance_check', 'verify_claim', 'update_acceptance_check', 'propose_acceptance_update', 'learn_trigger_jumps']) {
+      for (const name of ['remember_experience', 'simulate_experience', 'reference_experience', 'predict_outcome', 'report_outcome', 'rebuild_taxonomy', 'inspect_memory', 'define_acceptance_check', 'verify_claim', 'update_acceptance_check', 'propose_acceptance_update', 'learn_trigger_jumps', 'consolidate_chain', 'rebuild_cognition_object']) {
         expect(harness.ctx.tools.get(name)).toBeUndefined()
       }
       const assembled = await harness.ctx.systemPrompt.assemble()

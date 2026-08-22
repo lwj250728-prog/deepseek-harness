@@ -93,6 +93,16 @@ export interface Experience {
    * experiences with a non-neutral utility join the cold-loop sample so the
    * pipeline can learn about its own failure modes. Absent on legacy rows. */
   readonly meta?: boolean
+  /** The goal-anchored chain this experience belongs to, when tagged by an
+   * orchestrator goal or a delegation. The chain consolidates tagged members
+   * into a causal skeleton. Absent on legacy rows. */
+  readonly chainId?: string
+  /** The chain node this experience derives from: the previous member
+   * experience id, or a delegation receipt id (`<predictionId>@<target>`)
+   * for a cross-agent node. Absent on legacy rows. */
+  readonly parentNodeId?: string
+  /** The chain-internal order of this node. Absent on legacy rows. */
+  readonly sequence?: number
 }
 
 /** One logged hot-loop prediction (the prediction log row). */
@@ -410,10 +420,87 @@ export interface InjectionRecord {
   readonly triggerSource: string
   /** The jump words (if any) that contributed to the trigger. */
   readonly jumpWords: readonly string[]
+  /** The chain (if any) whose structured steps were injected. */
+  readonly chainId: string | null
   /** The session the injection happened in, when known. */
   readonly sessionId: string | null
   /** Whether a later assistant message referenced an injected expId (null until settled). */
   readonly cited: boolean | null
+}
+
+/** One step of a consolidated chain: a scene in the goal-anchored sequence —
+ * the causal skeleton keeps failure steps and delegation nodes as structural
+ * steps and collapses routine successes into the summary (memory organizes
+ * around surprises, Schank). */
+export interface ChainStep {
+  /** The node this step derives from: a member experience id or a delegation receipt. */
+  readonly nodeId: string
+  /** The step's observable text (action/outcome of the scene). */
+  readonly text: string
+  readonly polarity: 'success' | 'failure'
+  readonly sequence: number
+}
+
+/** Lifecycle of one goal-anchored chain. */
+export type ChainStatus = 'active' | 'consolidated'
+
+/** A consolidated goal-anchored chain: the aggregated projection of the
+ * experiences tagged with one chainId, collapsed to its causal skeleton. This
+ * is the fifth derived cognition object — the pipeline calibrates whether the
+ * whole goal execution was worth remembering (chain-level citation rate), one
+ * level above single experiences and one below decision loops. */
+export interface ChainExperience {
+  readonly chainId: string
+  /** The goal that anchors the chain (the MOP goal, the binding glue). */
+  readonly goal: string
+  /** The session that anchored the chain, when known. */
+  readonly anchorSessionId: string | null
+  readonly status: ChainStatus
+  /** The causal skeleton: failure steps and delegation nodes; routine successes collapse. */
+  readonly steps: readonly ChainStep[]
+  /** Distinct member experiences backing the chain. */
+  readonly memberExpIds: readonly string[]
+  /** Cross-agent delegation nodes included in the chain. */
+  readonly delegationNodeIds: readonly string[]
+  /** Child chains (delegated sub-goals): chains whose root node derives from
+   * one of this chain's delegation receipts. The tree edge that enables
+   * goal-structured diffusion — a hit on this chain can surface its
+   * sub-goal outcomes. */
+  readonly childChainIds: readonly string[]
+  /** Collapsed routine: how many success scenes were summarized. */
+  readonly collapsedCount: number
+  /** The bounded summary of the collapsed routine. */
+  readonly summary: string
+  /** Times this chain was injected. */
+  readonly hitCount: number
+  /** Times an injection of this chain was cited by the model. */
+  readonly citedCount: number
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
+/** One recurring goal-execution pattern: chains with the same structural
+ * signature, aggregated from the chain table — the sixth derived cognition
+ * object (the abstraction's first recursive consumer: patterns project from
+ * chains the way chains project from experiences). The TOPS analogue: from
+ * similar MOPs, extract the cross-situation thematic pattern. */
+export interface ChainPattern {
+  /** Stable identity: the structural signature (coarse goal domain + polarity
+   * sequence), so a rebuild with the same signature keeps the same id. */
+  readonly patternId: string
+  /** The structural signature, e.g. `发布:失败,失败,成功`. */
+  readonly signature: string
+  /** The member chains. */
+  readonly chainIds: readonly string[]
+  /** The shared causal skeleton (union of member skeletons, bounded). */
+  readonly skeleton: readonly ChainStep[]
+  /** The modal goal prefix of the member chains. */
+  readonly goalDomain: string
+  /** Aggregated measured utility: sum of member chains' hit/cited counts. */
+  readonly hitCount: number
+  readonly citedCount: number
+  readonly createdAt: number
+  readonly updatedAt: number
 }
 
 /** The compressed cognitive-framework summary injected into the hot loop. */

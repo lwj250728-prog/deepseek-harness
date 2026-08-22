@@ -35,6 +35,7 @@ import type {
   AcceptanceCheck,
   AcceptanceProposal,
   CalibrationBucket,
+  ChainExperience,
   ClaimAnchor,
   ClaimAudit,
   Cluster,
@@ -70,6 +71,13 @@ import {
   emptyJumpAccumulator,
   importanceOf,
 } from './triggers.ts'
+import {
+  ChainObjectKind,
+  ChainPatternObjectKind,
+  assembleChain,
+  childChainIdsOf,
+} from './cognition-objects.ts'
+import type { CognitionObjectKind } from './cognition-objects.ts'
 
 /** Meta-experience deduplication: skip recording a routing-failure when an
  * action-vector-identical meta experience already exists (default 0.8). */
@@ -186,6 +194,12 @@ export interface CognitivePipelineConfig {
   triggerJumpPruneRate?: number
   /** Minimum hits before a jump is eligible for pruning (default 5). */
   triggerJumpPruneHits?: number
+  /** Minimum distinct member experiences before a goal-anchored chain is
+   * consolidated (default 3). */
+  chainMinMembers?: number
+  /** Minimum member chains before a structural chain pattern is projected
+   * (default 2). */
+  chainPatternMinMembers?: number
   /** Cold-loop max sample ratio of the population (default 0.15). */
   maxSampleRatio?: number
   /** Evidence hard-constraint minimum count (default 3). */
@@ -257,6 +271,10 @@ export interface ResolvedCognitivePipelineConfig {
   readonly triggerJumpPruneRate: number
   /** Minimum hits before a jump is eligible for pruning. */
   readonly triggerJumpPruneHits: number
+  /** Minimum distinct member experiences before a chain is consolidated. */
+  readonly chainMinMembers: number
+  /** Minimum member chains before a structural chain pattern is projected. */
+  readonly chainPatternMinMembers: number
   /** Real-embedding configuration, or null when the seam is disabled. */
   readonly embedding: ResolvedEmbeddingConfig | null
   /** Active-exploration budget (scheme 2). */
@@ -318,6 +336,8 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   triggerJumpCitationBoost: z.number().min(0).max(1).default(0.2),
   triggerJumpPruneRate: z.number().min(0).max(1).default(0.1),
   triggerJumpPruneHits: z.number().step(1).min(1).default(5),
+  chainMinMembers: z.number().step(1).min(1).default(3),
+  chainPatternMinMembers: z.number().step(1).min(1).default(2),
   maxSampleRatio: z.number().min(0.01).max(1).default(0.15),
   evidenceMinCount: z.number().step(1).min(1).default(3),
   evidenceMaxDistance: z.number().min(0).max(1).default(0.85),
@@ -400,6 +420,8 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
     triggerJumpCitationBoost: config.triggerJumpCitationBoost ?? 0.2,
     triggerJumpPruneRate: config.triggerJumpPruneRate ?? 0.1,
     triggerJumpPruneHits: config.triggerJumpPruneHits ?? 5,
+    chainMinMembers: config.chainMinMembers ?? 3,
+    chainPatternMinMembers: config.chainPatternMinMembers ?? 2,
     embedding: config.embedding === undefined
       ? null
       : Object.freeze({
@@ -564,6 +586,9 @@ export class CognitivePipelineService extends Service {
   /** Meta-cognition loop registry (the "造新环路" surface). */
   readonly loops: CognitiveLoopRegistry
 
+  /** Derived cognition objects (the special-experience layer registry). */
+  private readonly objectKinds = new Map<string, CognitionObjectKind<unknown>>()
+
   private readonly readinessPromise: Promise<void>
 
   constructor(ctx: Context, config: CognitivePipelineConfig = {}) {
@@ -576,6 +601,11 @@ export class CognitivePipelineService extends Service {
     this.hot = new HotEngine(ctx, this.store, this.resolved.hot, this.resolved.route, undefined, this.embedder)
     this.cold = new ColdEngine(ctx, this.store, this.resolved.cold, this.resolved.route)
     this.loops = new CognitiveLoopRegistry()
+    // The chain and chain-pattern kinds are the first declarative derived
+    // objects; the generic driver (rebuildCognitionObject) and the registry
+    // serve them and any kind a consumer registers afterwards.
+    this.registerCognitionObject(new ChainObjectKind())
+    this.registerCognitionObject(new ChainPatternObjectKind())
     this.readinessPromise = this.store.load().catch((error: unknown) => {
       this.ctx.logger.warn(`cognitive-pipeline: store load failed, continuing in-memory: ${String(error)}`)
     })
@@ -1791,6 +1821,7 @@ export class CognitivePipelineService extends Service {
     triggerSource: string
     sessionId?: string | null
     jumpWords?: readonly string[]
+    chainId?: string | null
   }): InjectionRecord {
     const record: InjectionRecord = {
       injectionId: this.store.nextInjectionId(),
@@ -1798,6 +1829,7 @@ export class CognitivePipelineService extends Service {
       expIds: [...input.expIds],
       triggerSource: input.triggerSource,
       jumpWords: [...(input.jumpWords ?? [])],
+      chainId: input.chainId ?? null,
       sessionId: input.sessionId ?? null,
       cited: null,
     }
@@ -1810,8 +1842,9 @@ export class CognitivePipelineService extends Service {
    * assistant text: an injection is cited when the text references any of its
    * expIds, otherwise not. Each settled outcome folds into the contributing
    * jump words' hit/cited ledger — the measured utility that the next
-   * {@link learnTriggerJumps} reinforcement uses. Flushes the pending writes
-   * so the settlement is durable.
+   * {@link learnTriggerJumps} reinforcement uses — and into the chain's
+   * citation ledger when the injection carried a chain. Flushes the pending
+   * writes so the settlement is durable.
    * @param sessionId - the session whose injections to settle.
    * @param turnText - the turn's assistant/outcome text.
    * @returns how many injections were settled and how many were cited.
@@ -1823,13 +1856,185 @@ export class CognitivePipelineService extends Service {
     let cited = 0
     for (const record of pending) {
       const mentioned = record.expIds.some(expId => turnText.includes(expId))
+        || (record.chainId !== null && turnText.includes(record.chainId))
       this.store.settleInjection(record.injectionId, mentioned)
       this.store.foldJumpCitation(record.jumpWords, mentioned)
+      if (record.chainId !== null) {
+        // Fold the chain citation through the object framework: the chain
+        // kind records it, and the chain-pattern kind re-aggregates every
+        // pattern the chain belongs to (the pattern's measure step).
+        this.foldObjectFeedback('chain', record.chainId, mentioned)
+        this.foldObjectFeedback('chain-pattern', record.chainId, mentioned)
+      }
       settled += 1
       if (mentioned) cited += 1
     }
     await this.store.flush()
     return { settled, cited }
+  }
+
+  /**
+   * Fold one piece of feedback into a registered object kind's measured
+   * ruler, through the kind's own measure step (the generic feedback
+   * dispatch behind the derived-object lifecycle).
+   * @param name - the registered kind name.
+   * @param objectId - the feedback subject (e.g. a chain id).
+   * @param feedback - the kind-specific feedback payload.
+   */
+  private foldObjectFeedback(name: string, objectId: string, feedback: unknown): void {
+    const kind = this.objectKinds.get(name)
+    if (kind === undefined) return
+    kind.measure(this.store, objectId, feedback)
+  }
+
+  // ── derived cognition objects ─────────────────────────────────────────────
+
+  /**
+   * Register a derived cognition object kind: a declaration of one
+   * special-experience layer (project/persist/measure/reinforce/expose) that
+   * the generic driver can rebuild. Re-registering the same name replaces the
+   * kind.
+   * @param kind - the kind to register.
+   * @returns the service, for chaining.
+   */
+  registerCognitionObject<T>(kind: CognitionObjectKind<T>): this {
+    if (kind.name.trim().length === 0) {
+      throw new CognitivePipelineError('cognitive-pipeline: object kind name must not be empty', 'EMPTY_OBJECT_KIND')
+    }
+    this.objectKinds.set(kind.name, kind)
+    return this
+  }
+
+  /** Registered derived cognition object kinds, in registration order.
+   * @returns the kind metadata.
+   */
+  cognitionObjects(): readonly { name: string; description: string }[] {
+    return [...this.objectKinds.values()].map(kind => ({ name: kind.name, description: kind.description }))
+  }
+
+  /**
+   * Drive one derived cognition object through its lifecycle: project the
+   * store into a candidate build, reinforce (carry measured stats, apply the
+   * kind's gates), and persist. This is the declarative payoff — a new object
+   * kind costs a declaration, and this one driver serves every kind.
+   * @param name - the registered kind name.
+   * @returns the build summary.
+   */
+  async rebuildCognitionObject(name: string): Promise<{ kind: string; built: number; pruned: number }> {
+    const kind = this.objectKinds.get(name)
+    if (kind === undefined) {
+      throw new CognitivePipelineError(
+        `cognitive-pipeline: cognition object kind "${name}" is not registered`,
+        'COGNITION_OBJECT_NOT_FOUND',
+      )
+    }
+    const build = await kind.project(this.store, this.resolved)
+    const reinforced = kind.reinforce(this.store, this.resolved, build)
+    kind.persist(this.store, reinforced)
+    await this.store.flush()
+    return { kind: name, built: reinforced.length, pruned: build.length - reinforced.length }
+  }
+
+  /**
+   * Consolidate one goal-anchored chain from its tagged experiences: assemble
+   * the causal skeleton (failure steps and delegation nodes structural,
+   * routine successes collapsed), carry the previous chain's citation stats,
+   * and persist. This is the offline-consolidation analogue: atoms accumulate
+   * online, chains form when consolidated.
+   * @param chainId - the goal trace id.
+   * @param goal - the goal anchoring the chain; falls back to the previous
+   *   chain's goal or the first member's situation.
+   * @returns the consolidated chain, or null when the evidence gate
+   *   (`chainMinMembers`) is not met.
+   */
+  async consolidateChain(chainId: string, goal?: string): Promise<ChainExperience | null> {
+    const members = this.store.experiencesSnapshot().filter(exp => exp.chainId === chainId)
+    if (members.length < this.resolved.chainMinMembers) return null
+    const previous = this.store.getChain(chainId)
+    const first = members[0]
+    const chain = assembleChain(
+      chainId,
+      goal?.trim() || previous?.goal || (first === undefined ? chainId : first.sar.situation.slice(0, 80)),
+      previous?.anchorSessionId ?? null,
+      members,
+      previous,
+      Date.now(),
+    )
+    // Tree edges are derived at consolidation, same as the offline projection:
+    // the delegated sub-goal chains become this chain's children.
+    const withChildren = { ...chain, childChainIds: childChainIdsOf(chain, this.store.experiencesSnapshot()) }
+    this.store.upsertChain(withChildren)
+    await this.store.flush()
+    return withChildren
+  }
+
+  /** All chains (public for inspection and consumers).
+   * @returns a detached chain list, insertion order.
+   */
+  chains(): readonly ChainExperience[] {
+    return this.store.chainsSnapshot()
+  }
+
+  /**
+   * Render one chain as structured, model-visible steps — the causal skeleton
+   * the injection path would present (goal anchor, failure steps marked, the
+   * routine summary collapsed).
+   * @param chainId - the chain to render.
+   * @returns the structured text, or null when the chain is unknown.
+   */
+  chainExpose(chainId: string): string | null {
+    const chain = this.store.getChain(chainId)
+    if (chain === undefined) return null
+    const lines = chain.steps.map(step =>
+      `  ${step.sequence + 1}. ${step.text}${step.polarity === 'failure' ? '（失败→回退）' : ''}`)
+    return [
+      `【经验链 ${chain.chainId}】目标：${chain.goal}`,
+      ...lines,
+      ...(chain.summary.length > 0 ? [`  摘要（例行 ${chain.collapsedCount} 步坍缩）：${chain.summary}`] : []),
+    ].join('\n')
+  }
+
+  /**
+   * The child chains of one chain (tree edges derived at consolidation: a
+   * delegated sub-goal's chain hangs under the delegating chain's receipt).
+   * @param chainId - the parent chain.
+   * @returns the child chain ids, or [] when the chain is unknown.
+   */
+  chainChildren(chainId: string): readonly string[] {
+    const chain = this.store.getChain(chainId)
+    return chain === undefined ? [] : chain.childChainIds
+  }
+
+  /**
+   * Render one chain and its goal-structure subtree as structured,
+   * model-visible text: each node's causal skeleton, children indented. This
+   * is the goal-structured-diffusion surface — a hit on the parent can walk
+   * down to sub-goal outcomes.
+   * @param chainId - the root chain.
+   * @param depth - how many levels below the root to include (default 3).
+   * @returns the tree text, or null when the root chain is unknown.
+   */
+  chainTreeExpose(chainId: string, depth: number = 3): string | null {
+    const root = this.store.getChain(chainId)
+    if (root === undefined) return null
+    const lines: string[] = []
+    const walk = (chain: ChainExperience, level: number): void => {
+      const indent = '  '.repeat(level)
+      lines.push(`${indent}【经验链 ${chain.chainId}】目标：${chain.goal}`)
+      for (const step of chain.steps) {
+        lines.push(`${indent}  ${step.sequence + 1}. ${step.text}${step.polarity === 'failure' ? '（失败→回退）' : ''}`)
+      }
+      if (chain.summary.length > 0) {
+        lines.push(`${indent}  摘要（例行 ${chain.collapsedCount} 步坍缩）：${chain.summary}`)
+      }
+      if (level >= depth) return
+      for (const childId of chain.childChainIds) {
+        const child = this.store.getChain(childId)
+        if (child !== undefined) walk(child, level + 1)
+      }
+    }
+    walk(root, 0)
+    return lines.join('\n')
   }
 
   /** Recent claim audits (public for inspection).

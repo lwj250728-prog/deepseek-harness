@@ -57,7 +57,7 @@ describe('cognitive-pipeline Loader wiring', () => {
       await ctx.loader.create({ name: 'cordis:include', config: { path: pathToFileURL(configPath).href } })
       await ctx.loader.await()
       try {
-        for (const name of ['remember_experience', 'simulate_experience', 'predict_outcome', 'report_outcome', 'rebuild_taxonomy', 'inspect_memory', 'define_acceptance_check', 'verify_claim', 'update_acceptance_check', 'propose_acceptance_update', 'learn_trigger_jumps']) {
+        for (const name of ['remember_experience', 'simulate_experience', 'predict_outcome', 'report_outcome', 'rebuild_taxonomy', 'inspect_memory', 'define_acceptance_check', 'verify_claim', 'update_acceptance_check', 'propose_acceptance_update', 'learn_trigger_jumps', 'consolidate_chain', 'rebuild_cognition_object']) {
           expect(ctx.tools.get(name)?.name).toBe(name)
         }
         expect(ctx.cognitivePipeline).toBeDefined()

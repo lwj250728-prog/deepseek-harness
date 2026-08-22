@@ -59,14 +59,14 @@ All fields optional; defaults are conservative to avoid context noise.
 
 #### What the model sees
 
-At an eligible step the model receives one additional `user/message` reference block:
+At an eligible step the model receives one additional `user/message` reference block, source-attributed to `cognitive-inject` and injected only when a hit clears the threshold (most steps carry no extra tokens):
 
-```
+##### Reference block
+
+```markdown
 【认知经验参考】以下是与当前情境相关的历史经验，供参考借鉴（不要虚构为当前事实）：
 - [exp_8] (相关度 0.52) 深夜出现了一个会死循环的浮点 bug。紧急修复了该浮点 bug。测试全部恢复…
 ```
-
-The block is source-attributed to `cognitive-inject` and injected only when a hit clears the threshold, so most steps carry no extra tokens.
 
 #### Token effect
 

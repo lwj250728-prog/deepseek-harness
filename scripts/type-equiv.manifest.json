@@ -2037,6 +2037,26 @@
     },
     {
       "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "ChainExperience",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "ChainPattern",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "ChainStep",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "CognitionObjectKind",
+      "source": "packages/cognition/cognitive-pipeline/src/cognition-objects.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
       "symbol": "TurnEpisode",
       "source": "packages/cognition/cognitive-pipeline/src/types.ts"
     },

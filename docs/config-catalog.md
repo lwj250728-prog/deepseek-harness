@@ -489,7 +489,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/context/cognitive-inject/src/index.ts:35`](../packages/context/cognitive-inject/src/index.ts)
+Source: [`packages/context/cognitive-inject/src/index.ts:49`](../packages/context/cognitive-inject/src/index.ts)
 
 <a id="deepseek-aidsh-cognitive-orchestration"></a>
 
@@ -636,6 +636,36 @@ export interface CognitivePipelineConfig {
   /** Violation ratio (violated/invoked) at/above which an applied criterion
    * flags rework on an audit (default 0.5). */
   acceptanceDeviationThreshold?: number
+  /** Whether `verify_claim` command anchors may actually run the supplied
+   * command and settle on its exit code. A model-supplied command is a
+   * real execution surface, so this is OFF by default (default false). */
+  acceptanceCommandExecution?: boolean
+  /** Hard timeout for one command anchor, in milliseconds (default 30000);
+   * a command that does not settle fails closed. */
+  acceptanceCommandTimeoutMs?: number
+  /** Minimum distinct experiences backing a co-occurrence trigger jump before
+   * it enters the lexicon (default 3). */
+  triggerJumpEvidenceMin?: number
+  /** How many jumps one trigger word may keep (default 20). */
+  triggerJumpMaxPerTrigger?: number
+  /** Total cap on the jump table (default 400); the lowest-weight jumps drop. */
+  triggerJumpTotalCap?: number
+  /** Gate-time scaling of a jump's contribution to the trigger score; a single
+   * jump never opens the gate alone when `scale × 1 < 0.6` (default 0.5). */
+  triggerJumpWeightScale?: number
+  /** Citation-rate boost added to a jump's weight during reinforcement
+   * (default 0.2). */
+  triggerJumpCitationBoost?: number
+  /** Citation rate at/below which a measured jump is pruned (default 0.1). */
+  triggerJumpPruneRate?: number
+  /** Minimum hits before a jump is eligible for pruning (default 5). */
+  triggerJumpPruneHits?: number
+  /** Minimum distinct member experiences before a goal-anchored chain is
+   * consolidated (default 3). */
+  chainMinMembers?: number
+  /** Minimum member chains before a structural chain pattern is projected
+   * (default 2). */
+  chainPatternMinMembers?: number
   /** Cold-loop max sample ratio of the population (default 0.15). */
   maxSampleRatio?: number
   /** Evidence hard-constraint minimum count (default 3). */
@@ -671,7 +701,7 @@ export interface CognitivePipelineConfig {
 }
 ```
 
-Source: [`packages/cognition/cognitive-pipeline/src/service.ts:61`](../packages/cognition/cognitive-pipeline/src/service.ts)
+Source: [`packages/cognition/cognitive-pipeline/src/service.ts:91`](../packages/cognition/cognitive-pipeline/src/service.ts)
 
 <a id="deepseek-aidsh-compaction-basic"></a>
 

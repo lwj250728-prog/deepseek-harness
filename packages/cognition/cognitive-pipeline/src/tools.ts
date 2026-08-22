@@ -28,7 +28,7 @@ function renderJson(_args: unknown, value: unknown): { type: 'text'; text: strin
   return [{ type: 'text', text: JSON.stringify(value) }]
 }
 
-/** Register the thirteen pipeline tools.
+/** Register the fourteen pipeline tools.
  * @param ctx - context with the tool registry.
  * @param service - the pipeline service backing the tools.
  */
@@ -1197,5 +1197,97 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
       }
     },
     presentCall: () => ({ card: 'generic', title: 'Learn trigger jumps', kind: 'read' }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'consolidate_chain',
+    description: 'Consolidate one goal-anchored chain from its tagged experiences: assemble the causal skeleton '
+      + '(failure steps and cross-agent delegation nodes kept as structural steps, routine successes collapsed '
+      + 'into a bounded summary), carry the previous chain\'s citation stats, and persist. This is the '
+      + 'offline-consolidation analogue — atoms accumulate online, chains form when consolidated. Requires at '
+      + 'least chainMinMembers tagged experiences (evidence gate); returns the structured chain or a '
+      + 'not-ready marker. Call it when a goal execution that was tagged with a chainId completes.',
+    parameters: {
+      chain_id: {
+        type: 'string',
+        required: true,
+        description: 'The goal trace id (chainId) the experiences were tagged with.',
+      },
+      goal: {
+        type: 'string',
+        description: 'The goal anchoring the chain; falls back to the previous chain\'s goal or the first '
+          + 'member\'s situation.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          chain_id: { type: 'string', required: true },
+          status: { type: 'string', required: true, enum: ['consolidated', 'not-ready'] },
+          member_count: { type: 'number', required: true },
+          step_count: { type: 'number', required: true },
+          delegation_count: { type: 'number', required: true },
+          summary: { type: 'string', required: true },
+        },
+      },
+      render: renderJson,
+    },
+    async execute(args) {
+      const chain = await service.consolidateChain(args.chain_id, args.goal)
+      if (chain === null) {
+        return {
+          chain_id: args.chain_id,
+          status: 'not-ready' as const,
+          member_count: 0,
+          step_count: 0,
+          delegation_count: 0,
+          summary: '',
+        }
+      }
+      return {
+        chain_id: chain.chainId,
+        status: 'consolidated' as const,
+        member_count: chain.memberExpIds.length,
+        step_count: chain.steps.length,
+        delegation_count: chain.delegationNodeIds.length,
+        summary: chain.summary,
+      }
+    },
+    presentCall: args => ({ card: 'generic', title: `Consolidate chain ${args.chain_id}`, kind: 'other' }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'rebuild_cognition_object',
+    description: 'Drive one derived cognition object through its lifecycle generically: project the experience '
+      + 'store into the kind\'s candidate build, reinforce (carry measured stats, apply the kind\'s evidence '
+      + 'gate), and persist. Registered kinds include "chain" (goal-anchored causal skeletons). This is the '
+      + 'declarative payoff of the derived-object abstraction: a new kind costs a declaration, and this one '
+      + 'driver serves every kind. Call it after meaningful tagged experiences accumulate.',
+    parameters: {
+      kind: {
+        type: 'string',
+        required: true,
+        description: 'The registered object kind name, e.g. "chain".',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          kind: { type: 'string', required: true },
+          built: { type: 'number', required: true },
+          pruned: { type: 'number', required: true },
+        },
+      },
+      render: renderJson,
+    },
+    async execute(args) {
+      const result = await service.rebuildCognitionObject(args.kind)
+      return { kind: result.kind, built: result.built, pruned: result.pruned }
+    },
+    presentCall: args => ({ card: 'generic', title: `Rebuild cognition object ${args.kind}`, kind: 'read' }),
   }))
 }

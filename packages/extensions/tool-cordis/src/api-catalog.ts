@@ -651,16 +651,64 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'a detached jump list, insertion order.',
       },
       {
-        signature: 'recordInjection(input: { expIds: readonly string[] triggerSource: string sessionId?: string | null jumpWords?: readonly string[] }): InjectionRecord',
+        signature: 'recordInjection(input: { expIds: readonly string[] triggerSource: string sessionId?: string | null jumpWords?: readonly string[] chainId?: string | null }): InjectionRecord',
         description: 'Record one injection event for citation-rate measurement. The inject plugin calls this after folding the reference block into the step; the jump words that contributed to the trigger are carried so their measured utility can be folded when the citation settles.',
         parameters: [{ name: 'input', description: 'the injected expIds, the fired trigger source, the contributing jump words, and the session id when known.' }],
         returns: 'the recorded injection.',
       },
       {
         signature: 'async settleInjectionCitations(sessionId: string, turnText: string): Promise<{ settled: number; cited: number }>',
-        description: 'Settle every unresolved injection of one session against the turn\'s assistant text: an injection is cited when the text references any of its expIds, otherwise not. Each settled outcome folds into the contributing jump words\' hit/cited ledger — the measured utility that the next learnTriggerJumps reinforcement uses. Flushes the pending writes so the settlement is durable.',
+        description: 'Settle every unresolved injection of one session against the turn\'s assistant text: an injection is cited when the text references any of its expIds, otherwise not. Each settled outcome folds into the contributing jump words\' hit/cited ledger — the measured utility that the next learnTriggerJumps reinforcement uses — and into the chain\'s citation ledger when the injection carried a chain. Flushes the pending writes so the settlement is durable.',
         parameters: [{ name: 'sessionId', description: 'the session whose injections to settle.' }, { name: 'turnText', description: 'the turn\'s assistant/outcome text.' }],
         returns: 'how many injections were settled and how many were cited.',
+      },
+      {
+        signature: 'registerCognitionObject<T>(kind: CognitionObjectKind<T>): this',
+        description: 'Register a derived cognition object kind: a declaration of one special-experience layer (project/persist/measure/reinforce/expose) that the generic driver can rebuild. Re-registering the same name replaces the kind.',
+        parameters: [{ name: 'kind', description: 'the kind to register.' }],
+        returns: 'the service, for chaining.',
+      },
+      {
+        signature: 'cognitionObjects(): readonly { name: string; description: string }[]',
+        description: 'Registered derived cognition object kinds, in registration order.',
+        parameters: [],
+        returns: 'the kind metadata.',
+      },
+      {
+        signature: 'async rebuildCognitionObject(name: string): Promise<{ kind: string; built: number; pruned: number }>',
+        description: 'Drive one derived cognition object through its lifecycle: project the store into a candidate build, reinforce (carry measured stats, apply the kind\'s gates), and persist. This is the declarative payoff — a new object kind costs a declaration, and this one driver serves every kind.',
+        parameters: [{ name: 'name', description: 'the registered kind name.' }],
+        returns: 'the build summary.',
+      },
+      {
+        signature: 'async consolidateChain(chainId: string, goal?: string): Promise<ChainExperience | null>',
+        description: 'Consolidate one goal-anchored chain from its tagged experiences: assemble the causal skeleton (failure steps and delegation nodes structural, routine successes collapsed), carry the previous chain\'s citation stats, and persist. This is the offline-consolidation analogue: atoms accumulate online, chains form when consolidated.',
+        parameters: [{ name: 'chainId', description: 'the goal trace id.' }, { name: 'goal', description: 'the goal anchoring the chain; falls back to the previous chain\'s goal or the first member\'s situation.' }],
+        returns: 'the consolidated chain, or null when the evidence gate (`chainMinMembers`) is not met.',
+      },
+      {
+        signature: 'chains(): readonly ChainExperience[]',
+        description: 'All chains (public for inspection and consumers).',
+        parameters: [],
+        returns: 'a detached chain list, insertion order.',
+      },
+      {
+        signature: 'chainExpose(chainId: string): string | null',
+        description: 'Render one chain as structured, model-visible steps — the causal skeleton the injection path would present (goal anchor, failure steps marked, the routine summary collapsed).',
+        parameters: [{ name: 'chainId', description: 'the chain to render.' }],
+        returns: 'the structured text, or null when the chain is unknown.',
+      },
+      {
+        signature: 'chainChildren(chainId: string): readonly string[]',
+        description: 'The child chains of one chain (tree edges derived at consolidation: a delegated sub-goal\'s chain hangs under the delegating chain\'s receipt).',
+        parameters: [{ name: 'chainId', description: 'the parent chain.' }],
+        returns: 'the child chain ids, or [] when the chain is unknown.',
+      },
+      {
+        signature: 'chainTreeExpose(chainId: string, depth: number = 3): string | null',
+        description: 'Render one chain and its goal-structure subtree as structured, model-visible text: each node\'s causal skeleton, children indented. This is the goal-structured-diffusion surface — a hit on the parent can walk down to sub-goal outcomes.',
+        parameters: [{ name: 'chainId', description: 'the root chain.' }, { name: 'depth', description: 'how many levels below the root to include (default 3).' }],
+        returns: 'the tree text, or null when the root chain is unknown.',
       },
       {
         signature: 'claimAudits(limit: number = 10): readonly ClaimAudit[]',
@@ -3010,6 +3058,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface CancelOptions {\n    keepInbox?: boolean | undefined;\n}',
   },
   {
+    name: 'ChainExperience',
+    declaration: 'export interface ChainExperience {\n    readonly chainId: string;\n    readonly goal: string;\n    readonly anchorSessionId: string | null;\n    readonly status: ChainStatus;\n    readonly steps: readonly ChainStep[];\n    readonly memberExpIds: readonly string[];\n    readonly delegationNodeIds: readonly string[];\n    readonly childChainIds: readonly string[];\n    readonly collapsedCount: number;\n    readonly summary: string;\n    readonly hitCount: number;\n    readonly citedCount: number;\n    readonly createdAt: number;\n    readonly updatedAt: number;\n}',
+  },
+  {
+    name: 'ChainStatus',
+    declaration: 'export type ChainStatus = \'active\' | \'consolidated\';',
+  },
+  {
+    name: 'ChainStep',
+    declaration: 'export interface ChainStep {\n    readonly nodeId: string;\n    readonly text: string;\n    readonly polarity: \'success\' | \'failure\';\n    readonly sequence: number;\n}',
+  },
+  {
     name: 'ChannelWeights',
     declaration: 'export interface ChannelWeights {\n    readonly semantic: number;\n    readonly situational: number;\n    readonly symptom: number;\n    readonly outcome: number;\n}',
   },
@@ -3064,6 +3124,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'CognitionApi',
     declaration: 'export interface CognitionApi {\n    list(request: RpcRequest<Record<string, never>>): Promise<RpcResponse<{\n        tasks: readonly ExplorationTaskView[];\n        counts: ExplorationTaskCounts;\n    }>>;\n}',
+  },
+  {
+    name: 'CognitionObjectConfig',
+    declaration: 'export type CognitionObjectConfig = Pick<ResolvedCognitivePipelineConfig, \'chainMinMembers\' | \'chainPatternMinMembers\'>;',
+  },
+  {
+    name: 'CognitionObjectKind',
+    declaration: 'export interface CognitionObjectKind<T> {\n    readonly name: string;\n    readonly description: string;\n    project(store: CognitiveStore, config: CognitionObjectConfig): readonly T[] | Promise<readonly T[]>;\n    persist(store: CognitiveStore, build: readonly T[]): void;\n    measure(store: CognitiveStore, objectId: string, feedback: unknown): void;\n    reinforce(store: CognitiveStore, config: CognitionObjectConfig, build: readonly T[]): readonly T[];\n    current(store: CognitiveStore): readonly T[];\n}',
   },
   {
     name: 'CognitiveLlmRoute',
@@ -3359,7 +3427,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'Experience',
-    declaration: 'export interface Experience {\n    readonly expId: string;\n    readonly sar: SarTriplet;\n    readonly actionVector: readonly number[];\n    readonly outcomeVector: readonly number[];\n    readonly embedding?: readonly number[];\n    readonly clusterId: number | null;\n    readonly strategyLabel: string | null;\n    readonly timestamp: number;\n    readonly predictionError: number | null;\n    readonly cumulativeError: number;\n    readonly hitCount: number;\n    readonly positiveCount: number;\n    readonly simulated: boolean;\n    readonly verification: ExperienceVerification;\n    readonly evidenceScore: number;\n    readonly meta?: boolean;\n}',
+    declaration: 'export interface Experience {\n    readonly expId: string;\n    readonly sar: SarTriplet;\n    readonly actionVector: readonly number[];\n    readonly outcomeVector: readonly number[];\n    readonly embedding?: readonly number[];\n    readonly clusterId: number | null;\n    readonly strategyLabel: string | null;\n    readonly timestamp: number;\n    readonly predictionError: number | null;\n    readonly cumulativeError: number;\n    readonly hitCount: number;\n    readonly positiveCount: number;\n    readonly simulated: boolean;\n    readonly verification: ExperienceVerification;\n    readonly evidenceScore: number;\n    readonly meta?: boolean;\n    readonly chainId?: string;\n    readonly parentNodeId?: string;\n    readonly sequence?: number;\n}',
   },
   {
     name: 'ExperienceVerification',
@@ -3531,7 +3599,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'InjectionRecord',
-    declaration: 'export interface InjectionRecord {\n    readonly injectionId: string;\n    readonly createdAt: number;\n    readonly expIds: readonly string[];\n    readonly triggerSource: string;\n    readonly jumpWords: readonly string[];\n    readonly sessionId: string | null;\n    readonly cited: boolean | null;\n}',
+    declaration: 'export interface InjectionRecord {\n    readonly injectionId: string;\n    readonly createdAt: number;\n    readonly expIds: readonly string[];\n    readonly triggerSource: string;\n    readonly jumpWords: readonly string[];\n    readonly chainId: string | null;\n    readonly sessionId: string | null;\n    readonly cited: boolean | null;\n}',
   },
   {
     name: 'InspectResult',
@@ -4023,7 +4091,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ResolvedCognitivePipelineConfig',
-    declaration: 'export interface ResolvedCognitivePipelineConfig {\n    readonly root: string;\n    readonly enabled: boolean;\n    readonly route: CognitiveLlmRoute;\n    readonly hot: HotEngineConfig;\n    readonly cold: ColdEngineConfig;\n    readonly tempStrategyHitThreshold: number;\n    readonly tempStrategyPositiveRatio: number;\n    readonly emergencyErrorThreshold: number;\n    readonly simulationFastTrackThreshold: number;\n    readonly simulationPermanentThreshold: number;\n    readonly simulationTtlMs: number;\n    readonly autoAccumulate: boolean;\n    readonly acceptanceMinEvidenceCount: number;\n    readonly acceptanceDeviationThreshold: number;\n    readonly acceptanceCommandExecution: boolean;\n    readonly acceptanceCommandTimeoutMs: number;\n    readonly triggerJumpEvidenceMin: number;\n    readonly triggerJumpMaxPerTrigger: number;\n    readonly triggerJumpTotalCap: number;\n    readonly triggerJumpWeightScale: number;\n    readonly triggerJumpCitationBoost: number;\n    readonly triggerJumpPruneRate: number;\n    readonly triggerJumpPruneHits: number;\n    readonly embedding: ResolvedEmbeddingConfig | null;\n    readonly exploreDailyBudget: number;\n    readonly exploreRiskWords: readonly string[];\n    readonly exploreAutoDispatch: boolean;\n    readonly exploreValidationLearningRate: number;\n    readonly exploreValidationErrorThreshold: number;\n}',
+    declaration: 'export interface ResolvedCognitivePipelineConfig {\n    readonly root: string;\n    readonly enabled: boolean;\n    readonly route: CognitiveLlmRoute;\n    readonly hot: HotEngineConfig;\n    readonly cold: ColdEngineConfig;\n    readonly tempStrategyHitThreshold: number;\n    readonly tempStrategyPositiveRatio: number;\n    readonly emergencyErrorThreshold: number;\n    readonly simulationFastTrackThreshold: number;\n    readonly simulationPermanentThreshold: number;\n    readonly simulationTtlMs: number;\n    readonly autoAccumulate: boolean;\n    readonly acceptanceMinEvidenceCount: number;\n    readonly acceptanceDeviationThreshold: number;\n    readonly acceptanceCommandExecution: boolean;\n    readonly acceptanceCommandTimeoutMs: number;\n    readonly triggerJumpEvidenceMin: number;\n    readonly triggerJumpMaxPerTrigger: number;\n    readonly triggerJumpTotalCap: number;\n    readonly triggerJumpWeightScale: number;\n    readonly triggerJumpCitationBoost: number;\n    readonly triggerJumpPruneRate: number;\n    readonly triggerJumpPruneHits: number;\n    readonly chainMinMembers: number;\n    readonly chainPatternMinMembers: number;\n    readonly embedding: ResolvedEmbeddingConfig | null;\n    readonly exploreDailyBudget: number;\n    readonly exploreRiskWords: readonly string[];\n    readonly exploreAutoDispatch: boolean;\n    readonly exploreValidationLearningRate: number;\n    readonly exploreValidationErrorThreshold: number;\n}',
   },
   {
     name: 'ResolvedCredential',

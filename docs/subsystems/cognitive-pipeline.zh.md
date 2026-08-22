@@ -78,6 +78,16 @@
    * experiences with a non-neutral utility join the cold-loop sample so the
    * pipeline can learn about its own failure modes. Absent on legacy rows. */
   readonly meta?: boolean
+  /** The goal-anchored chain this experience belongs to, when tagged by an
+   * orchestrator goal or a delegation. The chain consolidates tagged members
+   * into a causal skeleton. Absent on legacy rows. */
+  readonly chainId?: string
+  /** The chain node this experience derives from: the previous member
+   * experience id, or a delegation receipt id (`<predictionId>@<target>`)
+   * for a cross-agent node. Absent on legacy rows. */
+  readonly parentNodeId?: string
+  /** The chain-internal order of this node. Absent on legacy rows. */
+  readonly sequence?: number
 }
 ```
 
@@ -394,10 +404,112 @@ interface InjectionRecord {
   readonly triggerSource: string
   /** The jump words (if any) that contributed to the trigger. */
   readonly jumpWords: readonly string[]
+  /** The chain (if any) whose structured steps were injected. */
+  readonly chainId: string | null
   /** The session the injection happened in, when known. */
   readonly sessionId: string | null
   /** Whether a later assistant message referenced an injected expId (null until settled). */
   readonly cited: boolean | null
+}
+```
+
+```ts type-equiv
+/** One step of a consolidated chain: a scene in the goal-anchored sequence —
+ * the causal skeleton keeps failure steps and delegation nodes as structural
+ * steps and collapses routine successes into the summary (memory organizes
+ * around surprises, Schank). */
+interface ChainStep {
+  /** The node this step derives from: a member experience id or a delegation receipt. */
+  readonly nodeId: string
+  /** The step's observable text (action/outcome of the scene). */
+  readonly text: string
+  readonly polarity: 'success' | 'failure'
+  readonly sequence: number
+}
+```
+
+```ts type-equiv
+/** A consolidated goal-anchored chain: the aggregated projection of the
+ * experiences tagged with one chainId, collapsed to its causal skeleton. This
+ * is the fifth derived cognition object — the pipeline calibrates whether the
+ * whole goal execution was worth remembering (chain-level citation rate), one
+ * level above single experiences and one below decision loops. */
+interface ChainExperience {
+  readonly chainId: string
+  /** The goal that anchors the chain (the MOP goal, the binding glue). */
+  readonly goal: string
+  /** The session that anchored the chain, when known. */
+  readonly anchorSessionId: string | null
+  readonly status: ChainStatus
+  /** The causal skeleton: failure steps and delegation nodes; routine successes collapse. */
+  readonly steps: readonly ChainStep[]
+  /** Distinct member experiences backing the chain. */
+  readonly memberExpIds: readonly string[]
+  /** Cross-agent delegation nodes included in the chain. */
+  readonly delegationNodeIds: readonly string[]
+  /** Child chains (delegated sub-goals): chains whose root node derives from
+   * one of this chain's delegation receipts. The tree edge that enables
+   * goal-structured diffusion — a hit on this chain can surface its
+   * sub-goal outcomes. */
+  readonly childChainIds: readonly string[]
+  /** Collapsed routine: how many success scenes were summarized. */
+  readonly collapsedCount: number
+  /** The bounded summary of the collapsed routine. */
+  readonly summary: string
+  /** Times this chain was injected. */
+  readonly hitCount: number
+  /** Times an injection of this chain was cited by the model. */
+  readonly citedCount: number
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+```
+
+```ts type-equiv
+/** One recurring goal-execution pattern: chains with the same structural
+ * signature, aggregated from the chain table — the sixth derived cognition
+ * object (the abstraction's first recursive consumer: patterns project from
+ * chains the way chains project from experiences). The TOPS analogue: from
+ * similar MOPs, extract the cross-situation thematic pattern. */
+interface ChainPattern {
+  /** Stable identity: the structural signature (coarse goal domain + polarity
+   * sequence), so a rebuild with the same signature keeps the same id. */
+  readonly patternId: string
+  /** The structural signature, e.g. `发布:失败,失败,成功`. */
+  readonly signature: string
+  /** The member chains. */
+  readonly chainIds: readonly string[]
+  /** The shared causal skeleton (union of member skeletons, bounded). */
+  readonly skeleton: readonly ChainStep[]
+  /** The modal goal prefix of the member chains. */
+  readonly goalDomain: string
+  /** Aggregated measured utility: sum of member chains' hit/cited counts. */
+  readonly hitCount: number
+  readonly citedCount: number
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+```
+
+```ts type-equiv
+/** The lifecycle a derived cognition object declares. */
+interface CognitionObjectKind<T> {
+  /** Stable kind identity (e.g. `chain`). */
+  readonly name: string
+  /** One line describing what this kind derives and measures. */
+  readonly description: string
+  /** Project the store into a candidate build; the kind applies its evidence
+   * gate. Synchronous kinds return the build directly; kinds with an LLM
+   * step return a promise. */
+  project(store: CognitiveStore, config: CognitionObjectConfig): readonly T[] | Promise<readonly T[]>
+  /** Persist a gated build, carrying identity + evidence. */
+  persist(store: CognitiveStore, build: readonly T[]): void
+  /** Fold one piece of feedback into an object's measured ruler. */
+  measure(store: CognitiveStore, objectId: string, feedback: unknown): void
+  /** Reinforce on rebuild: carry measured stats across the projection, apply gates. */
+  reinforce(store: CognitiveStore, config: CognitionObjectConfig, build: readonly T[]): readonly T[]
+  /** The current objects (the model-visible source). */
+  current(store: CognitiveStore): readonly T[]
 }
 ```
 
@@ -956,20 +1068,93 @@ triggerJumps(): readonly TriggerJump[]
  *   contributing jump words, and the session id when known.
  * @returns the recorded injection.
  */
-recordInjection(input: { expIds: readonly string[] triggerSource: string sessionId?: string | null jumpWords?: readonly string[] }): InjectionRecord
+recordInjection(input: { expIds: readonly string[] triggerSource: string sessionId?: string | null jumpWords?: readonly string[] chainId?: string | null }): InjectionRecord
 
 /**
  * Settle every unresolved injection of one session against the turn's
  * assistant text: an injection is cited when the text references any of its
  * expIds, otherwise not. Each settled outcome folds into the contributing
  * jump words' hit/cited ledger — the measured utility that the next
- * {@link learnTriggerJumps} reinforcement uses. Flushes the pending writes
- * so the settlement is durable.
+ * {@link learnTriggerJumps} reinforcement uses — and into the chain's
+ * citation ledger when the injection carried a chain. Flushes the pending
+ * writes so the settlement is durable.
  * @param sessionId - the session whose injections to settle.
  * @param turnText - the turn's assistant/outcome text.
  * @returns how many injections were settled and how many were cited.
  */
 async settleInjectionCitations(sessionId: string, turnText: string): Promise<{ settled: number; cited: number }>
+
+/**
+ * Register a derived cognition object kind: a declaration of one
+ * special-experience layer (project/persist/measure/reinforce/expose) that
+ * the generic driver can rebuild. Re-registering the same name replaces the
+ * kind.
+ * @param kind - the kind to register.
+ * @returns the service, for chaining.
+ */
+registerCognitionObject<T>(kind: CognitionObjectKind<T>): this
+
+/** Registered derived cognition object kinds, in registration order.
+ * @returns the kind metadata.
+ */
+cognitionObjects(): readonly { name: string; description: string }[]
+
+/**
+ * Drive one derived cognition object through its lifecycle: project the
+ * store into a candidate build, reinforce (carry measured stats, apply the
+ * kind's gates), and persist. This is the declarative payoff — a new object
+ * kind costs a declaration, and this one driver serves every kind.
+ * @param name - the registered kind name.
+ * @returns the build summary.
+ */
+async rebuildCognitionObject(name: string): Promise<{ kind: string; built: number; pruned: number }>
+
+/**
+ * Consolidate one goal-anchored chain from its tagged experiences: assemble
+ * the causal skeleton (failure steps and delegation nodes structural,
+ * routine successes collapsed), carry the previous chain's citation stats,
+ * and persist. This is the offline-consolidation analogue: atoms accumulate
+ * online, chains form when consolidated.
+ * @param chainId - the goal trace id.
+ * @param goal - the goal anchoring the chain; falls back to the previous
+ *   chain's goal or the first member's situation.
+ * @returns the consolidated chain, or null when the evidence gate
+ *   (`chainMinMembers`) is not met.
+ */
+async consolidateChain(chainId: string, goal?: string): Promise<ChainExperience | null>
+
+/** All chains (public for inspection and consumers).
+ * @returns a detached chain list, insertion order.
+ */
+chains(): readonly ChainExperience[]
+
+/**
+ * Render one chain as structured, model-visible steps — the causal skeleton
+ * the injection path would present (goal anchor, failure steps marked, the
+ * routine summary collapsed).
+ * @param chainId - the chain to render.
+ * @returns the structured text, or null when the chain is unknown.
+ */
+chainExpose(chainId: string): string | null
+
+/**
+ * The child chains of one chain (tree edges derived at consolidation: a
+ * delegated sub-goal's chain hangs under the delegating chain's receipt).
+ * @param chainId - the parent chain.
+ * @returns the child chain ids, or [] when the chain is unknown.
+ */
+chainChildren(chainId: string): readonly string[]
+
+/**
+ * Render one chain and its goal-structure subtree as structured,
+ * model-visible text: each node's causal skeleton, children indented. This
+ * is the goal-structured-diffusion surface — a hit on the parent can walk
+ * down to sub-goal outcomes.
+ * @param chainId - the root chain.
+ * @param depth - how many levels below the root to include (default 3).
+ * @returns the tree text, or null when the root chain is unknown.
+ */
+chainTreeExpose(chainId: string, depth: number = 3): string | null
 
 /** Recent claim audits (public for inspection).
  * @param limit - how many audits, newest first (default 10).
@@ -998,5 +1183,5 @@ taxonomy(): TaxonomyState | null
 tempStrategies(): readonly TempStrategy[]
 ```
 
-Source: [`packages/cognition/cognitive-pipeline/src/service.ts:551`](../../packages/cognition/cognitive-pipeline/src/service.ts)
+Source: [`packages/cognition/cognitive-pipeline/src/service.ts:573`](../../packages/cognition/cognitive-pipeline/src/service.ts)
 <!-- END GENERATED cordis-surface -->
