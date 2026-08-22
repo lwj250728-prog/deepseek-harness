@@ -1,4 +1,5 @@
 {"injectionId":"inject_1","createdAt":1787399289022,"expIds":["exp_1"],"triggerSource":"derived:已","jumpWords":[],"chainId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":true}
 {"injectionId":"inject_2","createdAt":1787405820102,"expIds":["exp_108"],"triggerSource":"static:尝试","jumpWords":[],"chainId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":false}
 {"injectionId":"inject_3","createdAt":1787407630425,"expIds":["exp_102"],"triggerSource":"static:为什么","jumpWords":[],"chainId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":true}
-{"injectionId":"inject_4","createdAt":1787407773222,"expIds":["exp_107"],"triggerSource":"static:失败","jumpWords":[],"chainId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":null}
+{"injectionId":"inject_4","createdAt":1787407773222,"expIds":["exp_107"],"triggerSource":"static:失败","jumpWords":[],"chainId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":false}
+{"injectionId":"inject_5","createdAt":1787408076572,"expIds":["exp_2","exp_24"],"triggerSource":"static:试试","jumpWords":[],"chainId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":null}
