@@ -28,7 +28,7 @@ function renderJson(_args: unknown, value: unknown): { type: 'text'; text: strin
   return [{ type: 'text', text: JSON.stringify(value) }]
 }
 
-/** Register the fourteen pipeline tools.
+/** Register the fifteen pipeline tools.
  * @param ctx - context with the tool registry.
  * @param service - the pipeline service backing the tools.
  */
@@ -1268,6 +1268,88 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
       }
     },
     presentCall: args => ({ card: 'generic', title: `Consolidate chain ${args.chain_id}`, kind: 'other' }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'explore_chain',
+    description: 'Explore the upstream/downstream neighbors of one experience across the scattered experience '
+      + 'store — the inferred-chain discovery that complements explicit chain_id tagging. A neighbor is an '
+      + 'experience whose outcome semantically continues into this experience\'s situation (upstream: the '
+      + 'previous step\'s result opened this step\'s situation) or whose situation is continued by this '
+      + 'experience\'s outcome (downstream). Candidates are suggestions for tagging and consolidation into a '
+      + 'goal-anchored chain — exploration, never silent labeling: nothing is written unless you tag and '
+      + 'consolidate. Call it to find which scattered experiences plausibly belong to one goal execution.',
+    parameters: {
+      exp_id: {
+        type: 'string',
+        required: true,
+        description: 'The anchor experience id.',
+      },
+      min_cosine: {
+        type: 'number',
+        description: 'The承接-cosine threshold (default 0.3); below it a candidate is too distant to suggest a causal edge.',
+      },
+      limit: {
+        type: 'number',
+        description: 'How many candidates per direction (default 5).',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          anchor: { type: 'string', required: true },
+          upstream: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                exp_id: { type: 'string', required: true },
+                cosine: { type: 'number', required: true },
+                text: { type: 'string', required: true },
+              },
+            },
+          },
+          downstream: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                exp_id: { type: 'string', required: true },
+                cosine: { type: 'number', required: true },
+                text: { type: 'string', required: true },
+              },
+            },
+          },
+        },
+      },
+      render: renderJson,
+    },
+    execute(args) {
+      const result = service.exploreChainNeighbors(args.exp_id, args.min_cosine, args.limit)
+      if (result === null) {
+        return Promise.resolve({ anchor: args.exp_id, upstream: [], downstream: [] })
+      }
+      return Promise.resolve({
+        anchor: result.anchor,
+        upstream: result.upstream.map(hit => ({
+          exp_id: hit.expId,
+          cosine: Number(hit.cosine.toFixed(3)),
+          text: hit.text,
+        })),
+        downstream: result.downstream.map(hit => ({
+          exp_id: hit.expId,
+          cosine: Number(hit.cosine.toFixed(3)),
+          text: hit.text,
+        })),
+      })
+    },
+    presentCall: args => ({ card: 'generic', title: `Explore chain neighbors of ${args.exp_id}`, kind: 'read' }),
   }))
 
   ctx.tools.register(defineTool({

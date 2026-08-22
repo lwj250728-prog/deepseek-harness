@@ -28,6 +28,7 @@ This package implements the DCA-PED design documents — `01-计划书.md` (tech
 - **跳转词 (trigger-jump lexicon)** — the associative layer over the injection trigger words: `learn_trigger_jumps` builds, from the experience store, words whose presence opens the injection gate even when no literal trigger is present (发版 → 发布). Co-occurrence jumps are deterministic — a token appearing with a trigger across ≥ `triggerJumpEvidenceMin` distinct important experiences becomes a jump toward it, normalized to [0.3, 1], capped per trigger and in total; with an explicit LLM route, template 9 additionally proposes synonym variants (卡住↔卡壳) that enter at zero evidence. Every jump carries its evidence, its measured utility (the citation loop: `recordInjection` at injection time and `settleInjectionCitations` at turn end fold "was the injected experience actually cited?" back into the jump's hit/cited ledger), and reinforcement on rebuild — jumps whose injections are cited are boosted, never-cited ones are pruned. In the gate, each jump's contribution is scaled by `triggerJumpWeightScale` (default 0.5), so a single weak jump never opens the gate alone.
 - **经验链 (goal-anchored chains)** — the fifth derived cognition object, and the first declarative instance of the **derived-object abstraction** (`CognitionObjectKind`: project/persist/measure/reinforce/expose — a new special-experience layer costs a declaration, and the generic `rebuild_cognition_object` driver serves every kind). `consolidate_chain` assembles a goal-anchored causal skeleton from chain-tagged experiences (`chainId`/`parentNodeId`/`sequence` on the experience): failure steps and cross-agent delegation nodes (receipts) stay structural, routine successes collapse into a bounded summary (memory organizes around surprises), and the chain-level citation rate (an injection of the chain is cited when the model references it) measures whether the whole goal execution was worth remembering. Chains are consolidated offline (at goal completion / agent idle — the consolidation analogue), gated by `chainMinMembers` evidence, persisted in `chains.json`, and rendered structurally via `chainExpose` for the injection path. Chains form a **goal tree**: a delegated sub-goal's chain hangs under the delegating chain (its root member references the parent's receipt), so `chainChildren`/`chainTreeExpose` expose the structure for goal-structured diffusion — a hit on the parent can walk down to sub-goal outcomes.
 - **链模式 (chain patterns)** — the sixth derived cognition object and the abstraction's first **recursive** consumer: patterns project from the chain table the way chains project from experiences. Chains sharing a structural signature (coarse goal domain + step polarity sequence, e.g. `发布:失败,失败,成功`) aggregate into a recurring goal-execution pattern (the TOPS analogue: from similar MOPs, extract the cross-situation thematic pattern), gated by `chainPatternMinMembers`, persisted in `chain_patterns.json`. Measured utility is aggregated from the member chains' citation stats through the same generic measure dispatch, so a pattern's cited rate retroactively measures whether the grouping was useful. Rebuild it with `rebuild_cognition_object('chain-pattern')`.
+- **上下游探索 (chain-neighbor exploration)** — `explore_chain` recovers the causal承接 structure that scattered, never-tagged experiences still carry in text: given one experience, it finds upstream neighbors (whose OUTCOME semantically continues into this experience's SITUATION) and downstream neighbors (whose SITUATION is continued by this experience's OUTCOME). This is the inferred-chain discovery that complements explicit `chain_id` tagging (the other half of exp_73): when atoms were never tagged, the goal structure can still be suggested from text. Exploration never writes — candidates are suggestions for the caller to tag and consolidate.
 
 ## Quick start
 
@@ -44,7 +45,7 @@ Compose the plugin (it is already wired into the `web` profile):
     provider: deepseek
     model: deepseek-v4-flash
 ```
-The model can then use the fourteen tools:
+The model can then use the fifteen tools:
 
 - `remember_experience` — encode a raw experience into SAR memory (utility fields are required; a partial extraction degrades to the fallback instead of a fake neutral score). Optionally tag the experience with `chain_id` — the goal trace id of the goal execution it belongs to — so the offline consolidation can assemble the goal-anchored chain from its members.
 - `simulate_experience` — generate a retrieval-only simulated experience via the LLM route when real testing is costly or impossible.
@@ -61,6 +62,7 @@ The model can then use the fourteen tools:
 - `learn_trigger_jumps` — learn the trigger-jump lexicon from the experience store (co-occurrence + optional LLM synonym variants) and apply citation-rate reinforcement; call it after meaningful new experiences accumulate.
 - `consolidate_chain` — assemble one goal-anchored chain from its chain-tagged experiences into a causal skeleton (failure steps and delegation nodes structural, routine collapsed); call it when a tagged goal execution completes.
 - `rebuild_cognition_object` — drive any registered derived cognition object through its lifecycle generically (currently `chain` and `chain-pattern`); a new kind costs a declaration, this one driver serves every kind.
+- `explore_chain` — explore the upstream/downstream neighbors of one experience by outcome→situation承接 (inferred-chain discovery for scattered stores); exploration writes nothing — tag and consolidate to form a chain.
 
 ## Service API
 
@@ -178,11 +180,11 @@ Failures are logged at `warn`; the pipeline never throws for model outages.
 
 ## Model Experience
 
-### The fourteen model-facing tools
+### The fifteen model-facing tools
 
 #### What the model sees
 
-`remember_experience`, `simulate_experience`, `reference_experience`, `predict_outcome`, `report_outcome`, `rebuild_taxonomy`, `inspect_memory`, `register_loop`, `define_acceptance_check`, `verify_claim`, `update_acceptance_check`, `propose_acceptance_update`, `learn_trigger_jumps`, `consolidate_chain`, and `rebuild_cognition_object` register with the tool registry (`ctx.tools.register` + `defineTool`); their schemas flow into the system-prompt tool catalog automatically, each tool returns one canonical JSON value mirrored into model-facing text by `output.render`, and the tool descriptions defined in `src/tools.ts` are the only static prompt text this package owns (surfaced in the generated [tool catalog](../../../docs/tool-catalog.md)).
+`remember_experience`, `simulate_experience`, `reference_experience`, `predict_outcome`, `report_outcome`, `rebuild_taxonomy`, `inspect_memory`, `register_loop`, `define_acceptance_check`, `verify_claim`, `update_acceptance_check`, `propose_acceptance_update`, `learn_trigger_jumps`, `consolidate_chain`, `rebuild_cognition_object`, and `explore_chain` register with the tool registry (`ctx.tools.register` + `defineTool`); their schemas flow into the system-prompt tool catalog automatically, each tool returns one canonical JSON value mirrored into model-facing text by `output.render`, and the tool descriptions defined in `src/tools.ts` are the only static prompt text this package owns (surfaced in the generated [tool catalog](../../../docs/tool-catalog.md)).
 
 #### Token effect
 

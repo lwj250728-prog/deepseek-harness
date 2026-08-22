@@ -14,18 +14,19 @@ import { executeTool, pipelineHarness } from './helpers.ts'
 /** Seed one chain-tagged experience directly into the store. */
 function seed(
   service: CognitivePipelineService,
-  chainId: string,
+  chainId: string | undefined,
   sequence: number,
   situation: string,
   action: string,
   gain: number,
   parentNodeId?: string,
+  outcome: string = '结果',
 ): string {
   const expId = service.store.nextExpId()
   const sar = {
     situation,
     action,
-    outcome: '结果',
+    outcome,
     actionKeywords: [],
     outcomeUtility: { materialGain: gain, emotionalValence: 5, energyCost: 5 },
   }
@@ -33,7 +34,7 @@ function seed(
     expId,
     sar,
     actionVector: actionVector(action, []),
-    outcomeVector: outcomeVector(sar.outcomeUtility, '结果'),
+    outcomeVector: outcomeVector(sar.outcomeUtility, outcome),
     clusterId: null,
     strategyLabel: null,
     timestamp: Date.now(),
@@ -44,7 +45,7 @@ function seed(
     simulated: false,
     verification: 'verified',
     evidenceScore: 0,
-    chainId,
+    ...chainId === undefined ? {} : { chainId },
     sequence,
     ...parentNodeId === undefined ? {} : { parentNodeId },
   })
@@ -156,6 +157,63 @@ describe('goal-anchored chains (the derived cognition object)', () => {
       expect(chain?.steps.length).toBe(1)
       expect(chain?.steps[0]?.polarity).toBe('failure')
       expect(chain?.memberExpIds.length).toBe(3)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('explores upstream/downstream neighbors by outcome→situation承接', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      // Three experiences of one goal execution, deliberately UNTAGGED — the
+      // scattered-store case the explore tool exists for. The outcome of each
+      // step continues into the next step's situation (the承接 signal).
+      seed(ctx.cognitivePipeline, undefined, 1, '准备发布环境', '配置环境', 8, undefined, '发布环境配置完成')
+      seed(ctx.cognitivePipeline, undefined, 2, '发布环境配置完成，开始执行发布', '执行发布', 2, undefined, '发布执行失败，需要回退')
+      seed(ctx.cognitivePipeline, undefined, 3, '发布执行失败，需要回退处理', '回滚版本', 8, undefined, '发布回退完成')
+
+      const service = ctx.cognitivePipeline
+      const anchor = service.store.experiencesSnapshot().find(exp => exp.sar.situation.includes('发布环境配置完成，开始执行发布'))!
+      const result = service.exploreChainNeighbors(anchor.expId, 0.3)
+      expect(result).not.toBeNull()
+      // Upstream: the "准备发布环境" experience's outcome ("发布环境配置完成")
+      // continues into the anchor's situation.
+      const upstreamIds = result!.upstream.map(hit => hit.expId)
+      expect(upstreamIds.length).toBeGreaterThan(0)
+      // Downstream: the anchor's outcome ("发布执行失败，需要回退") continues into
+      // the "需要回退处理" experience's situation.
+      const downstreamIds = result!.downstream.map(hit => hit.expId)
+      expect(downstreamIds.length).toBeGreaterThan(0)
+
+      // Unknown anchor returns null; high threshold yields no neighbors.
+      expect(service.exploreChainNeighbors('nope')).toBeNull()
+      const strict = service.exploreChainNeighbors(anchor.expId, 0.99)
+      expect(strict!.upstream).toEqual([])
+      expect(strict!.downstream).toEqual([])
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('explore_chain tool returns neighbors without writing anything', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      seed(ctx.cognitivePipeline, undefined, 1, '定位浮点 bug 死循环', '定位死循环', 8, undefined, '浮点 bug 定位完成')
+      seed(ctx.cognitivePipeline, undefined, 2, '浮点 bug 定位完成，开始修复', '修复浮点', 8, undefined, '浮点 bug 修复完成')
+      const service = ctx.cognitivePipeline
+      const anchor = service.store.experiencesSnapshot().find(exp => exp.sar.situation.includes('定位完成，开始修复'))!
+      const before = service.store.experiencesSnapshot().length
+
+      const result = await executeTool(ctx, 'explore_chain', { exp_id: anchor.expId, min_cosine: 0.2 }) as {
+        anchor: string
+        upstream: readonly { exp_id: string; cosine: number; text: string }[]
+        downstream: readonly { exp_id: string; cosine: number; text: string }[]
+      }
+      expect(result.anchor).toBe(anchor.expId)
+      expect(result.upstream.length).toBeGreaterThan(0)
+      // Exploration writes nothing: the store is unchanged, no chains.json.
+      expect(service.store.experiencesSnapshot().length).toBe(before)
+      expect(service.store.chainsSnapshot()).toEqual([])
     } finally {
       await teardown()
     }

@@ -28,6 +28,7 @@
 - **跳转词 (trigger-jump lexicon)** — 注入触发词之上的联想层：`learn_trigger_jumps` 从经验库构建"命中即开门"的关联词（发版 → 发布）。共现跳转是确定性的——与某触发词在 ≥ `triggerJumpEvidenceMin` 条不同重要经验中共现的 token 成为指向它的跳转，归一化到 [0.3, 1]，按触发词与总量设上限；有显式 LLM 路由时模板 9 额外提出同义变体（卡住↔卡壳），零证据保守权重入表。每条跳转携带其证据与实测效用（引用环：注入时 `recordInjection`、轮次结束时 `settleInjectionCitations` 把"注入经验是否真被引用"折回跳转的 hit/cited 账本），重建时强化——被引用的跳转加权、从未被引用的剪枝。门中每条跳转的贡献按 `triggerJumpWeightScale`（默认 0.5）缩放，单条弱跳转永不单独开门。
 - **经验链 (goal-anchored chains)** — 第五个派生认知对象，也是**派生对象抽象**（`CognitionObjectKind`：project/persist/measure/reinforce/expose——新增特殊经验层只需一次声明，通用驱动 `rebuild_cognition_object` 服务所有种类）的首个声明式实例。`consolidate_chain` 从打上链标签的经验（经验上的 `chainId`/`parentNodeId`/`sequence`）组装目标锚定的因果骨架：失败步与跨 agent 委派节点（回执）保持结构步，例行成功步坍缩为有界摘要（记忆组织在惊喜周围），链级引用率（注入链被模型引用即 cited）度量整段目标执行是否值得记忆。链在离线时巩固（目标完成/agent 空闲——巩固的工程对应），由 `chainMinMembers` 证据闸门把关，持久化于 `chains.json`，经 `chainExpose` 以结构化步骤呈现给注入路径。链构成**目标树**：委派子目标的链挂在委派链之下（其根成员引用父链回执），`chainChildren`/`chainTreeExpose` 暴露该结构以支持目标结构化扩散——命中父链时可下钻到子目标结果。
 - **链模式 (chain patterns)** — 第六个派生认知对象，也是该抽象的首个**递归**消费者：模式从链表投影，正如链从经验投影。共享结构签名（粗粒度目标域 + 步极性序列，如 `发布:失败,失败,成功`）的链聚合为一种周期性目标执行模式（TOPS 类比：从相似 MOP 提炼跨情境主题模式），由 `chainPatternMinMembers` 闸门把关，持久化于 `chain_patterns.json`。度量效用从成员链的引用统计经同一通用 measure 分派聚合，因此模式的引用率可追溯地度量分组是否有用。用 `rebuild_cognition_object('chain-pattern')` 重建。
+- **上下游探索 (chain-neighbor exploration)** — `explore_chain` 从散落、从未打标签的经验仍在文本中携带的因果承接结构里恢复链条：给定一条经验，找出上游邻居（其 OUTCOME 语义延续进该经验的 SITUATION）与下游邻居（其 SITUATION 被该经验的 OUTCOME 延续）。这是对显式 `chain_id` 标签的补充性推断链发现（exp_73 的另一半）：当原子从未打标签时，目标结构仍可从文本中被建议出来。探索永不写入——候选只是供调用方打标签并巩固的建议。
 
 ## 快速开始
 
@@ -45,7 +46,7 @@
     model: deepseek-v4-flash
 ```
 
-模型即可使用十四个工具：
+模型即可使用十五个工具：
 
 - `remember_experience` — 把原始经历编码进 SAR 记忆（效用字段必填；提取不完整时降级为兜底，而非伪造中性分）。可选 `chain_id` 标签——所属目标执行的目标追踪号——使离线巩固能据此组装目标锚定链。
 - `simulate_experience` — 在真实测试成本高或不可行时，经 LLM 路由生成仅检索的模拟经验。
@@ -62,6 +63,7 @@
 - `learn_trigger_jumps` — 从经验库学习触发跳转词表（共现 + 可选 LLM 同义变体）并按引用率强化；积累有意义的新经验后调用。
 - `consolidate_chain` — 从打上链标签的经验组装一条目标锚定的链为因果骨架（失败步与委派节点结构步、例行坍缩）；带标签的目标执行完成时调用。
 - `rebuild_cognition_object` — 通用驱动任意已注册的派生认知对象生命周期（当前为 `chain` 与 `chain-pattern`）；新种类只需一次声明，此驱动服务所有种类。
+- `explore_chain` — 按 outcome→situation 承接探索一条经验的上下游邻居（为散落经验库准备的推断链发现）；探索永不写入——打标签并巩固才成链。
 
 ## 服务 API
 
@@ -179,11 +181,11 @@ ctx.cognitivePipeline.rebuildCognitionObject(name)               // → { kind, 
 
 ## Model Experience
 
-### 十四个模型工具
+### 十五个模型工具
 
 #### What the model sees
 
-`remember_experience`、`simulate_experience`、`reference_experience`、`predict_outcome`、`report_outcome`、`rebuild_taxonomy`、`inspect_memory`、`register_loop`、`define_acceptance_check`、`verify_claim`、`update_acceptance_check`、`propose_acceptance_update`、`learn_trigger_jumps`、`consolidate_chain`、`rebuild_cognition_object` 通过 `ctx.tools.register` + `defineTool` 注册，其 schema 自动进入 System Prompt 工具目录；每个工具返回一个规范 JSON 值，由 `output.render` 镜像为模型可见文本；定义于 `src/tools.ts` 的工具描述是本包唯一的静态提示词文本（在生成的 [tool catalog](../../../docs/tool-catalog.md) 中展示）。
+`remember_experience`、`simulate_experience`、`reference_experience`、`predict_outcome`、`report_outcome`、`rebuild_taxonomy`、`inspect_memory`、`register_loop`、`define_acceptance_check`、`verify_claim`、`update_acceptance_check`、`propose_acceptance_update`、`learn_trigger_jumps`、`consolidate_chain`、`rebuild_cognition_object`、`explore_chain` 通过 `ctx.tools.register` + `defineTool` 注册，其 schema 自动进入 System Prompt 工具目录；每个工具返回一个规范 JSON 值，由 `output.render` 镜像为模型可见文本；定义于 `src/tools.ts` 的工具描述是本包唯一的静态提示词文本（在生成的 [tool catalog](../../../docs/tool-catalog.md) 中展示）。
 
 #### Token effect
 

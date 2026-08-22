@@ -2046,6 +2046,60 @@ export class CognitivePipelineService extends Service {
     return lines.join('\n')
   }
 
+  /**
+   * Explore the upstream/downstream neighbors of one experience across the
+   * scattered store — the inferred-chain discovery that complements explicit
+   * chain_id tagging (exp_73's other half: when atoms were never tagged, the
+   * causal承接 structure can still be recovered from text). A neighbor is an
+   * experience whose OUTCOME semantically continues into this experience's
+   * SITUATION (upstream: the previous step's result opened this step's
+   * situation) or whose SITUATION is continued by this experience's OUTCOME
+   * (downstream: this step's result opened the next step's situation). The
+   * hash-bag cosine over outcome/situation text is the承接 signal; the
+   * candidates are suggestions for the caller to tag and consolidate into a
+   * chain — exploration, never silent labeling.
+   * @param expId - the anchor experience.
+   * @param minCosine - the承接-cosine threshold (default 0.3; below it a
+   *   "neighbor" is too semantically distant to suggest a causal edge).
+   * @param limit - how many candidates per direction (default 5).
+   * @returns the anchor plus its upstream/downstream candidates with their
+   *  承接 cosines, or null when the anchor is unknown.
+   */
+  exploreChainNeighbors(
+    expId: string,
+    minCosine: number = 0.3,
+    limit: number = 5,
+  ): {
+    anchor: string
+    upstream: readonly { expId: string; cosine: number; text: string }[]
+    downstream: readonly { expId: string; cosine: number; text: string }[]
+  } | null {
+    const anchor = this.store.getExperience(expId)
+    if (anchor === undefined) return null
+    const anchorSituation = actionVector(anchor.sar.situation, [])
+    const anchorOutcome = actionVector(anchor.sar.outcome, [])
+    const upstream: { expId: string; cosine: number; text: string }[] = []
+    const downstream: { expId: string; cosine: number; text: string }[] = []
+    for (const exp of this.store.experiencesSnapshot()) {
+      if (exp.expId === expId) continue
+      const up = cosine(actionVector(exp.sar.outcome, []), anchorSituation)
+      if (up >= minCosine) {
+        upstream.push({ expId: exp.expId, cosine: up, text: `${exp.sar.action}。${exp.sar.outcome}`.slice(0, 120) })
+      }
+      const down = cosine(anchorOutcome, actionVector(exp.sar.situation, []))
+      if (down >= minCosine) {
+        downstream.push({ expId: exp.expId, cosine: down, text: exp.sar.situation.slice(0, 120) })
+      }
+    }
+    upstream.sort((a, b) => b.cosine - a.cosine)
+    downstream.sort((a, b) => b.cosine - a.cosine)
+    return {
+      anchor: expId,
+      upstream: upstream.slice(0, limit),
+      downstream: downstream.slice(0, limit),
+    }
+  }
+
   /** Recent claim audits (public for inspection).
    * @param limit - how many audits, newest first (default 10).
    * @returns the most recent audits.

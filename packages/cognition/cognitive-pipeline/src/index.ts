@@ -5,7 +5,7 @@
  * experience generation, a cold-loop taxonomy rebuild gated by sandbox
  * backtesting, meta-cognition loops, acceptance-criteria claim audits, and
  * derived cognition objects (goal-anchored chains).
- * The plugin exposes fourteen model-facing tools, the
+ * The plugin exposes fifteen model-facing tools, the
  * `ctx.cognitivePipeline` service, and a dynamic `cognition:taxonomy`
  * system-prompt section.
  *
