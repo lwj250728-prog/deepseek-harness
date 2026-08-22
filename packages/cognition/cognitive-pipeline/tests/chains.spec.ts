@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest'
 import type { CognitivePipelineService } from '../src/service.ts'
 import { CognitiveStore } from '../src/store.ts'
 import { actionVector, outcomeVector } from '../src/vectorizer.ts'
-import { pipelineHarness } from './helpers.ts'
+import { executeTool, pipelineHarness } from './helpers.ts'
 
 /** Seed one chain-tagged experience directly into the store. */
 function seed(
@@ -98,6 +98,64 @@ describe('goal-anchored chains (the derived cognition object)', () => {
       seed(ctx.cognitivePipeline, 'chain-3', 1, '目标', '行动', 8)
       seed(ctx.cognitivePipeline, 'chain-3', 2, '目标', '行动二', 8)
       expect(await ctx.cognitivePipeline.consolidateChain('chain-3', '短链')).toBeNull()
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('remember_experience tags a goal trace: chain_id passes through to the experience', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      // The tool path (the exp_73 gap): remembering with chain_id must tag the
+      // stored experience so the offline consolidation can assemble the chain.
+      const first = await executeTool(ctx, 'remember_experience', {
+        raw_text: '目标开始。准备发布。顺利。',
+        chain_id: 'chain-tag-1',
+      }) as { exp_id: string; chain_id?: string }
+      expect(first.chain_id).toBe('chain-tag-1')
+      expect(ctx.cognitivePipeline.store.getExperience(first.exp_id)?.chainId).toBe('chain-tag-1')
+
+      // Without chain_id the experience stays untagged (the default path).
+      const untagged = await executeTool(ctx, 'remember_experience', { raw_text: '普通记录。无目标标签。顺利。' }) as { exp_id: string; chain_id?: string }
+      expect(untagged.chain_id).toBeUndefined()
+      expect(ctx.cognitivePipeline.store.getExperience(untagged.exp_id)?.chainId).toBeUndefined()
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('chain-tagged experiences consolidate into a chain from the tool path', async () => {
+    // Scripted LLM: two successful steps (positive utility) + one failure
+    // (negative utility), so the skeleton keeps the failure step.
+    const ok = JSON.stringify({
+      situation: '发布流程',
+      action: '执行发布步骤',
+      outcome: '顺利完成',
+      action_keywords: ['发布'],
+      outcome_utility_score: { material_gain: 8, emotional_valence: 6, energy_cost: 3 },
+    })
+    const fail = JSON.stringify({
+      situation: '发布流程',
+      action: '执行发布步骤',
+      outcome: '执行失败需要回退',
+      action_keywords: ['发布', '回退'],
+      outcome_utility_score: { material_gain: 2, emotional_valence: 2, energy_cost: 8 },
+    })
+    const { ctx, teardown } = await pipelineHarness({ provider: 'cognition-test', model: 'm' }, [ok, fail, ok])
+    try {
+      // Three tagged members via the public tool path, then consolidate.
+      await executeTool(ctx, 'remember_experience', { raw_text: '发布开始。准备。顺利。', chain_id: 'chain-tag-2' })
+      await executeTool(ctx, 'remember_experience', { raw_text: '发布执行。失败。回退。', chain_id: 'chain-tag-2' })
+      await executeTool(ctx, 'remember_experience', { raw_text: '发布重试。成功。完成。', chain_id: 'chain-tag-2' })
+
+      const result = await executeTool(ctx, 'consolidate_chain', { chain_id: 'chain-tag-2', goal: '发布流程' })
+      expect((result as { status: string }).status).toBe('consolidated')
+      const chain = ctx.cognitivePipeline.store.getChain('chain-tag-2')
+      expect(chain?.goal).toBe('发布流程')
+      // The single failure step is structural; the two successes collapse.
+      expect(chain?.steps.length).toBe(1)
+      expect(chain?.steps[0]?.polarity).toBe('failure')
+      expect(chain?.memberExpIds.length).toBe(3)
     } finally {
       await teardown()
     }

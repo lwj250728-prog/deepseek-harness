@@ -4067,7 +4067,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'RememberInput',
-    declaration: 'export interface RememberInput {\n    readonly rawText: string;\n}',
+    declaration: 'export interface RememberInput {\n    readonly rawText: string;\n    readonly chainId?: string;\n}',
   },
   {
     name: 'RequestContext',

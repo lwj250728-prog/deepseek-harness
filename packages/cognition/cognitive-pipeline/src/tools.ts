@@ -39,12 +39,19 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
       + 'cognitive pipeline SAR memory. The pipeline extracts situation/action/outcome, scores the outcome '
       + 'utility (material gain, emotional valence, energy cost 0-10), and vectorizes both the action and the '
       + 'outcome for later retrieval and utility-space clustering. Call this when the user shares a completed '
-      + 'experience that should inform future predictions.',
+      + 'experience that should inform future predictions. Optionally tag the experience with a chain_id (the '
+      + 'goal trace id of the goal execution it belongs to) so the offline consolidation can assemble the '
+      + 'goal-anchored chain from its members.',
     parameters: {
       raw_text: {
         type: 'string',
         required: true,
         description: 'The raw experience text describing situation, action, and result.',
+      },
+      chain_id: {
+        type: 'string',
+        description: 'Optional goal trace id (chainId) this experience belongs to; consolidates into a '
+          + 'goal-anchored chain when at least chainMinMembers tagged experiences accumulate.',
       },
     },
     output: {
@@ -66,12 +73,16 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
               energy_cost: { type: 'number', required: true },
             },
           },
+          chain_id: { type: 'string' },
         },
       },
       render: renderJson,
     },
     async execute(args, exec) {
-      const { expId, sar } = await service.remember({ rawText: args.raw_text }, {
+      const { expId, sar } = await service.remember({
+        rawText: args.raw_text,
+        ...args.chain_id === undefined ? {} : { chainId: args.chain_id },
+      }, {
         ...callContext(exec),
         signal: exec.signal,
       })
@@ -85,6 +96,7 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           emotional_valence: sar.outcomeUtility.emotionalValence,
           energy_cost: sar.outcomeUtility.energyCost,
         },
+        ...args.chain_id === undefined ? {} : { chain_id: args.chain_id },
       }
     },
     presentCall: args => ({ card: 'generic', title: 'Remember experience', kind: 'other', rawInput: args.raw_text }),

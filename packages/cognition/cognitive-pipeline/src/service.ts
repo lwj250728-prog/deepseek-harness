@@ -660,6 +660,7 @@ export class CognitivePipelineService extends Service {
       simulated: false,
       verification: 'verified',
       evidenceScore: 0,
+      ...input.chainId === undefined ? {} : { chainId: input.chainId },
     }
     this.store.addExperience(exp)
     await this.store.flush()

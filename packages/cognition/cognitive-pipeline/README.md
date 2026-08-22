@@ -46,7 +46,7 @@ Compose the plugin (it is already wired into the `web` profile):
 ```
 The model can then use the fourteen tools:
 
-- `remember_experience` — encode a raw experience into SAR memory (utility fields are required; a partial extraction degrades to the fallback instead of a fake neutral score).
+- `remember_experience` — encode a raw experience into SAR memory (utility fields are required; a partial extraction degrades to the fallback instead of a fake neutral score). Optionally tag the experience with `chain_id` — the goal trace id of the goal execution it belongs to — so the offline consolidation can assemble the goal-anchored chain from its members.
 - `simulate_experience` — generate a retrieval-only simulated experience via the LLM route when real testing is costly or impossible.
 - `reference_experience` — generalize the common pattern of the most similar history into a retrieval-only reference candidate (cold-start online generalization); rejected when no similar anchor exists.
 - `predict_outcome` — calibrated prediction with an 80% interval; returns a `prediction_id` and, when the situation matches a proven success cluster, a `success_reference` strategy.

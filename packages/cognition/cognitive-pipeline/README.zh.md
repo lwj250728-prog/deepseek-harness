@@ -47,7 +47,7 @@
 
 模型即可使用十四个工具：
 
-- `remember_experience` — 把原始经历编码进 SAR 记忆（效用字段必填；提取不完整时降级为兜底，而非伪造中性分）。
+- `remember_experience` — 把原始经历编码进 SAR 记忆（效用字段必填；提取不完整时降级为兜底，而非伪造中性分）。可选 `chain_id` 标签——所属目标执行的目标追踪号——使离线巩固能据此组装目标锚定链。
 - `simulate_experience` — 在真实测试成本高或不可行时，经 LLM 路由生成仅检索的模拟经验。
 - `reference_experience` — 把最相似历史经验的共同模式泛化为仅检索的参考候选（冷启动在线泛化）；无相似锚点时拒绝派生。
 - `predict_outcome` — 带 80% 区间的校准预测；返回 `prediction_id`，当情境命中已证实的成功簇时附带 `success_reference` 策略。

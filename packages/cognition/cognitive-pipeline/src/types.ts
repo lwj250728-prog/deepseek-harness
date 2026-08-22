@@ -837,6 +837,10 @@ export interface InspectResult {
 /** Raw experience text plus an optional explicit outcome for SAR extraction. */
 export interface RememberInput {
   readonly rawText: string
+  /** Optional goal-trace tag: remember this experience as a member of the
+   * given chain (the goal-anchored chain the orchestrator or caller is
+   * executing), so the offline consolidation can assemble it. */
+  readonly chainId?: string
 }
 
 /** One simulated-experience request: a hypothetical situation and proposed action. */
