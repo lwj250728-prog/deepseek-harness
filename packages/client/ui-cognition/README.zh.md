@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-Web 学习会话区功能所有者：贡献 `sidebar.learning` 席位——侧边栏中工作区/会话浏览区与脚部之间可折叠的学习区，展示[认知流水线](../cognitive-pipeline/README.md)的自主探索任务队列。这是 [cognitive-orchestration](../cognitive-orchestration/README.md) 调度器静默执行的那条队列的人类可读面：待执行、学习中、已完成、已失败任务及其目标与结果，让人能看到代理正在学什么，无需翻存储或模型工具。
+Web 学习会话区功能所有者：贡献 `sidebar.learning` 席位——侧边栏中工作区/会话浏览区与脚部之间可折叠的学习区，展示[认知流水线](../../cognition/cognitive-pipeline/README.md)的自主探索任务队列。这是 [cognitive-orchestration](../../cognition/cognitive-orchestration/README.md) 调度器静默执行的那条队列的人类可读面：待执行、学习中、已完成、已失败任务及其目标与结果，让人能看到代理正在学什么，无需翻存储或模型工具。
 
 数据按需通过 `cognition.list` RPC 到达：首次展开拉取一次，手动刷新按钮重新拉取。无轮询，空闲浏览器零开销。区块头部显示任务总数与学习中徽标；正文提供状态筛选（全部/待执行/学习中/已完成/已失败）与各状态计数，每行可展开查看完整目标、结果文本与创建时间。侧边栏折叠为 rail 时，学习区变为带学习计数徽标的单图标触发器，点击展开整列。
 

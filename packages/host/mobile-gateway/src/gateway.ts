@@ -450,6 +450,8 @@ function forwardUpgrade(state: GatewayState, req: IncomingMessage, socket: Duple
  * Create and start the gateway. Resolves once the listener is bound; rejects
  * on bind failure (EADDRINUSE and friends), so the DSH Loader reports the
  * failed fiber.
+ * @param options - the gateway configuration.
+ * @returns the started gateway handle.
  */
 export function createGateway(options: GatewayOptions): Promise<GatewayHandle> {
   const state: GatewayState = {

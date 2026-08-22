@@ -21,7 +21,11 @@ export const SESSION_COOKIE = 'dsh_mgw_session'
 /** Session value version prefix, so future formats can migrate cleanly. */
 const SESSION_PREFIX = 'dshg1.'
 
-/** Length-checked, timing-safe string equality (attacker-controlled input first). */
+/** Length-checked, timing-safe string equality (attacker-controlled input first).
+ * @param expected - the expected value.
+ * @param given - the attacker-controlled value to compare.
+ * @returns true when both length and bytes match.
+ */
 export function constantEqual(expected: string, given: string): boolean {
   const a = Buffer.from(given)
   const b = Buffer.from(expected)
@@ -33,6 +37,10 @@ export function constantEqual(expected: string, given: string): boolean {
  * Resolve a login by (name, token). The name must exist and the token must
  * match that user's token exactly (timing-safe). Unknown names and wrong
  * tokens are indistinguishable failures.
+ * @param users - the whitelist.
+ * @param name - the claimed user name.
+ * @param token - the claimed token.
+ * @returns the matching user, or undefined.
  */
 export function authenticate(users: readonly GatewayUser[], name: string, token: string): GatewayUser | undefined {
   const user = users.find(candidate => candidate.name === name)
@@ -43,6 +51,9 @@ export function authenticate(users: readonly GatewayUser[], name: string, token:
 /**
  * Token-only login fallback: find ANY whitelisted user carrying the token.
  * Iterates the whole list so the time cost does not reveal the matching slot.
+ * @param users - the whitelist.
+ * @param token - the token to match.
+ * @returns the carrying user, or undefined.
  */
 export function authenticateByToken(users: readonly GatewayUser[], token: string): GatewayUser | undefined {
   let hit: GatewayUser | undefined
@@ -70,6 +81,10 @@ function b64url(input: string | Buffer): string {
  * HMAC-SHA256 over the payload with the gateway secret; the payload carries
  * the user and an absolute expiry, and {@link verifySession} re-checks the
  * whitelist on every read, so rotating a token revokes live sessions.
+ * @param secret - the gateway HMAC secret.
+ * @param name - the authenticated user name.
+ * @param ttlSeconds - the session lifetime in seconds.
+ * @returns the signed cookie value.
  */
 export function createSession(secret: string, name: string, ttlSeconds: number): string {
   const payload: SessionPayload = { n: name, e: Math.floor(Date.now() / 1000) + ttlSeconds }
@@ -82,6 +97,10 @@ export function createSession(secret: string, name: string, ttlSeconds: number):
  * Verify a cookie value and return the authenticated user name, or null when
  * the value is missing, malformed, unverifiable, expired, or names a user no
  * longer on the whitelist.
+ * @param secret - the gateway HMAC secret.
+ * @param cookieValue - the cookie value, or undefined.
+ * @param users - the whitelist.
+ * @returns the verified user name, or null.
  */
 export function verifySession(
   secret: string,
@@ -108,7 +127,9 @@ export function verifySession(
   return payload.n
 }
 
-/** A fresh random gateway secret (used when config leaves `secret` empty). */
+/** A fresh random gateway secret (used when config leaves `secret` empty).
+ * @returns a 32-byte hex secret.
+ */
 export function randomSecret(): string {
   return randomBytes(32).toString('hex')
 }
@@ -118,6 +139,8 @@ export function randomSecret(): string {
  * into whitelist entries. Malformed pairs are dropped (fail closed). Also
  * accepts a bare `name=token` separator for shells that dislike colons in
  * variable values.
+ * @param raw - the env value, or undefined.
+ * @returns the parsed whitelist entries.
  */
 export function parseUsersEnv(raw: string | undefined): GatewayUser[] {
   if (raw === undefined || raw.trim() === '') return []

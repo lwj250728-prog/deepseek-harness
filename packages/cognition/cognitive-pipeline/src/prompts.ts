@@ -172,7 +172,11 @@ export const ACCUMULATE_SYSTEM_PROMPT = [
   '}',
 ].join('\n')
 
-/** Frame template-5 input with the completed episode and similar history. */
+/** Frame template-5 input with the completed episode and similar history.
+ * @param episode - the completed turn's situation/action/outcome material.
+ * @param similar - retrieved history hits for the novelty judgment.
+ * @returns the framed prompt text.
+ */
 export function frameAccumulateInput(
   episode: { situation: string; action: string; outcome: string },
   similar: readonly { expId: string; text: string; similarity: number }[],
@@ -238,7 +242,11 @@ export const DERIVE_REFERENCE_SYSTEM_PROMPT = [
   '}',
 ].join('\n')
 
-/** Frame template-6 input with the query and its similar history. */
+/** Frame template-6 input with the query and its similar history.
+ * @param query - the current situation/action to anchor the derivation.
+ * @param similar - the retrieved similar history hits.
+ * @returns the framed prompt text.
+ */
 export function frameDeriveReferenceInput(
   query: { situation: string; action: string },
   similar: readonly { expId: string; text: string; similarity: number }[],
@@ -267,7 +275,11 @@ export const REFINE_RETRIEVAL_SYSTEM_PROMPT = [
   '}',
 ].join('\n')
 
-/** Frame template-7 input with the query and the fused candidates. */
+/** Frame template-7 input with the query and the fused candidates.
+ * @param query - the current situation/action being predicted.
+ * @param candidates - the fused candidates, best first.
+ * @returns the framed prompt text.
+ */
 export function frameRefineRetrievalInput(
   query: { situation: string; action: string },
   candidates: readonly { expId: string; text: string; similarity: number }[],
@@ -303,7 +315,11 @@ export const PROPOSE_ACCEPTANCE_SYSTEM_PROMPT = [
   '}',
 ].join('\n')
 
-/** Frame template-8 input with the failing criteria and the deviation evidence. */
+/** Frame template-8 input with the failing criteria and the deviation evidence.
+ * @param flagged - the failing active criteria (deviation gate already crossed).
+ * @param deviationMeta - related deviation meta experiences.
+ * @returns the framed prompt text.
+ */
 export function frameProposeAcceptanceInput(
   flagged: readonly AcceptanceCheck[],
   deviationMeta: readonly { expId: string; text: string }[],
@@ -349,7 +365,12 @@ export const PROPOSE_TRIGGER_JUMPS_SYSTEM_PROMPT = [
   '}',
 ].join('\n')
 
-/** Frame template-9 input with the trigger lexicons and important experiences. */
+/** Frame template-9 input with the trigger lexicons and important experiences.
+ * @param staticTriggers - the static behavior trigger words.
+ * @param derived - the derived trigger words with weights.
+ * @param samples - important experience samples for context.
+ * @returns the framed prompt text.
+ */
 export function frameProposeTriggerJumpsInput(
   staticTriggers: readonly string[],
   derived: readonly { word: string; weight: number }[],

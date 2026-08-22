@@ -97,7 +97,9 @@ export interface JumpAccumulation {
 /** The raw co-occurrence accumulator keyed by jump word then trigger word. */
 export type JumpAccumulator = Map<string, Map<string, JumpAccumulation>>
 
-/** Initialize an empty jump accumulator. */
+/** Initialize an empty jump accumulator.
+ * @returns a fresh empty accumulator.
+ */
 export function emptyJumpAccumulator(): JumpAccumulator {
   return new Map()
 }

@@ -605,7 +605,9 @@ export async function reconstructTaxonomy(
   }
 }
 
-/** Deterministic template-5 fallback: reject accumulation (no route → no gate). */
+/** Deterministic template-5 fallback: reject accumulation (no route → no gate).
+ * @returns the rejection decision.
+ */
 export function accumulationFallback(): AccumulationDecision {
   return { shouldAccumulate: false, sar: null }
 }
@@ -666,7 +668,9 @@ export async function evaluateAccumulation(
   }
 }
 
-/** Deterministic template-6 fallback: reject derivation (no route → no reference). */
+/** Deterministic template-6 fallback: reject derivation (no route → no reference).
+ * @returns the rejection decision.
+ */
 export function deriveReferenceFallback(): DeriveReferenceDecision {
   return { shouldDerive: false, sar: null }
 }
@@ -727,7 +731,9 @@ export async function deriveReference(
   }
 }
 
-/** Deterministic template-7 fallback: keep the fused ranking untouched. */
+/** Deterministic template-7 fallback: keep the fused ranking untouched.
+ * @returns the keep decision.
+ */
 export function refineRetrievalFallback(): RefineRetrievalDecision {
   return { shouldKeep: true, rejectedExpId: null, reason: null }
 }
@@ -775,7 +781,9 @@ export async function refineRetrieval(
   }
 }
 
-/** Deterministic template-8 fallback: no proposals (no route → no self-legislation). */
+/** Deterministic template-8 fallback: no proposals (no route → no self-legislation).
+ * @returns the empty-proposal decision.
+ */
 export function proposeAcceptanceFallback(): AcceptanceProposalDecision {
   return { proposals: [] }
 }
@@ -866,7 +874,9 @@ export interface TriggerJumpProposalDecision {
   readonly jumps: readonly TriggerJumpProposal[]
 }
 
-/** Deterministic template-9 fallback: no proposals (no route → no LLM jumps). */
+/** Deterministic template-9 fallback: no proposals (no route → no LLM jumps).
+ * @returns the empty-proposal decision.
+ */
 export function triggerJumpsFallback(): TriggerJumpProposalDecision {
   return { jumps: [] }
 }

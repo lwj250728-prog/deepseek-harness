@@ -8,7 +8,7 @@ Status: proposed
 
 认知流水线的检索完全确定。每条召回路径——热环的 `retrieveTopK`、orchestrator 的 `retrieve()`、`dsh-cognitive-inject` 的步骤预热——都用哈希词袋余弦加精确子串症状通道打分。LLM 路由只参与经验的*处理*（`extractSar`、`reviewOod`、`calibrate`、`reconstructTaxonomy`），从不参与经验的*检索*。对真实 bug 经验实测，确定性通道只在症状逐字出现在存储文本中时才命中短查询，且无法表达经验之间的同义、因果或冲突。
 
-流水线的设计意图是以模型能力检索的经验网络（设计中的 `all-MiniLM-L6-v2` / `text-embedding-3-small` 检索轴），而非按哈希关键词匹配的平铺列表。当前实现把确定性下界当成了架构：[症状优先召回工作](../feature/2026-08-18-symptom-first-sar-extraction-and-recall.md)改善了地板，却没有迈向天花板。驱动这几轮的 bug 级细粒度处理是*下界展示*，不是设计目标。
+流水线的设计意图是以模型能力检索的经验网络（设计中的 `all-MiniLM-L6-v2` / `text-embedding-3-small` 检索轴），而非按哈希关键词匹配的平铺列表。当前实现把确定性下界当成了架构：[症状优先召回工作](../../implemented/feature/2026-08-18-symptom-first-sar-extraction-and-recall.md)改善了地板，却没有迈向天花板。驱动这几轮的 bug 级细粒度处理是*下界展示*，不是设计目标。
 
 ## 提案
 

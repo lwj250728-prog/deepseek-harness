@@ -1183,5 +1183,5 @@ taxonomy(): TaxonomyState | null
 tempStrategies(): readonly TempStrategy[]
 ```
 
-Source: [`packages/cognition/cognitive-pipeline/src/service.ts:573`](../../packages/cognition/cognitive-pipeline/src/service.ts)
+Source: [`packages/cognition/cognitive-pipeline/src/service.ts:581`](../../packages/cognition/cognitive-pipeline/src/service.ts)
 <!-- END GENERATED cordis-surface -->

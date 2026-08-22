@@ -483,17 +483,25 @@ export class CognitiveLoopRegistry {
     return this
   }
 
-  /** Whether a loop with this name is registered. */
+  /** Whether a loop with this name is registered.
+   * @param name - the loop name.
+   * @returns true when registered.
+   */
   has(name: string): boolean {
     return this.loops.has(name)
   }
 
-  /** The registered loop spec, or undefined. */
+  /** The registered loop spec, or undefined.
+   * @param name - the loop name.
+   * @returns the spec, or undefined.
+   */
   get(name: string): MetaLoopSpec | undefined {
     return this.loops.get(name)
   }
 
-  /** Every registered loop, in registration order. */
+  /** Every registered loop, in registration order.
+   * @returns the loop specs.
+   */
   list(): readonly MetaLoopSpec[] {
     return [...this.loops.values()]
   }

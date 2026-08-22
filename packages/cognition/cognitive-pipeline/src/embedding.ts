@@ -98,7 +98,10 @@ export class EmbeddingScorer {
     private readonly injectedTransport?: EmbeddingTransport,
   ) {}
 
-  /** Embed one text; null when the endpoint is unreachable or no key exists. */
+  /** Embed one text; null when the endpoint is unreachable or no key exists.
+   * @param text - the text to embed.
+   * @returns the embedding vector, or null on failure.
+   */
   async embed(text: string): Promise<number[] | null> {
     const hit = this.cache.get(text)
     if (hit !== undefined) return hit

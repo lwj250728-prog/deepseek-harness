@@ -1,0 +1,1 @@
+[{"checkId":"check_1","criterion":"声称门禁修复完成前，必须给出实际运行的验证证据（gate 名称 + 输出中的 pass 计数）。","trigger":"门禁","evidenceHint":"gate 全绿输出，如 \"28 passed, 0 failed\"","status":"active","invokedCount":1,"passedCount":1,"violatedCount":0,"cumulativeError":0,"errorFoldCount":0,"revision":1,"createdAt":1787388259565,"updatedAt":1787388259565}]

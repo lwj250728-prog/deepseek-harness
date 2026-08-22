@@ -33,7 +33,9 @@ import { ACTION_VECTOR_DIM, actionVector } from './vectorizer.ts'
 /** How many calibration deciles the lifetime stats keep. */
 export const CALIBRATION_BUCKETS = 10
 
-/** Local date key of the exploration budget window (`YYYY-MM-DD`). */
+/** Local date key of the exploration budget window (`YYYY-MM-DD`).
+ * @returns the local date key.
+ */
 export function todayKey(): string {
   const now = new Date()
   const month = String(now.getMonth() + 1).padStart(2, '0')
@@ -816,7 +818,9 @@ export class CognitiveStore {
 
   // ── autonomous exploration tasks ─────────────────────────────────────────
 
-  /** Snapshot of every queued exploration task, insertion order. */
+  /** Snapshot of every queued exploration task, insertion order.
+   * @returns the task list.
+   */
   explorationTasksSnapshot(): readonly ExplorationTask[] {
     return [...this.explorationTasks.values()]
   }
@@ -875,7 +879,9 @@ export class CognitiveStore {
     return this.loopExecutions.get(receiptId)
   }
 
-  /** Snapshot of every loop-execution receipt, insertion order. */
+  /** Snapshot of every loop-execution receipt, insertion order.
+   * @returns the receipt list.
+   */
   loopExecutionsSnapshot(): readonly LoopExecutionReceipt[] {
     return [...this.loopExecutions.values()]
   }
@@ -944,7 +950,9 @@ export class CognitiveStore {
     return this.acceptance.get(checkId)
   }
 
-  /** Snapshot of every acceptance criterion, insertion order. */
+  /** Snapshot of every acceptance criterion, insertion order.
+   * @returns the criterion list.
+   */
   acceptanceSnapshot(): readonly AcceptanceCheck[] {
     return [...this.acceptance.values()]
   }
@@ -975,7 +983,9 @@ export class CognitiveStore {
     this.enqueueLines('claim_audits.jsonl', [...this.claimAudits.values()])
   }
 
-  /** Snapshot of every claim audit, insertion order. */
+  /** Snapshot of every claim audit, insertion order.
+   * @returns the audit list.
+   */
   claimAuditsSnapshot(): readonly ClaimAudit[] {
     return [...this.claimAudits.values()]
   }
@@ -1049,7 +1059,9 @@ export class CognitiveStore {
     return this.triggerJumps.get(jumpWord)
   }
 
-  /** Snapshot of every trigger jump, insertion order. */
+  /** Snapshot of every trigger jump, insertion order.
+   * @returns the jump list.
+   */
   triggerJumpsSnapshot(): readonly TriggerJump[] {
     return [...this.triggerJumps.values()]
   }
@@ -1080,7 +1092,9 @@ export class CognitiveStore {
     this.enqueueLines('injections.jsonl', [...this.injections.values()])
   }
 
-  /** Snapshot of every injection record, insertion order. */
+  /** Snapshot of every injection record, insertion order.
+   * @returns the injection list.
+   */
   injectionsSnapshot(): readonly InjectionRecord[] {
     return [...this.injections.values()]
   }
@@ -1136,7 +1150,9 @@ export class CognitiveStore {
     return this.chains.get(chainId)
   }
 
-  /** Snapshot of every chain, insertion order. */
+  /** Snapshot of every chain, insertion order.
+   * @returns the chain list.
+   */
   chainsSnapshot(): readonly ChainExperience[] {
     return [...this.chains.values()]
   }
@@ -1175,7 +1191,9 @@ export class CognitiveStore {
     return this.chainPatterns.get(patternId)
   }
 
-  /** Snapshot of every chain pattern, insertion order. */
+  /** Snapshot of every chain pattern, insertion order.
+   * @returns the pattern list.
+   */
   chainPatternsSnapshot(): readonly ChainPattern[] {
     return [...this.chainPatterns.values()]
   }

@@ -1,0 +1,1 @@
+{"date":"2026-08-22","used":1,"entries":[{"ts":1787387207055,"action":"按包分组逐文件补齐 JSDoc（先 cognition 三文件后 mobile-gateway 三文件），每补完一组立即重跑 verify-export-jsdoc 收敛","scratchpadHash":"4251661485","reversible":true,"outcome":null,"validatedError":0.30000000000000004,"validated":false}]}

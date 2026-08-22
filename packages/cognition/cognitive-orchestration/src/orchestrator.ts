@@ -175,7 +175,10 @@ export function usageOf(session: Session | undefined): TokenUsage | null {
   return totals
 }
 
-/** One-line token accounting for an experience's outcome text. */
+/** One-line token accounting for an experience's outcome text.
+ * @param usage - the token usage to summarize.
+ * @returns the human-readable one-line accounting.
+ */
 export function usageLine(usage: TokenUsage): string {
   const parts = [`token：输入 ${usage.inputTokens}`, `输出 ${usage.outputTokens}`]
   if ((usage.cacheReadTokens ?? 0) > 0) parts.push(`缓存命中 ${usage.cacheReadTokens}`)
@@ -204,7 +207,10 @@ export interface ToolDelegationResult {
   readonly content?: readonly { type?: string; text?: string }[]
 }
 
-/** Extract the delegation task summary from the tool arguments. */
+/** Extract the delegation task summary from the tool arguments.
+ * @param arguments_ - the delegation tool arguments.
+ * @returns the task summary, or '' when nothing usable is present.
+ */
 export function delegationTask(arguments_: Readonly<Record<string, unknown>> | undefined): string {
   const prompt = arguments_?.prompt
   if (typeof prompt === 'string' && prompt.trim().length > 0) return prompt.trim().slice(0, 200)
@@ -213,7 +219,10 @@ export function delegationTask(arguments_: Readonly<Record<string, unknown>> | u
   return ''
 }
 
-/** Join the delegation result text blocks. */
+/** Join the delegation result text blocks.
+ * @param result - the delegation outcome.
+ * @returns the joined, trimmed text.
+ */
 export function delegationOutput(result: ToolDelegationResult): string {
   return (result.content ?? [])
     .filter((block): block is { type: string; text: string } => block.type === 'text' && typeof block.text === 'string')

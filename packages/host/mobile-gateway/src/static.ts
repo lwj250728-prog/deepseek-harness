@@ -44,17 +44,24 @@ function loadFile(fileName: string, contentType: string): StaticFile {
   return file
 }
 
-/** The PWA manifest, served at `${PREFIX}/manifest.webmanifest`. */
+/** The PWA manifest, served at `${PREFIX}/manifest.webmanifest`.
+ * @returns the manifest file.
+ */
 export function manifestFile(): StaticFile {
   return loadFile('manifest.webmanifest', 'application/manifest+json; charset=utf-8')
 }
 
-/** The service worker, served at `${PREFIX}/sw.js`. */
+/** The service worker, served at `${PREFIX}/sw.js`.
+ * @returns the service-worker file.
+ */
 export function serviceWorkerFile(): StaticFile {
   return loadFile('sw.js', 'text/javascript; charset=utf-8')
 }
 
-/** App icon at the given size, served at `${PREFIX}/icon-<size>.png`. */
+/** App icon at the given size, served at `${PREFIX}/icon-<size>.png`.
+ * @param size - the icon size in pixels.
+ * @returns the icon file.
+ */
 export function iconFile(size: 192 | 512): StaticFile {
   return loadFile(`icon-${size}.png`, 'image/png')
 }
@@ -62,6 +69,9 @@ export function iconFile(size: 192 | 512): StaticFile {
 /**
  * The login page, with the gateway version and whether TLS is active baked in
  * (the page shows the right install guidance for the scheme it is served on).
+ * @param version - the gateway version to render.
+ * @param secure - whether the gateway is served over TLS.
+ * @returns the login page HTML.
  */
 export function loginPageHtml(version: string, secure: boolean): string {
   let html: string
@@ -81,6 +91,7 @@ export function loginPageHtml(version: string, secure: boolean): string {
  * A viewport meta is deliberately NOT part of the snippet: the gateway adds
  * one only when the upstream page has none, so an existing viewport is never
  * duplicated.
+ * @returns the meta HTML snippet.
  */
 export function webMetaSnippet(): string {
   return [
@@ -93,7 +104,9 @@ export function webMetaSnippet(): string {
   ].join('')
 }
 
-/** Root existence probe (for tests and diagnostics). */
+/** Root existence probe (for tests and diagnostics).
+ * @returns true when the static directory exists.
+ */
 export function staticRootPresent(): boolean {
   return existsSync(STATIC_DIR)
 }

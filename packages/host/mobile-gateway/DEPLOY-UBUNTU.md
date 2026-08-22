@@ -1,8 +1,6 @@
 # DSH Mobile Gateway — Ubuntu 服务器部署手册
 
-> 适用场景：**DSH 本体部署在 Ubuntu 服务器上**，手机通过公网直接访问服务器上的 DSH Web。
-> 本手册把鉴权网关插件（`mobile-gateway`）装进服务器的 DSH，手机经 `https://服务器IP:4080` 安全访问。
-> **不需要 frp 中转**——frp 只在 DSH 与公网服务器不在同一台机器时才需要（见 `frp/README.md`）。
+> 适用场景：**DSH 本体部署在 Ubuntu 服务器上**，手机通过公网直接访问服务器上的 DSH Web。本手册把鉴权网关插件（`mobile-gateway`）装进服务器的 DSH，手机经 `https://服务器IP:4080` 安全访问。**不需要 frp 中转**——frp 只在 DSH 与公网服务器不在同一台机器时才需要（见 `frp/README.md`）。
 
 ## 目标架构
 
