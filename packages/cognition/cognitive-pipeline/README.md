@@ -141,7 +141,7 @@ All fields optional; engine defaults follow the design documents.
 | `simulationFastTrackThreshold` | `0.8` | Evidence weight at/above which one feedback fast-tracks a simulation to provisional verified |
 | `simulationPermanentThreshold` | `2` | Cumulative evidence score needed for permanent verified |
 | `simulationTtlMs` | `2_592_000_000` | Fallback TTL (30 days) after which an unverified simulation expires |
-| `autoAccumulate` | `false` | Automatically accumulate completed turns as experiences when the LLM route judges them worth it (pure chat never reaches the gate) |
+| `autoAccumulate` | `false` | Automatically accumulate completed turns as experiences when the LLM route judges them worth it (pure chat never reaches the gate). Self-reflexive turns (a tool call that kills/restarts the agent's own host process) are annotated for the gate — the causal chain after the kill is unobservable from the session ledger, so the reconstructed action is marked speculative and must not be asserted as fact without external witnessing |
 | `acceptanceMinEvidenceCount` | `3` | Minimum invoked audits before a criterion's deviation rate can flag rework and record a deviation meta experience |
 | `acceptanceDeviationThreshold` | `0.5` | Violation ratio (violated/invoked) at/above which an applied criterion flags rework on an audit |
 | `acceptanceCommandExecution` | `false` | Whether `verify_claim` command anchors may actually run the supplied command and settle on its exit code; a model-supplied command is a real execution surface, so this is OFF by default |

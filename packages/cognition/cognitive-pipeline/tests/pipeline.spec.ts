@@ -421,6 +421,7 @@ describe('cognitive pipeline integration', () => {
         toolCallCount: 0,
         failed: false,
         turnId: 1,
+        selfReflexive: false,
       })
       expect(result).toBeNull()
       expect(ctx.cognitivePipeline.store.experiencesSnapshot().length).toBe(before)
@@ -451,6 +452,7 @@ describe('cognitive pipeline integration', () => {
         toolCallCount: 3,
         failed: true,
         turnId: 2,
+        selfReflexive: false,
       })
       expect(expId).not.toBeNull()
       const stored = ctx.cognitivePipeline.store.getExperience(expId as string)
@@ -478,11 +480,11 @@ describe('cognitive pipeline integration', () => {
         toolCallCount: 2,
         failed: false,
         turnId: 3,
+        selfReflexive: false,
       })
       expect(result).toBeNull()
       expect(ctx.cognitivePipeline.store.experiencesSnapshot().length).toBe(before)
-    } finally {
-      await teardown()
+    } finally {      await teardown()
     }
   })
 
@@ -553,6 +555,97 @@ describe('cognitive pipeline integration', () => {
     expect(episode.failed).toBe(false)
     expect(episode.toolCallCount).toBe(0)
     expect(episode.outcome).toContain('轮次结束（error）')
+  })
+
+  it('flags self-reflexive turns: a pwsh Stop-Process call marks the episode', () => {
+    const session = Session.create(SessionId('reconstruct-selfref'))
+    session.append('turn/start', { turn: 1 })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: '重启 DSH Web 服务并验证' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    // The self-reflexive call: pwsh arguments carry a process-kill signature.
+    session.append('tool/call', { turn: 1, step: 1, callId: CallId('call-1'), name: 'pwsh', arguments: JSON.stringify({ command: 'Stop-Process -Id 3928 -Force' }) })
+    session.append('tool/result', {
+      turn: 1,
+      step: 1,
+      message: createToolResultMessage({ callId: CallId('call-1'), content: [{ type: 'text', text: 'ok' }], isError: false }),
+    }, { surfaceOp: 'append' })
+    session.append('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: createMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: '服务已恢复' }],
+        source: { kind: 'model', provider: 'mock', model: 'mock' },
+      }),
+    }, { surfaceOp: 'append' })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+    const endEvent = session.events.findLast(event => event.type === 'turn/end') as SessionEvent<'turn/end'>
+    const episode = reconstructTurn(session, endEvent)
+    expect(episode.selfReflexive).toBe(true)
+    expect(episode.toolCallCount).toBe(1)
+  })
+
+  it('does not flag benign pwsh calls (no kill signature) as self-reflexive', () => {
+    const session = Session.create(SessionId('reconstruct-benign'))
+    session.append('turn/start', { turn: 1 })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: '查一下磁盘占用' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    session.append('tool/call', { turn: 1, step: 1, callId: CallId('call-1'), name: 'pwsh', arguments: JSON.stringify({ command: 'Get-PSDrive' }) })
+    session.append('tool/result', {
+      turn: 1,
+      step: 1,
+      message: createToolResultMessage({ callId: CallId('call-1'), content: [{ type: 'text', text: 'C: 120GB' }], isError: false }),
+    }, { surfaceOp: 'append' })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+    const endEvent = session.events.findLast(event => event.type === 'turn/end') as SessionEvent<'turn/end'>
+    const episode = reconstructTurn(session, endEvent)
+    expect(episode.selfReflexive).toBe(false)
+  })
+
+  it('annotates self-reflexive turns before the accumulation gate so the LLM cannot hallucinate the action', async () => {
+    // The LLM gate returns a fabricated action (as it did for exp_155); the
+    // annotation must make it to the gate's input so a compliant gate rejects
+    // or hedges instead of asserting it as fact.
+    const gate = JSON.stringify({
+      should_accumulate: true,
+      situation: '重启 DSH Web 服务并验证',
+      action: '执行重启任务，包括停止进程、重启服务、验证端口',
+      outcome: '服务已恢复',
+      material_gain: 8,
+      emotional_valence: 7,
+      energy_cost: 5,
+    })
+    const { ctx, adapter, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm', autoAccumulate: true },
+      [gate],
+    )
+    try {
+      const expId = await ctx.cognitivePipeline.accumulateTurn({
+        situation: '重启 DSH Web 服务并验证',
+        action: '调用 pwsh；调用 pwsh',
+        outcome: '服务已恢复',
+        toolCallCount: 2,
+        failed: false,
+        turnId: 4,
+        selfReflexive: true,
+      })
+      // The annotation reaches the gate's framed input.
+      const framed = adapter!.lastOptions?.messages?.at(-1)
+      const text = typeof framed === 'string' ? framed : JSON.stringify(framed)
+      expect(text).toContain('自反操作')
+      expect(text).toContain('推测性行动')
+      expect(text).toContain('外部执行')
+      // The experience is still accumulated (hedged, not dropped).
+      expect(expId).not.toBeNull()
+    } finally {
+      await teardown()
+    }
   })
 
   it('queues and inspects an autonomous exploration task through the explore() API', async () => {

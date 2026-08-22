@@ -62,6 +62,7 @@ export function reconstructTurn(session: Session, endEvent: SessionEvent<'turn/e
   const outcomes: string[] = []
   let toolCallCount = 0
   let failed = false
+  let selfReflexive = false
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index] as SessionEvent
     if (event.type === 'turn/start' && event.data.turn === turn) break
@@ -88,6 +89,14 @@ export function reconstructTurn(session: Session, endEvent: SessionEvent<'turn/e
         toolCallCount += 1
         const name = typeof data.name === 'string' ? data.name : '?'
         actions.push(`调用 ${name}`)
+        // Self-reflexive detection: a tool call whose arguments plausibly kill
+        // the agent's own host (process termination / service restart). The
+        // causal chain AFTER this call is unobservable from this ledger —
+        // whatever "restarted the service" did was done by something outside
+        // this session, so the reconstructed action may be speculative.
+        if (selfReflexiveArguments(name, typeof data.arguments === 'string' ? data.arguments : '')) {
+          selfReflexive = true
+        }
         break
       }
       case 'tool/result': {
@@ -110,7 +119,21 @@ export function reconstructTurn(session: Session, endEvent: SessionEvent<'turn/e
     toolCallCount,
     failed,
     turnId: turn,
+    selfReflexive,
   }
+}
+
+/** Whether one tool call plausibly terminates or restarts the agent's own host
+ * process — the self-reflexive operations after which this session's ledger
+ * cannot observe what actually happened (the causal chain is broken at the
+ * kill point; any later "restart" was done by an external actor). Checks the
+ * tool arguments (the JSON string) for process-termination signatures, since
+ * the tool NAME alone (e.g. `pwsh`) is shared with countless benign calls. */
+function selfReflexiveArguments(name: string, argumentsJson: string): boolean {
+  if (name === 'pwsh' || name === 'shell' || name === 'bash') {
+    return /Stop-Process|kill\b|taskkill|net stop|restart.*service|Restart-|sc stop/i.test(argumentsJson)
+  }
+  return /(^|_)(stop|kill|restart|terminate)(_|$)/i.test(name)
 }
 
 /**

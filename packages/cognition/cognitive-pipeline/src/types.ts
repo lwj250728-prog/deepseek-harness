@@ -313,6 +313,11 @@ export interface TurnEpisode {
   readonly failed: boolean
   /** The turn sequence number. */
   readonly turnId: number
+  /** Whether the turn performed a self-reflexive operation (e.g. killing its
+   * own host process): the causal chain after the operation is unobservable
+   * from this session's ledger, so any reconstructed action after it may be
+   * speculative and needs external witnessing to be trusted. */
+  readonly selfReflexive: boolean
 }
 
 /** The LLM route's accumulation judgment for one episode. */

@@ -142,7 +142,7 @@ ctx.cognitivePipeline.rebuildCognitionObject(name)               // → { kind, 
 | `simulationFastTrackThreshold` | `0.8` | 单次反馈使模拟快速晋升为临时 verified 所需的证据权重 |
 | `simulationPermanentThreshold` | `2` | 永久 verified 所需的累计证据分 |
 | `simulationTtlMs` | `2_592_000_000` | 未验证模拟过期的兜底 TTL（30 天） |
-| `autoAccumulate` | `false` | 完成的轮次自动沉淀为经验，由 LLM 路由判断是否值得（纯聊天不进入门） |
+| `autoAccumulate` | `false` | 完成的轮次自动沉淀为经验，由 LLM 路由判断是否值得（纯聊天不进入门）。自反轮次（调用杀死/重启自身宿主进程的工具）会为闸门加注——杀进程后的因果链在本会话内不可观测，重构的行动被标记为推测性，未经外部见证不得断言为事实 |
 | `acceptanceMinEvidenceCount` | `3` | 准则违规率可触发重写并记录偏离元经验所需的最小审计次数 |
 | `acceptanceDeviationThreshold` | `0.5` | 违规率（violated/invoked）达到或超过此值即在该次审计标记重写 |
 | `acceptanceCommandExecution` | `false` | `verify_claim` 的命令锚点是否允许真实运行所给命令并按退出码结算；模型提供的命令是真实执行面，默认关闭 |

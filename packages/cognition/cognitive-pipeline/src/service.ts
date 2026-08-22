@@ -896,7 +896,20 @@ export class CognitivePipelineService extends Service {
     const substantial = episode.toolCallCount > 0 || episode.failed
       || actionText.length >= ACCUMULATE_MIN_ACTION_CHARS || outcomeText.length >= ACCUMULATE_MIN_ACTION_CHARS
     if (!substantial) return null
-    const queryVector = actionVector(episode.action, [])
+    // Self-reflexive turns (killed own host): the causal chain after the kill
+    // is unobservable from this session's ledger, so annotate the material for
+    // the LLM gate — the reconstructed action may be speculative, and the
+    // experience it writes must say so instead of asserting it as fact
+    // (the exp_155 lesson: killing the host made the "restart" happen outside
+    // the session, but the LLM hallucinated it as the agent's own action).
+    const material = episode.selfReflexive
+      ? {
+        situation: `[自反操作：本轮疑似终止/重启了自身宿主进程，杀进程后的因果链在本会话内不可观测]\n${episode.situation}`,
+        action: `[推测性行动：杀进程后的实际动作由外部执行，非本会话记录；如无外部见证（状态文件/日志）请勿断言]\n${episode.action}`,
+        outcome: episode.outcome,
+      }
+      : { situation: episode.situation, action: episode.action, outcome: episode.outcome }
+    const queryVector = actionVector(material.action, [])
     const similar = this.store.experiencesSnapshot()
       .map(exp => ({
         expId: exp.expId,
@@ -906,11 +919,7 @@ export class CognitivePipelineService extends Service {
       .sort((a, b) => b.similarity - a.similarity)
       .slice(0, 3)
       .filter(hit => hit.similarity >= 0.3)
-    const decision = await evaluateAccumulation(this.ctx, this.resolved.route, {
-      situation: episode.situation,
-      action: episode.action,
-      outcome: episode.outcome,
-    }, similar, {
+    const decision = await evaluateAccumulation(this.ctx, this.resolved.route, material, similar, {
       sessionId: call?.sessionId,
       signal: call?.signal,
     })

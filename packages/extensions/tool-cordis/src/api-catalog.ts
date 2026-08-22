@@ -5021,7 +5021,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'TurnEpisode',
-    declaration: 'export interface TurnEpisode {\n    readonly situation: string;\n    readonly action: string;\n    readonly outcome: string;\n    readonly toolCallCount: number;\n    readonly failed: boolean;\n    readonly turnId: number;\n}',
+    declaration: 'export interface TurnEpisode {\n    readonly situation: string;\n    readonly action: string;\n    readonly outcome: string;\n    readonly toolCallCount: number;\n    readonly failed: boolean;\n    readonly turnId: number;\n    readonly selfReflexive: boolean;\n}',
   },
   {
     name: 'TypertCodec',

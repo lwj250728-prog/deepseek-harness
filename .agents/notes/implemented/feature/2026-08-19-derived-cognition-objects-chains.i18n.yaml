@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-19-derived-cognition-objects-chains.md
-2026-08-19-derived-cognition-objects-chains.md: 3b7f4d71500230a0df1c1326645d2a53c3e15504
-2026-08-19-derived-cognition-objects-chains.zh.md: 12d6d2d58842365bd20af20da31126ef308690ff
+2026-08-19-derived-cognition-objects-chains.md: aaf3d1a685faccedb1db8ee3a4f924bff041e774
+2026-08-19-derived-cognition-objects-chains.zh.md: 9ef8006003310534218f2b7c2f16ad3e006978c2
