@@ -28,7 +28,7 @@ import {
   tokenize,
 } from '@deepseek-ai/dsh-cognitive-pipeline'
 import type { CognitivePipelineService } from '@deepseek-ai/dsh-cognitive-pipeline'
-import type { OutcomePolarity } from '@deepseek-ai/dsh-cognitive-pipeline'
+import type { Experience, OutcomePolarity } from '@deepseek-ai/dsh-cognitive-pipeline'
 import {
   DERIVED_TRIGGER_MIN,
   deriveTriggerWords,
@@ -163,6 +163,7 @@ function retrieve(
 ): readonly RankedHit[] {
   const vector = actionVector(situation, [])
   const hits = service.store.experiencesSnapshot()
+    .filter(exp => !isTaskRestatement(exp))
     .map((exp): RankedHit => {
       const text = `${exp.sar.situation}。${exp.sar.action}。${exp.sar.outcome}`
       const semantic = Math.max(
@@ -180,6 +181,29 @@ function retrieve(
     .filter(hit => hit.similarity >= minSimilarity)
     .sort((a, b) => b.similarity - a.similarity)
   return coverViewpoints(hits, topK)
+}
+
+/**
+ * Whether one experience is a task-restatement record: its action merely
+ * re-states a delegated task instruction instead of describing real tool
+ * operations. Such records are auto-accumulated when a delegation turn is
+ * judged "substantial", but they carry NO reusable lesson — and because their
+ * situation is verbatim the task text, they rank at the top of every
+ * subsequent injection for that same task, crowding out the experiences that
+ * actually hold the solution (the exp_155/168 lesson). Injection skips them;
+ * the accumulation gate rejects new ones (template-5).
+ * @param exp - the experience to judge.
+ * @returns true when the action shows no tool-operation trace and the
+ *   situation reads like a task instruction.
+ */
+function isTaskRestatement(exp: Experience): boolean {
+  const action = exp.sar.action
+  const situation = exp.sar.situation
+  const hasToolTrace = /调用|pwsh|Start-Process|Stop-Process|glob|grep|read|write|edit|explore|consolidate|remember/i.test(action)
+  if (hasToolTrace) return false
+  const instructionLike = /(任务|需要|请完成|请执行|要求)/.test(situation)
+  const restatesDelegation = /(子代理执行|启动子代理|执行.{0,8}任务|按该|按照该|根据任务)/.test(action)
+  return instructionLike && restatesDelegation
 }
 
 /**

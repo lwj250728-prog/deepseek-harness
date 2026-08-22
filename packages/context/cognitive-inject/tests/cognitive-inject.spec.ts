@@ -491,4 +491,36 @@ describe('cognitive-inject priming', () => {
       await teardown()
     }
   })
+
+  it('skips task-restatement experiences so they cannot crowd the injection head (exp_155/168 lesson)', async () => {
+    const { ctx, teardown } = await mount()
+    try {
+      // A task-restatement record: situation is the verbatim task text, action
+      // merely re-states the delegation (no real tool trace). It would rank at
+      // the top for any injection of the same task.
+      seedExperience(
+        ctx.cognitivePipeline.store,
+        'exp_tsk',
+        '需要重启本机的 DSH Web 服务并验证重启成功，服务监听在 http://127.0.0.1:3080',
+        '子代理执行重启任务，包括停止现有进程、重启服务，并验证服务在指定端口上可正常访问',
+        '任务完成',
+      )
+      // The genuine lesson experience (independent-process restart).
+      seedExperience(
+        ctx.cognitivePipeline.store,
+        'exp_real',
+        '需要重启 DSH Web 服务',
+        '使用独立 PowerShell 进程执行重启，Start-Process 脱离会话进程树',
+        '重启成功',
+      )
+      const { agent } = stubAgent('taskrest-inject')
+      const injected = await fire(ctx, agent, 1, 1, '帮我重启 DSH Web 服务')
+      expect(injected.length).toBe(1)
+      // The restatement is skipped; the genuine experience is injected instead.
+      expect(injected[0]).not.toContain('exp_tsk')
+      expect(injected[0]).toContain('exp_real')
+    } finally {
+      await teardown()
+    }
+  })
 })

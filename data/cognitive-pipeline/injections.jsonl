@@ -7,3 +7,12 @@
 {"injectionId":"inject_7","createdAt":1787408780957,"expIds":["exp_1"],"triggerSource":"static:失败","jumpWords":[],"chainId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":true}
 {"injectionId":"inject_8","createdAt":1787409201431,"expIds":["exp_156"],"triggerSource":"static:为什么","jumpWords":[],"chainId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":false}
 {"injectionId":"inject_9","createdAt":1787409508670,"expIds":["exp_81","exp_156"],"triggerSource":"static:错误","jumpWords":[],"chainId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":false}
+{"injectionId":"inject_10","createdAt":1787412164985,"expIds":["exp_81","exp_156"],"triggerSource":"derived:现","jumpWords":[],"chainId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":true}
+{"injectionId":"inject_11","createdAt":1787413551078,"expIds":["exp_155"],"triggerSource":"static:测试","jumpWords":[],"chainId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":false}
+{"injectionId":"inject_12","createdAt":1787417314707,"expIds":["exp_1"],"triggerSource":"static:失败","jumpWords":[],"chainId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":true}
+{"injectionId":"inject_13","createdAt":1787417337451,"expIds":["exp_157","exp_65"],"triggerSource":"static:失败","jumpWords":[],"chainId":null,"sessionId":"d5186694-6708-4306-8f91-210ea344ad13","cited":false}
+{"injectionId":"inject_14","createdAt":1787417470314,"expIds":["exp_151","exp_157"],"triggerSource":"static:失败","jumpWords":[],"chainId":null,"sessionId":"d5186694-6708-4306-8f91-210ea344ad13","cited":false}
+{"injectionId":"inject_15","createdAt":1787420099174,"expIds":["exp_150","exp_156"],"triggerSource":"derived:可","jumpWords":[],"chainId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":false}
+{"injectionId":"inject_16","createdAt":1787420244256,"expIds":["exp_166"],"triggerSource":"derived:自","jumpWords":[],"chainId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":false}
+{"injectionId":"inject_17","createdAt":1787420431264,"expIds":["exp_106","exp_156"],"triggerSource":"static:为什么","jumpWords":[],"chainId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":false}
+{"injectionId":"inject_18","createdAt":1787420795611,"expIds":["exp_171"],"triggerSource":"static:怎么","jumpWords":[],"chainId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":null}
