@@ -342,6 +342,80 @@ export interface RefineRetrievalDecision {
   readonly reason: string | null
 }
 
+/** One LLM-proposed acceptance-criterion update (template 8), before the
+ * experience gate: a proposal only touches the ledger when it targets a
+ * demonstrably failing criterion (deviation rate at/above the threshold with
+ * enough invoked audits), carries a rationale, and carries concrete rewrite
+ * text for `rewrite` — criteria are self-amended only through the data gate,
+ * never by fiat. */
+export interface AcceptanceProposal {
+  /** The criterion to update; must be a currently failing active check. */
+  readonly checkId: string
+  readonly action: 'rewrite' | 'retire'
+  /** New criterion statement for `rewrite` (required). */
+  readonly criterion?: string
+  /** New evidence hint for `rewrite` (required). */
+  readonly evidenceHint?: string
+  /** New trigger marker for `rewrite` (optional). */
+  readonly trigger?: string
+  /** Why the change is warranted, citing the criterion's ledger evidence. */
+  readonly rationale: string
+}
+
+/** The LLM route's acceptance-update judgment (template 8). */
+export interface AcceptanceProposalDecision {
+  readonly proposals: readonly AcceptanceProposal[]
+}
+
+/** How one trigger-jump association was sourced. */
+export type TriggerJumpSource = 'cooccurrence' | 'llm'
+
+/** One trigger-jump association: a word whose presence activates
+ * evidence-backed trigger words in the injection gate — the associative layer
+ * over the static and derived trigger lexicons. Every jump carries its
+ * evidence (distinct experiences, summed importance, or an LLM rationale),
+ * its measured utility (citation rate from the injection loop), and its
+ * source — nothing enters the lexicon without an accountable basis. */
+export interface TriggerJump {
+  /** The jump word (a token in experience text or an LLM-proposed variant). */
+  readonly jumpWord: string
+  /** The trigger words this jump activates, with evidence-backed weights. */
+  readonly triggers: readonly {
+    readonly trigger: string
+    readonly weight: number
+    readonly evidenceCount: number
+  }[]
+  /** Total distinct experiences backing this jump (0 for LLM-sourced jumps). */
+  readonly evidenceCount: number
+  readonly source: TriggerJumpSource
+  /** Why an LLM-sourced jump exists; empty for co-occurrence jumps. */
+  readonly rationale: string
+  /** Times this jump was hit in the injection gate. */
+  readonly hitCount: number
+  /** Times a hit was followed by a cited injection (measured utility). */
+  readonly citedCount: number
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
+/** One injection event, recorded for citation-rate measurement: did the model
+ * actually use the injected experience? The answer folds back into the jump
+ * words that contributed to the trigger, feeding the reinforcement loop. */
+export interface InjectionRecord {
+  readonly injectionId: string
+  readonly createdAt: number
+  /** The expIds injected. */
+  readonly expIds: readonly string[]
+  /** The trigger that fired, e.g. `static:怎么` / `jump:卡壳→卡住`. */
+  readonly triggerSource: string
+  /** The jump words (if any) that contributed to the trigger. */
+  readonly jumpWords: readonly string[]
+  /** The session the injection happened in, when known. */
+  readonly sessionId: string | null
+  /** Whether a later assistant message referenced an injected expId (null until settled). */
+  readonly cited: boolean | null
+}
+
 /** The compressed cognitive-framework summary injected into the hot loop. */
 export interface TaxonomyState {
   readonly version: number
@@ -478,6 +552,55 @@ export interface CognitiveLoopStats {
  * evidence ledger is never reset and they are no longer applied by audits. */
 export type AcceptanceStatus = 'active' | 'retired'
 
+/** The file-state expectation a file anchor asserts about the workspace. */
+export type FileExpect = 'exists' | 'missing' | 'matches-hash' | 'contains'
+
+/** The exit-code expectation a command anchor asserts about a run command. */
+export type CommandExpect = 'exit-zero' | 'exit-nonzero'
+
+/** A mechanically-verified external-witness anchor for a claim audit. The
+ * witness is never the model's memory: a session-ledger tool call, a
+ * workspace file state, or a command's exit code read/run at audit time.
+ * When a claim anchors to a witness, the witness decides — a missing or
+ * mismatched anchor violates the claim regardless of self-reported evidence. */
+export type ClaimAnchor =
+  | {
+    readonly kind: 'log'
+    /** The tool name whose most recent settled call is the witness. */
+    readonly toolName: string
+    /** The matched `tool/call` event's call id ('' when not found). */
+    readonly callId: string
+    /** The success flag the claim asserted about the call. */
+    readonly expectedSucceeded: boolean
+    /** Whether the ledger matched the expectation. */
+    readonly matched: boolean
+  }
+  | {
+    readonly kind: 'file'
+    /** The workspace path the claim asserted about. */
+    readonly path: string
+    /** The file-state expectation the claim asserted. */
+    readonly expect: FileExpect
+    /** The expected hash for `matches-hash`. */
+    readonly hash?: string
+    /** The searched substring for `contains`. */
+    readonly text?: string
+    /** Whether the file state matched the expectation (false on unreadable). */
+    readonly matched: boolean
+  }
+  | {
+    readonly kind: 'command'
+    /** The command whose exit code is the witness. */
+    readonly command: string
+    /** The exit-code expectation the claim asserted. */
+    readonly expect: CommandExpect
+    /** The observed exit code, null when the command could not settle (spawn
+     * error or timeout — fail-closed). */
+    readonly exitCode: number | null
+    /** Whether the exit code matched the expectation (false when un-settled). */
+    readonly matched: boolean
+  }
+
 /** One acceptance criterion: a reusable verification norm learned from
  * experience. The pipeline judges evidence PRESENCE, never evidence truth —
  * it cannot verify its own claims; truth is adjudicated downstream by the
@@ -499,11 +622,12 @@ export interface AcceptanceCheck {
   readonly passedCount: number
   /** Audits where the claim was made without evidence for this check. */
   readonly violatedCount: number
-  /** Passes backed by a mechanically-verified session-log anchor rather than
-   * self-reported evidence alone — the non-self-referential subset of the
-   * passed ledger, so the pipeline can see how much of its acceptance rests
-   * on external witnesses. */
-  readonly logVerifiedCount: number
+  /** Passes backed by a mechanically-verified external-witness anchor (a
+   * session-log tool call or a workspace file state) rather than self-reported
+   * evidence alone — the non-self-referential subset of the passed ledger, so
+   * the pipeline can see how much of its acceptance rests on witnesses other
+   * than the model's own report. */
+  readonly machineVerifiedCount: number
   /** Rolling sum of |calibrated − observed| of resolved predictions whose
    * audit violated this check — "claims made without verification correlate
    * with bad outcomes" is measured on the same ruler as every prediction. */
@@ -528,22 +652,16 @@ export interface ClaimAudit {
   /** The verification statement the claim carried; empty means the claim was
    * made without evidence. */
   readonly evidence: string
-  /** The mechanically-verified session-log anchor the claim referenced, when
-   * one was requested: the tool name, the matched call id, the expected
-   * success flag, and whether the ledger matched the expectation. The log is
-   * the witness — when the model anchors a claim to the ledger, the ledger
-   * decides, and a mismatch is a violation regardless of self-reported
-   * evidence. Null when no anchor was requested. */
-  readonly logAnchor: {
-    readonly toolName: string
-    readonly callId: string
-    readonly expectedSucceeded: boolean
-    readonly matched: boolean
-  } | null
+  /** The mechanically-verified external-witness anchor the claim referenced,
+   * when one was requested: a session-ledger tool call (`log`) or a workspace
+   * file state (`file`), plus whether the witness matched the expectation.
+   * The witness decides — a missing or mismatched anchor is a violation
+   * regardless of self-reported evidence. Null when no anchor was requested. */
+  readonly anchor: ClaimAnchor | null
   /** True when the audit's satisfied checks were backed by a matched
-   * session-log anchor (the non-self-referential witness), false when they
-   * rested on self-reported evidence alone. */
-  readonly logVerified: boolean
+   * external-witness anchor (the non-self-referential witness), false when
+   * they rested on self-reported evidence alone. */
+  readonly anchorVerified: boolean
   /** Optional prediction the claim is about; its report feedback folds into
    * the violated checks' error ledger. */
   readonly predictionId: string | null

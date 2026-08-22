@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-19-acceptance-criteria-verification-norms.md
-2026-08-19-acceptance-criteria-verification-norms.md: 6dce90abb30c4997e5a4d20f212e78db4215be22
-2026-08-19-acceptance-criteria-verification-norms.zh.md: 5d6cf318f32832e03bc4df8159c4d575d77b1d39
+2026-08-19-acceptance-criteria-verification-norms.md: 2f3b63d143e633fc6aceba5690b18a8efa377630
+2026-08-19-acceptance-criteria-verification-norms.zh.md: 9cd0a3cf07b9164475e3655b10ecd420ebd9b62c

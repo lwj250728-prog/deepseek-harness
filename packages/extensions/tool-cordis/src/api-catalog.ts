@@ -609,22 +609,58 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the new criterion, active with an empty evidence ledger.',
       },
       {
-        signature: 'async auditClaim(input: { claim: string situation: string evidence?: string predictionId?: string }): Promise<ClaimAudit>',
-        description: 'Audit one claim against the active acceptance criteria. Applicable checks are those whose trigger marker appears in the claim or its situation; a claim with no applicable check audits as `not-applicable` and touches no ledger. An applicable check is satisfied when the claim carries evidence (non-empty), violated when it does not — presence, not truth. Violated checks accumulate in the criterion\'s ledger, and a criterion whose invoked count clears the evidence minimum while its deviation rate crosses the threshold flags `reworkNeeded` and records one deviation meta experience so the cold loop can cluster the pipeline\'s own acceptance-failure patterns.',
-        parameters: [{ name: 'input', description: 'the claim, its situation, the verification statement (empty when the claim is made without evidence), and an optional prediction the claim is about.' }],
+        signature: 'async auditClaim(input: { claim: string situation: string evidence?: string predictionId?: string anchor?: ClaimAnchor | null }): Promise<ClaimAudit>',
+        description: 'Audit one claim against the active acceptance criteria. Applicable checks are those whose trigger marker appears in the claim or its situation; a claim with no applicable check audits as `not-applicable` and touches no ledger. An applicable check is satisfied when the claim carries evidence (non-empty), violated when it does not — presence, not truth. When the claim carries an external-witness `anchor` (a session-ledger tool call or a workspace file state, mechanically verified by the tool layer), the witness decides instead: a matched anchor satisfies, a missing or mismatched anchor violates regardless of self-reported evidence — the witness is non-self-referential, so an anchored claim cannot be validated by self-report alone. Violated checks accumulate in the criterion\'s ledger, and a criterion whose invoked count clears the evidence minimum while its deviation rate crosses the threshold flags `reworkNeeded` and records one deviation meta experience so the cold loop can cluster the pipeline\'s own acceptance-failure patterns.',
+        parameters: [{ name: 'input', description: 'the claim, its situation, the verification statement (empty when the claim is made without evidence), an optional prediction the claim is about, and an optional mechanically-verified external-witness anchor (computed by the tool layer from the executing session\'s ledger or the workspace disk).' }],
         returns: 'the recorded audit.',
       },
       {
-        signature: 'async updateAcceptanceCheck(input: { checkId: string criterion?: string evidenceHint?: string retire?: boolean }): Promise<AcceptanceCheck>',
+        signature: 'async updateAcceptanceCheck(input: { checkId: string criterion?: string evidenceHint?: string trigger?: string retire?: boolean }): Promise<AcceptanceCheck>',
         description: 'Rewrite an active criterion\'s statement/evidence hint, or retire it. A retired criterion is frozen: its evidence ledger is never reset and audits no longer apply it. The criterion\'s invoked/passed/violated/error counts cannot be edited by any path — criteria are revisable, their track record is not (the evidence gate of acceptance-criterion change).',
         parameters: [{ name: 'input', description: 'the criterion id, optional new statement/evidence hint, and optional retire flag.' }],
         returns: 'the updated criterion.',
+      },
+      {
+        signature: 'async proposeAcceptanceUpdate(call?: PipelineCallContext): Promise<{ flagged: readonly AcceptanceCheck[] proposals: readonly AcceptanceProposal[] applied: readonly AcceptanceCheck[] }>',
+        description: 'Run the acceptance-criterion proposal route: gather the demonstrably failing active criteria (deviation gate crossed) and their evidence ledgers, ask the LLM route to propose rewrites or retirements, and apply only the proposals that pass the experience gate — a proposal must target a failing criterion, carry a rationale, and carry concrete rewrite text. This is how the pipeline amends its own verification norms from experience: the route proposes, the evidence gate disposes. Without a failing criterion or an explicit route, nothing is proposed or applied.',
+        parameters: [{ name: 'call', description: 'optional session/signal context.' }],
+        returns: 'the flagged criteria, the route\'s (ungated) proposals, and the criteria the gate actually applied.',
       },
       {
         signature: 'acceptanceChecks(): readonly AcceptanceCheck[]',
         description: 'All acceptance criteria (public for inspection).',
         parameters: [],
         returns: 'a detached criterion list, insertion order.',
+      },
+      {
+        signature: 'async runCommandExitCode(command: string, timeoutMs: number): Promise<number | null>',
+        description: 'Run one command through the shell capability seam and settle on its exit code — the exit-code witness for command anchors. The pipeline never spawns processes itself: the composed shell executor owns execution, sandbox policy, and output handling, and the pipeline observes only the exit code (output is discarded). Fail-closed: a timeout or a signal death resolves to null (cannot verify is a violation, never a pass). When no shell executor is mounted the call fails loud rather than silently degrading — a composed deployment without `ctx.shell` cannot run command anchors at all.',
+        parameters: [{ name: 'command', description: 'the command line to run via the shell executor.' }, { name: 'timeoutMs', description: 'hard timeout; on expiry the executor kills the command and this resolves to null.' }],
+        returns: 'the exit code, or null when the command could not settle.',
+      },
+      {
+        signature: 'async learnTriggerJumps(call?: PipelineCallContext): Promise<{ jumpCount: number cooccurrenceCount: number llmAdded: number pruned: number }>',
+        description: 'Learn the trigger-jump lexicon from the experience store: the associative layer over the static and derived trigger words. Co-occurrence jumps are built deterministically (a token co-occurring with a trigger across enough distinct important experiences becomes a jump toward that trigger, gated by `triggerJumpEvidenceMin`, capped per trigger and in total, normalized to [0.3, 1]); when an explicit LLM route exists, template 9 additionally proposes synonym-variant jumps (words that never co-occur, like 卡住↔卡壳) which enter with zero evidence and a conservative weight — the citation loop is their evidence gate. The rebuild carries each surviving jump\'s measured utility (hit/cited counts) and applies reinforcement: a jump whose citation rate clears `triggerJumpPruneHits` hits is boosted toward 1 by its rate, and one at/below `triggerJumpPruneRate` is pruned.',
+        parameters: [{ name: 'call', description: 'optional session/signal context for the LLM enhancement.' }],
+        returns: 'the build summary.',
+      },
+      {
+        signature: 'triggerJumps(): readonly TriggerJump[]',
+        description: 'The trigger-jump lexicon (public for the inject plugin\'s gate).',
+        parameters: [],
+        returns: 'a detached jump list, insertion order.',
+      },
+      {
+        signature: 'recordInjection(input: { expIds: readonly string[] triggerSource: string sessionId?: string | null jumpWords?: readonly string[] }): InjectionRecord',
+        description: 'Record one injection event for citation-rate measurement. The inject plugin calls this after folding the reference block into the step; the jump words that contributed to the trigger are carried so their measured utility can be folded when the citation settles.',
+        parameters: [{ name: 'input', description: 'the injected expIds, the fired trigger source, the contributing jump words, and the session id when known.' }],
+        returns: 'the recorded injection.',
+      },
+      {
+        signature: 'async settleInjectionCitations(sessionId: string, turnText: string): Promise<{ settled: number; cited: number }>',
+        description: 'Settle every unresolved injection of one session against the turn\'s assistant text: an injection is cited when the text references any of its expIds, otherwise not. Each settled outcome folds into the contributing jump words\' hit/cited ledger — the measured utility that the next learnTriggerJumps reinforcement uses. Flushes the pending writes so the settlement is durable.',
+        parameters: [{ name: 'sessionId', description: 'the session whose injections to settle.' }, { name: 'turnText', description: 'the turn\'s assistant/outcome text.' }],
+        returns: 'how many injections were settled and how many were cited.',
       },
       {
         signature: 'claimAudits(limit: number = 10): readonly ClaimAudit[]',
@@ -2831,7 +2867,11 @@ export const EVENT_API: readonly EventApiEntry[] = [
 export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'AcceptanceCheck',
-    declaration: 'export interface AcceptanceCheck {\n    readonly checkId: string;\n    readonly criterion: string;\n    readonly trigger: string;\n    readonly evidenceHint: string;\n    readonly status: AcceptanceStatus;\n    readonly invokedCount: number;\n    readonly passedCount: number;\n    readonly violatedCount: number;\n    readonly cumulativeError: number;\n    readonly errorFoldCount: number;\n    readonly revision: number;\n    readonly createdAt: number;\n    readonly updatedAt: number;\n}',
+    declaration: 'export interface AcceptanceCheck {\n    readonly checkId: string;\n    readonly criterion: string;\n    readonly trigger: string;\n    readonly evidenceHint: string;\n    readonly status: AcceptanceStatus;\n    readonly invokedCount: number;\n    readonly passedCount: number;\n    readonly violatedCount: number;\n    readonly machineVerifiedCount: number;\n    readonly cumulativeError: number;\n    readonly errorFoldCount: number;\n    readonly revision: number;\n    readonly createdAt: number;\n    readonly updatedAt: number;\n}',
+  },
+  {
+    name: 'AcceptanceProposal',
+    declaration: 'export interface AcceptanceProposal {\n    readonly checkId: string;\n    readonly action: \'rewrite\' | \'retire\';\n    readonly criterion?: string;\n    readonly evidenceHint?: string;\n    readonly trigger?: string;\n    readonly rationale: string;\n}',
   },
   {
     name: 'AcceptanceStatus',
@@ -2974,8 +3014,12 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ChannelWeights {\n    readonly semantic: number;\n    readonly situational: number;\n    readonly symptom: number;\n    readonly outcome: number;\n}',
   },
   {
+    name: 'ClaimAnchor',
+    declaration: 'export type ClaimAnchor = {\n    readonly kind: \'log\';\n    readonly toolName: string;\n    readonly callId: string;\n    readonly expectedSucceeded: boolean;\n    readonly matched: boolean;\n} | {\n    readonly kind: \'file\';\n    readonly path: string;\n    readonly expect: FileExpect;\n    readonly hash?: string;\n    readonly text?: string;\n    readonly matched: boolean;\n} | {\n    readonly kind: \'command\';\n    readonly command: string;\n    readonly expect: CommandExpect;\n    readonly exitCode: number | null;\n    readonly matched: boolean;\n};',
+  },
+  {
     name: 'ClaimAudit',
-    declaration: 'export interface ClaimAudit {\n    readonly auditId: string;\n    readonly claim: string;\n    readonly situation: string;\n    readonly verdict: \'verified\' | \'violated\' | \'not-applicable\';\n    readonly appliedCheckIds: readonly string[];\n    readonly satisfiedCheckIds: readonly string[];\n    readonly violatedCheckIds: readonly string[];\n    readonly evidence: string;\n    readonly predictionId: string | null;\n    readonly reworkNeeded: boolean;\n    readonly deviationExpId: string | null;\n    readonly createdAt: number;\n}',
+    declaration: 'export interface ClaimAudit {\n    readonly auditId: string;\n    readonly claim: string;\n    readonly situation: string;\n    readonly verdict: \'verified\' | \'violated\' | \'not-applicable\';\n    readonly appliedCheckIds: readonly string[];\n    readonly satisfiedCheckIds: readonly string[];\n    readonly violatedCheckIds: readonly string[];\n    readonly evidence: string;\n    readonly anchor: ClaimAnchor | null;\n    readonly anchorVerified: boolean;\n    readonly predictionId: string | null;\n    readonly reworkNeeded: boolean;\n    readonly deviationExpId: string | null;\n    readonly createdAt: number;\n}',
   },
   {
     name: 'ClientResponse',
@@ -3060,6 +3104,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'CommandExecution',
     declaration: 'export interface CommandExecution {\n    readonly commandId: CommandId;\n    readonly result: CommandResult;\n}',
+  },
+  {
+    name: 'CommandExpect',
+    declaration: 'export type CommandExpect = \'exit-zero\' | \'exit-nonzero\';',
   },
   {
     name: 'CommandId',
@@ -3342,6 +3390,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface FileDiff {\n    path: string;\n    oldText: string | null;\n    newText: string;\n}',
   },
   {
+    name: 'FileExpect',
+    declaration: 'export type FileExpect = \'exists\' | \'missing\' | \'matches-hash\' | \'contains\';',
+  },
+  {
     name: 'FileLocation',
     declaration: 'export interface FileLocation {\n    path: string;\n    line?: number;\n}',
   },
@@ -3476,6 +3528,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'InboxTarget',
     declaration: 'export type InboxTarget = \'next-turn\' | \'next-step\';',
+  },
+  {
+    name: 'InjectionRecord',
+    declaration: 'export interface InjectionRecord {\n    readonly injectionId: string;\n    readonly createdAt: number;\n    readonly expIds: readonly string[];\n    readonly triggerSource: string;\n    readonly jumpWords: readonly string[];\n    readonly sessionId: string | null;\n    readonly cited: boolean | null;\n}',
   },
   {
     name: 'InspectResult',
@@ -3967,7 +4023,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ResolvedCognitivePipelineConfig',
-    declaration: 'export interface ResolvedCognitivePipelineConfig {\n    readonly root: string;\n    readonly enabled: boolean;\n    readonly route: CognitiveLlmRoute;\n    readonly hot: HotEngineConfig;\n    readonly cold: ColdEngineConfig;\n    readonly tempStrategyHitThreshold: number;\n    readonly tempStrategyPositiveRatio: number;\n    readonly emergencyErrorThreshold: number;\n    readonly simulationFastTrackThreshold: number;\n    readonly simulationPermanentThreshold: number;\n    readonly simulationTtlMs: number;\n    readonly autoAccumulate: boolean;\n    readonly acceptanceMinEvidenceCount: number;\n    readonly acceptanceDeviationThreshold: number;\n    readonly embedding: ResolvedEmbeddingConfig | null;\n    readonly exploreDailyBudget: number;\n    readonly exploreRiskWords: readonly string[];\n    readonly exploreAutoDispatch: boolean;\n    readonly exploreValidationLearningRate: number;\n    readonly exploreValidationErrorThreshold: number;\n}',
+    declaration: 'export interface ResolvedCognitivePipelineConfig {\n    readonly root: string;\n    readonly enabled: boolean;\n    readonly route: CognitiveLlmRoute;\n    readonly hot: HotEngineConfig;\n    readonly cold: ColdEngineConfig;\n    readonly tempStrategyHitThreshold: number;\n    readonly tempStrategyPositiveRatio: number;\n    readonly emergencyErrorThreshold: number;\n    readonly simulationFastTrackThreshold: number;\n    readonly simulationPermanentThreshold: number;\n    readonly simulationTtlMs: number;\n    readonly autoAccumulate: boolean;\n    readonly acceptanceMinEvidenceCount: number;\n    readonly acceptanceDeviationThreshold: number;\n    readonly acceptanceCommandExecution: boolean;\n    readonly acceptanceCommandTimeoutMs: number;\n    readonly triggerJumpEvidenceMin: number;\n    readonly triggerJumpMaxPerTrigger: number;\n    readonly triggerJumpTotalCap: number;\n    readonly triggerJumpWeightScale: number;\n    readonly triggerJumpCitationBoost: number;\n    readonly triggerJumpPruneRate: number;\n    readonly triggerJumpPruneHits: number;\n    readonly embedding: ResolvedEmbeddingConfig | null;\n    readonly exploreDailyBudget: number;\n    readonly exploreRiskWords: readonly string[];\n    readonly exploreAutoDispatch: boolean;\n    readonly exploreValidationLearningRate: number;\n    readonly exploreValidationErrorThreshold: number;\n}',
   },
   {
     name: 'ResolvedCredential',
@@ -4868,6 +4924,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'ToolSchema',
     declaration: 'export interface ToolSchema {\n    name: string;\n    description: string;\n    parameters: Record<string, unknown>;\n}',
+  },
+  {
+    name: 'TriggerJump',
+    declaration: 'export interface TriggerJump {\n    readonly jumpWord: string;\n    readonly triggers: readonly {\n        readonly trigger: string;\n        readonly weight: number;\n        readonly evidenceCount: number;\n    }[];\n    readonly evidenceCount: number;\n    readonly source: TriggerJumpSource;\n    readonly rationale: string;\n    readonly hitCount: number;\n    readonly citedCount: number;\n    readonly createdAt: number;\n    readonly updatedAt: number;\n}',
+  },
+  {
+    name: 'TriggerJumpSource',
+    declaration: 'export type TriggerJumpSource = \'cooccurrence\' | \'llm\';',
   },
   {
     name: 'TurnEndCancelCause',

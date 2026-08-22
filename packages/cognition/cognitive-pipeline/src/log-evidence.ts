@@ -6,7 +6,7 @@
  * @module @deepseek-ai/dsh-cognitive-pipeline/log-evidence
  */
 
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import type { Session } from '@deepseek-ai/dsh-session'
 
 /** One mechanically-verified tool-call fact from the session ledger. */
 export interface ToolCallEvidence {
@@ -27,7 +27,7 @@ export interface ToolCallEvidence {
  * @returns the call id and success flag, or null when no settled matching call exists.
  */
 export function findToolCallEvidence(session: Session, toolName: string): ToolCallEvidence | null {
-  const events = session.events as readonly SessionEvent[]
+  const events = session.events
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (event === undefined || event.type !== 'tool/call') continue
@@ -49,7 +49,7 @@ export function findToolCallEvidence(session: Session, toolName: string): ToolCa
       // error flag on the tool-result content block (not on `message` itself) —
       // the same payload shape reconstructTurn reads (per exp_58's fix).
       const sourceCallId = message.source?.callId
-      const blockCallId = (message.content?.[0] as { toolCallId?: unknown } | undefined)?.toolCallId
+      const blockCallId = message.content?.[0]?.toolCallId
       if (callId !== '' && sourceCallId !== callId && blockCallId !== callId) continue
       const failed = message.content?.some(block => block?.isError === true) === true
       return { callId, succeeded: !failed }

@@ -22,12 +22,19 @@ import {
   actionVector,
   cosine,
   outcomePolarity,
+  reconstructTurn,
   refineRetrieval,
   symptomOverlap,
   tokenize,
 } from '@deepseek-ai/dsh-cognitive-pipeline'
 import type { CognitivePipelineService } from '@deepseek-ai/dsh-cognitive-pipeline'
-import type { Experience, OutcomePolarity } from '@deepseek-ai/dsh-cognitive-pipeline'
+import type { OutcomePolarity } from '@deepseek-ai/dsh-cognitive-pipeline'
+import {
+  DERIVED_TRIGGER_MIN,
+  deriveTriggerWords,
+  STATIC_TRIGGERS,
+} from '@deepseek-ai/dsh-cognitive-pipeline/src/triggers.ts'
+import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
@@ -221,109 +228,49 @@ function isAfterFailure(agent: Agent): boolean {
 
 // ── trigger-gated injection ────────────────────────────────────────────────
 
-/**
- * Static behavior triggers: words whose presence means the current message is
- * asking for help, exploring, or deciding — the situations where humans
- * actually consult past experience. A single static hit triggers injection.
- */
-const STATIC_TRIGGERS = new Set([
-  '失败', '报错', '错误', '卡住', '挂起', '超时', '崩溃', '异常', '排查', '修复', '恢复',
-  '怎么', '如何', '怎样', '为什么', '试试', '尝试', '测试', '验证', '确认',
-  '风险', '危险', '慎重', '谨慎', '建议', '推荐', '帮助', '求助',
-  '以前', '之前', '曾经', '上次', '遇到过', '经验', '参考', '回忆', '记得',
-  '发布', '部署', '上线', '推送', '提交', '合并', '迁移', '升级', '安装', '配置',
-  '计划', '打算', '准备', '决定', '方案', '步骤', '流程', '检查', '诊断',
-])
-
-/** CJK stop words: tokens too common to carry trigger signal. */
-const STOP_WORDS = new Set([
-  '的', '了', '在', '和', '我', '你', '他', '她', '它', '是', '一', '个', '这', '那',
-  '到', '就', '都', '也', '要', '会', '能', '与', '及', '或', '有', '对', '从', '被',
-  '把', '让', '用', '以', '为', '上', '下', '中', '不', '没', '很', '太', '再', '又',
-  '吗', '呢', '吧', '啊', '的', '地', '得', '等', '并', '而', '但', '如果', '然后',
-])
-
 /** Single static-trigger hit weight (a literal ask matches immediately). */
 const STATIC_TRIGGER_WEIGHT = 1
-/** Summed trigger weight (static or derived) needed to prime injection. */
+/** Summed trigger weight (static, derived, or jump) needed to prime injection. */
 const TRIGGER_MATCH_THRESHOLD = 0.6
-/** How many SAR-derived trigger words to keep (by accumulated importance). */
-const DERIVED_TRIGGER_COUNT = 60
-/** Minimum derived-trigger weight to count as a hit. */
-const DERIVED_TRIGGER_MIN = 0.3
 
-/**
- * Importance of one experience for trigger learning: outcome extremity
- * (|utilityScore|/15) plus a high-risk bonus for negative outcomes and a
- * frequency bonus for experiences the hot loop has hit before. Experiences
- * with no signal (neutral utility, never hit) contribute nothing.
- * @param exp - the experience.
- * @returns the importance in [0, 1.2].
- */
-function importanceOf(exp: Experience): number {
-  const { materialGain: gain, emotionalValence: valence, energyCost: cost } = exp.sar.outcomeUtility
-  const utility = Math.abs((gain - 5) + (valence - 5) - (cost - 5)) / 15
-  if (utility < 0.01 && exp.hitCount === 0 && (gain >= 5 && valence >= 5 && cost <= 5)) return 0
-  const risk = gain < 5 ? 0.3 : 0
-  const frequency = exp.hitCount > 0 ? Math.min(exp.hitCount, 5) * 0.1 : 0
-  return utility + risk + frequency
-}
-
-/**
- * Derive the trigger lexicon from the experience store: tokens of the
- * situation/action of important experiences (high utility, high-risk, or
- * frequently hit) accumulate their importance into per-token weights, the
- * top-N survive, normalized to [DERIVED_TRIGGER_MIN, 1].
- * @param service - the pipeline service whose store feeds the lexicon.
- * @returns the derived trigger map (token → weight).
- */
-function deriveTriggerWords(service: CognitivePipelineService): Map<string, number> {
-  const weights = new Map<string, number>()
-  for (const exp of service.store.experiencesSnapshot()) {
-    const importance = importanceOf(exp)
-    if (importance <= 0) continue
-    const tokens = new Set([
-      ...tokenize(exp.sar.situation),
-      ...tokenize(exp.sar.action),
-    ])
-    for (const token of tokens) {
-      if (STOP_WORDS.has(token) || STATIC_TRIGGERS.has(token)) continue
-      weights.set(token, (weights.get(token) ?? 0) + importance)
-    }
-  }
-  const ranked = [...weights.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, DERIVED_TRIGGER_COUNT)
-  const max = ranked[0]?.[1] ?? 0
-  if (max <= 0) return new Map()
-  const span = 1 - DERIVED_TRIGGER_MIN
-  return new Map(ranked.map(([token, weight]) => [token, DERIVED_TRIGGER_MIN + (weight / max) * span]))
+/** One trigger verdict: whether the gate opened, the contributing trigger
+ * source (for the injection record), and the jump words that contributed
+ * (for citation-rate measurement). */
+export interface TriggerVerdict {
+  readonly fired: boolean
+  readonly triggerSource: string
+  readonly jumpWords: readonly string[]
 }
 
 /**
  * Whether the messages entering this step carry a trigger: a static behavior
- * word or a SAR-derived keyword from important experiences. The trigger is
- * the gate — retrieval only runs (and injects) when the current situation is
- * one where consulting past experience is actually useful.
+ * word, a SAR-derived keyword from important experiences, or a learned jump
+ * word (the associative layer — a message can open the gate through a
+ * synonym variant of a trigger even when no literal trigger is present). The
+ * trigger is the gate — retrieval only runs (and injects) when the current
+ * situation is one where consulting past experience is actually useful.
+ * Exported for tests and observability.
  * @param messages - the messages entering the step.
- * @param service - the pipeline service for the derived lexicon.
+ * @param service - the pipeline service for the lexicons and jump table.
  * @param depth - how many trailing text blocks feed the check.
- * @returns true when the trigger weight sum clears the threshold.
+ * @returns the verdict with the fired trigger source and jump words.
  */
-function triggeredBy(
+export function triggeredBy(
   messages: readonly UserMessage[],
   service: CognitivePipelineService,
   depth: number,
-): boolean {
+): TriggerVerdict {
   const text = situationText(messages, depth)
-  if (text.trim().length === 0) return false
+  if (text.trim().length === 0) return { fired: false, triggerSource: '', jumpWords: [] }
   let score = 0
+  let source = ''
   // Static triggers are multi-character phrases; match them as substrings
   // (tokenize splits CJK per character, so token matching would never hit).
   for (const trigger of STATIC_TRIGGERS) {
     if (text.includes(trigger)) {
       score += STATIC_TRIGGER_WEIGHT
-      if (score >= TRIGGER_MATCH_THRESHOLD) return true
+      if (source === '') source = `static:${trigger}`
+      if (score >= TRIGGER_MATCH_THRESHOLD) return { fired: true, triggerSource: source, jumpWords: [] }
     }
   }
   const derived = deriveTriggerWords(service)
@@ -331,10 +278,28 @@ function triggeredBy(
     const weight = derived.get(token)
     if (weight !== undefined && weight >= DERIVED_TRIGGER_MIN) {
       score += weight
-      if (score >= TRIGGER_MATCH_THRESHOLD) return true
+      if (source === '') source = `derived:${token}`
+      if (score >= TRIGGER_MATCH_THRESHOLD) return { fired: true, triggerSource: source, jumpWords: [] }
     }
   }
-  return false
+  // Jump route: associative words alone can open the gate. Jump words are
+  // matched as substrings (single-char co-occurrence tokens and multi-char
+  // LLM variants alike). Each jump's contribution is scaled
+  // (triggerJumpWeightScale, default 0.5), so a single weak jump never opens
+  // it alone — two jumps or a jump plus a direct hit do.
+  const jumps = service.triggerJumps()
+  const scale = service.resolved.triggerJumpWeightScale
+  const hitJumps: string[] = []
+  for (const jump of jumps) {
+    if (!text.includes(jump.jumpWord)) continue
+    hitJumps.push(jump.jumpWord)
+    for (const entry of jump.triggers) {
+      score += entry.weight * scale
+      if (source === '') source = `jump:${jump.jumpWord}→${entry.trigger}`
+      if (score >= TRIGGER_MATCH_THRESHOLD) return { fired: true, triggerSource: source, jumpWords: hitJumps }
+    }
+  }
+  return { fired: false, triggerSource: '', jumpWords: [] }
 }
 
 /**
@@ -352,6 +317,19 @@ export function apply(ctx: Context, config: Config = {}): void {
     lastFailed.set(exec.agent, result.isError)
   })
 
+  // Citation settlement: at turn end, the assistant text of the closed turn
+  // decides whether the injection was actually used (an injected expId
+  // referenced = cited). The outcome folds into the jump words that opened
+  // the gate, feeding the jump-weight reinforcement loop.
+  ctx.on('session/event', (session: Session, event: SessionEvent) => {
+    if (event.type !== 'turn/end') return
+    const episode = reconstructTurn(session, event)
+    void ctx.cognitivePipeline.settleInjectionCitations(session.id, episode.outcome)
+      .catch((error: unknown) => {
+        ctx.logger.warn(`cognitive-inject: citation settlement failed: ${String(error)}`)
+      })
+  })
+
   ctx.on('agent/pre-step', async (
     { agent, messages, signal },
     next,
@@ -360,12 +338,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (decision.kind === 'reject' || signal.aborted || messages.length === 0) return decision
     const afterFailure = isAfterFailure(agent)
     // Trigger gate: after a failed step always prime; otherwise only when the
-    // current messages carry a trigger (static behavior word or a SAR-derived
-    // keyword of important experiences). Routine conversation never injects,
-    // even when retrieval would find a literal (weak) hit.
-    if (!afterFailure && !triggeredBy(decision.messages, ctx.cognitivePipeline, resolved.contextDepth)) {
-      return decision
-    }
+    // current messages carry a trigger (static behavior word, a SAR-derived
+    // keyword of important experiences, or a learned jump word). Routine
+    // conversation never injects, even when retrieval would find a weak hit.
+    const verdict = triggeredBy(decision.messages, ctx.cognitivePipeline, resolved.contextDepth)
+    if (!afterFailure && !verdict.fired) return decision
     const threshold = afterFailure
       ? resolved.minSimilarity * resolved.failureThresholdFactor
       : resolved.minSimilarity
@@ -385,6 +362,15 @@ export function apply(ctx: Context, config: Config = {}): void {
     )
     if (vetoed.accepted.length === 0) return decision
     const block = referenceBlock(vetoed.accepted, afterFailure, vetoed.rejectedNotes)
+    // Record the injection for citation-rate measurement: which expIds reached
+    // the model, which trigger opened the gate, and which jump words (if any)
+    // contributed — the durable trace behind the reinforcement loop.
+    ctx.cognitivePipeline.recordInjection({
+      expIds: vetoed.accepted.map(hit => hit.expId),
+      triggerSource: verdict.triggerSource,
+      sessionId: agent.session.id,
+      jumpWords: verdict.jumpWords,
+    })
     return {
       kind: 'enter',
       messages: [...decision.messages, block],

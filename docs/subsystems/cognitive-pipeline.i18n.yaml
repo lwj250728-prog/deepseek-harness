@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/subsystems/cognitive-pipeline.md
-cognitive-pipeline.md: 22c4d3789184923e06c79bc4f57d8b9fbb9c4538
-cognitive-pipeline.zh.md: 4389f7a57a0fdabf4df8ad61d1a5faba24f4f5ae
+cognitive-pipeline.md: 1fac27f2369904a7e7b460cae04a0219983b85aa
+cognitive-pipeline.zh.md: afdadaa588c86f298d1328c5defabc1262436f15

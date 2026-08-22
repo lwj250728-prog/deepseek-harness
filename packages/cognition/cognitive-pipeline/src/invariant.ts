@@ -62,8 +62,8 @@ const install: InvariantInstaller = (ctx: Context, fail: (message: string) => ne
     if (check.passedCount + check.violatedCount > check.invokedCount) {
       fail(`acceptance check ${check.checkId} has passed+violated exceeding invoked`)
     }
-    if (!Number.isInteger(check.logVerifiedCount) || check.logVerifiedCount < 0 || check.logVerifiedCount > check.passedCount) {
-      fail(`acceptance check ${check.checkId} has an invalid log-verified pass count`)
+    if (!Number.isInteger(check.machineVerifiedCount) || check.machineVerifiedCount < 0 || check.machineVerifiedCount > check.passedCount) {
+      fail(`acceptance check ${check.checkId} has an invalid machine-verified pass count`)
     }
     if (check.cumulativeError < 0 || !Number.isInteger(check.errorFoldCount) || check.errorFoldCount < 0) {
       fail(`acceptance check ${check.checkId} has an invalid error ledger`)
@@ -75,10 +75,10 @@ const install: InvariantInstaller = (ctx: Context, fail: (message: string) => ne
     if ((audit.verdict === 'violated') !== violated && audit.verdict !== 'not-applicable') {
       fail(`claim audit ${audit.auditId} has a verdict/check-list mismatch`)
     }
-    // A log-verified audit must carry a matched anchor, and a matched anchor
-    // with checks applied must have satisfied them (the ledger decides).
-    if (audit.logVerified !== (audit.logAnchor !== null && audit.logAnchor.matched)) {
-      fail(`claim audit ${audit.auditId} has a log-verification inconsistency`)
+    // An anchor-verified audit must carry a matched anchor (the witness
+    // decides — a matched anchor with checks applied satisfies them).
+    if (audit.anchorVerified !== (audit.anchor !== null && audit.anchor.matched)) {
+      fail(`claim audit ${audit.auditId} has an anchor-verification inconsistency`)
     }
   }
 }

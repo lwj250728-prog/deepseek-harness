@@ -19,16 +19,30 @@ import type {
   GenerateOptions,
   Message,
 } from '@deepseek-ai/dsh-llm'
-import type { AccumulationDecision, DeriveReferenceDecision, Experience, OutcomeUtility, RefineRetrievalDecision, SarTriplet } from './types.ts'
+import type {
+  AcceptanceCheck,
+  AcceptanceProposal,
+  AcceptanceProposalDecision,
+  AccumulationDecision,
+  DeriveReferenceDecision,
+  Experience,
+  OutcomeUtility,
+  RefineRetrievalDecision,
+  SarTriplet,
+} from './types.ts'
 import {
   ACCUMULATE_SYSTEM_PROMPT,
   CALIBRATION_SYSTEM_PROMPT,
   DERIVE_REFERENCE_SYSTEM_PROMPT,
+  PROPOSE_ACCEPTANCE_SYSTEM_PROMPT,
+  PROPOSE_TRIGGER_JUMPS_SYSTEM_PROMPT,
   REFINE_RETRIEVAL_SYSTEM_PROMPT,
   frameAccumulateInput,
   frameCalibrationInput,
   frameDeriveReferenceInput,
   frameOodInput,
+  frameProposeAcceptanceInput,
+  frameProposeTriggerJumpsInput,
   frameReconstructInput,
   frameRefineRetrievalInput,
   frameSarInput,
@@ -758,5 +772,157 @@ export async function refineRetrieval(
   } catch (error) {
     ctx.logger.warn(`cognitive-pipeline: refine-retrieval degraded to fallback: ${String(error)}`)
     return refineRetrievalFallback()
+  }
+}
+
+/** Deterministic template-8 fallback: no proposals (no route → no self-legislation). */
+export function proposeAcceptanceFallback(): AcceptanceProposalDecision {
+  return { proposals: [] }
+}
+
+/**
+ * Template 8: the acceptance-criterion proposal route. The LLM route reads
+ * the demonstrably failing criteria and their evidence ledgers and proposes
+ * rewrites or retirements. The service still gates every proposal against the
+ * evidence before applying — the route proposes, the experience gate disposes.
+ * Without an explicit route it deterministically proposes nothing: the
+ * pipeline never amends its own norms unjudged.
+ * @param ctx - plugin context for the LLM call.
+ * @param route - explicit model route.
+ * @param flagged - the failing active criteria (deviation gate already crossed).
+ * @param deviationMeta - related deviation meta experiences.
+ * @param options - call context (session/signal/maxTokens).
+ * @returns the proposed updates (ungated).
+ */
+export async function proposeAcceptanceUpdates(
+  ctx: Context,
+  route: CognitiveLlmRoute,
+  flagged: readonly AcceptanceCheck[],
+  deviationMeta: readonly { expId: string; text: string }[],
+  options: CallOptions,
+): Promise<AcceptanceProposalDecision> {
+  if (!hasExplicitRoute(route)) return proposeAcceptanceFallback()
+  try {
+    const framed = frameProposeAcceptanceInput(flagged, deviationMeta)
+    const parsed = asObject(
+      await callJson(ctx, route, PROPOSE_ACCEPTANCE_SYSTEM_PROMPT, framed, {
+        ...options,
+        maxTokens: 600,
+      }),
+      'acceptance-proposal',
+    )
+    const rawProposals = Array.isArray(parsed.proposals) ? parsed.proposals : []
+    const proposals: AcceptanceProposal[] = []
+    for (const raw of rawProposals) {
+      if (typeof raw !== 'object' || raw === null) continue
+      const entry = raw as Record<string, unknown>
+      const checkId = entry.check_id
+      const action = entry.action
+      const rationale = entry.rationale
+      if (typeof checkId !== 'string' || checkId.length === 0
+        || (action !== 'rewrite' && action !== 'retire')
+        || typeof rationale !== 'string' || rationale.length === 0) {
+        continue
+      }
+      if (action === 'rewrite') {
+        const criterion = entry.criterion
+        const evidenceHint = entry.evidence_hint
+        if (typeof criterion !== 'string' || criterion.length === 0
+          || typeof evidenceHint !== 'string' || evidenceHint.length === 0) {
+          continue
+        }
+        const trigger = entry.trigger
+        proposals.push({
+          checkId,
+          action,
+          criterion,
+          evidenceHint,
+          ...typeof trigger === 'string' && trigger.length > 0 ? { trigger } : {},
+          rationale,
+        })
+      } else {
+        proposals.push({ checkId, action, rationale })
+      }
+    }
+    return { proposals }
+  } catch (error) {
+    ctx.logger.warn(`cognitive-pipeline: acceptance proposal degraded to fallback: ${String(error)}`)
+    return proposeAcceptanceFallback()
+  }
+}
+
+/** One LLM-proposed synonym-variant trigger jump (template 9). */
+export interface TriggerJumpProposal {
+  /** A real trigger word from the provided lexicons. */
+  readonly trigger: string
+  /** Paraphrase variants users might say instead. */
+  readonly variants: readonly string[]
+  /** Why each variant expresses the same situation. */
+  readonly reason: string
+}
+
+/** The LLM route's trigger-jump proposal judgment (template 9). */
+export interface TriggerJumpProposalDecision {
+  readonly jumps: readonly TriggerJumpProposal[]
+}
+
+/** Deterministic template-9 fallback: no proposals (no route → no LLM jumps). */
+export function triggerJumpsFallback(): TriggerJumpProposalDecision {
+  return { jumps: [] }
+}
+
+/**
+ * Template 9: propose synonym-variant trigger jumps — the associative layer
+ * beyond co-occurrence. The route proposes paraphrase variants for real
+ * trigger words; the pipeline still validates each variant (real trigger,
+ * non-empty, not a stop word) and the citation loop measures whether it pays
+ * off. Without an explicit route nothing is proposed.
+ * @param ctx - plugin context for the LLM call.
+ * @param route - explicit model route.
+ * @param input - the static triggers, derived triggers, and important samples.
+ * @param options - call context (session/signal/maxTokens).
+ * @returns the proposed jumps (ungated).
+ */
+export async function proposeTriggerJumps(
+  ctx: Context,
+  route: CognitiveLlmRoute,
+  input: {
+    staticTriggers: readonly string[]
+    derived: readonly { word: string; weight: number }[]
+    samples: readonly { expId: string; text: string }[]
+  },
+  options: CallOptions,
+): Promise<TriggerJumpProposalDecision> {
+  if (!hasExplicitRoute(route)) return triggerJumpsFallback()
+  try {
+    const framed = frameProposeTriggerJumpsInput(input.staticTriggers, input.derived, input.samples)
+    const parsed = asObject(
+      await callJson(ctx, route, PROPOSE_TRIGGER_JUMPS_SYSTEM_PROMPT, framed, {
+        ...options,
+        maxTokens: 600,
+      }),
+      'trigger-jumps',
+    )
+    const rawJumps = Array.isArray(parsed.jumps) ? parsed.jumps : []
+    const jumps: TriggerJumpProposal[] = []
+    for (const raw of rawJumps) {
+      if (typeof raw !== 'object' || raw === null) continue
+      const entry = raw as Record<string, unknown>
+      const trigger = entry.trigger
+      const reason = entry.reason
+      const variants = Array.isArray(entry.variants)
+        ? entry.variants.filter((variant): variant is string => typeof variant === 'string' && variant.length > 0)
+        : []
+      if (typeof trigger !== 'string' || trigger.length === 0
+        || typeof reason !== 'string' || reason.length === 0
+        || variants.length === 0) {
+        continue
+      }
+      jumps.push({ trigger, variants, reason })
+    }
+    return { jumps }
+  } catch (error) {
+    ctx.logger.warn(`cognitive-pipeline: trigger-jump proposal degraded to fallback: ${String(error)}`)
+    return triggerJumpsFallback()
   }
 }

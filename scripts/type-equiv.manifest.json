@@ -2002,7 +2002,17 @@
     },
     {
       "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "AcceptanceProposal",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
       "symbol": "ClaimAudit",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "ClaimAnchor",
       "source": "packages/cognition/cognitive-pipeline/src/types.ts"
     },
     {
@@ -2028,6 +2038,16 @@
     {
       "doc": "docs/subsystems/cognitive-pipeline.md",
       "symbol": "TurnEpisode",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "TriggerJump",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "InjectionRecord",
       "source": "packages/cognition/cognitive-pipeline/src/types.ts"
     }
   ]

@@ -11,10 +11,12 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { verifyCommandAnchor } from './command-evidence.ts'
+import { verifyFileAnchor } from './file-evidence.ts'
 import { findToolCallEvidence } from './log-evidence.ts'
 import type { CognitivePipelineService } from './service.ts'
 import type { PipelineCallContext } from './service.ts'
-import type { PredictInput, RebuildResult } from './types.ts'
+import type { ClaimAnchor, PredictInput, RebuildResult } from './types.ts'
 
 /** Build the model-call context from the executing agent's session. */
 function callContext(exec: ToolRunContext): PipelineCallContext {
@@ -26,7 +28,7 @@ function renderJson(_args: unknown, value: unknown): { type: 'text'; text: strin
   return [{ type: 'text', text: JSON.stringify(value) }]
 }
 
-/** Register the eleven pipeline tools.
+/** Register the thirteen pipeline tools.
  * @param ctx - context with the tool registry.
  * @param service - the pipeline service backing the tools.
  */
@@ -795,16 +797,19 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
     description: 'Audit one claim against the active acceptance criteria before treating it as settled. '
       + 'Applicable checks are those whose trigger marker appears in the claim or its situation; a claim with '
       + 'no applicable check audits as not-applicable. An applicable check is satisfied when the claim carries '
-      + 'evidence (non-empty), violated when it does not — presence, not truth. When log_anchor is supplied, '
-      + 'the session ledger decides instead: the tool reads the executing session\'s log for the most recent '
-      + 'tool/call of that name and checks whether its tool/result matched the expectation — a missing or '
-      + 'mismatched anchor violates the claim regardless of self-reported evidence (the log is the witness, so '
-      + 'a claim anchored to the ledger cannot be validated by self-report alone). Violated checks accumulate '
-      + 'in the criterion ledger, and a criterion whose invoked count clears the evidence minimum while its '
-      + 'deviation rate crosses the threshold flags rework_needed and records one deviation meta experience. '
-      + 'Pass prediction_id when a predict_outcome exists for the claim: its report_outcome feedback then folds '
-      + 'the prediction error into the violated criteria, measuring "claims without verification" on the same '
-      + 'ruler as every prediction.',
+      + 'evidence (non-empty), violated when it does not — presence, not truth. When an external-witness anchor '
+      + 'is supplied (log_anchor for the session ledger, file_anchor for the workspace disk, command_anchor '
+      + 'for a command\'s actual exit code), the witness '
+      + 'mechanically decides instead: log_anchor reads the executing session\'s log for the most recent '
+      + 'tool/call of that name and checks its tool/result against the expectation; file_anchor reads the '
+      + 'file at audit time and checks the stated file-state expectation (exists/missing/matches-hash/'
+      + 'contains, fail-closed on unreadable). A missing or mismatched anchor violates the claim regardless of '
+      + 'self-reported evidence — the witness is non-self-referential, so an anchored claim cannot be '
+      + 'validated by self-report alone. Violated checks accumulate in the criterion ledger, and a criterion '
+      + 'whose invoked count clears the evidence minimum while its deviation rate crosses the threshold flags '
+      + 'rework_needed and records one deviation meta experience. Pass prediction_id when a predict_outcome '
+      + 'exists for the claim: its report_outcome feedback then folds the prediction error into the violated '
+      + 'criteria, measuring "claims without verification" on the same ruler as every prediction.',
     parameters: {
       claim: {
         type: 'string',
@@ -845,6 +850,57 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           + 'the audit instead of self-reported evidence. Set it when the verification is a tool call that '
           + 'happened in this session.',
       },
+      file_anchor: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          path: {
+            type: 'string',
+            required: true,
+            description: 'The workspace file path the claim asserts about; relative paths resolve against '
+              + 'the working directory.',
+          },
+          expect: {
+            type: 'string',
+            required: true,
+            enum: ['exists', 'missing', 'matches-hash', 'contains'],
+            description: 'The file-state expectation the claim asserts.',
+          },
+          hash: {
+            type: 'string',
+            description: 'Expected sha256 hex digest; required when expect is matches-hash.',
+          },
+          text: {
+            type: 'string',
+            description: 'Searched substring; required when expect is contains.',
+          },
+        },
+        description: 'Anchor the claim to the workspace disk: the file state read at audit time mechanically '
+          + 'decides the audit instead of self-reported evidence (fail-closed: an unreadable file never '
+          + 'passes). Set it when the verification is a file the agent actually produced.',
+      },
+      command_anchor: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          command: {
+            type: 'string',
+            required: true,
+            description: 'The command line to run via the shell; only its exit code is observed.',
+          },
+          expect: {
+            type: 'string',
+            required: true,
+            enum: ['exit-zero', 'exit-nonzero'],
+            description: 'The exit-code expectation the claim asserts.',
+          },
+        },
+        description: 'Anchor the claim to a command\'s actual exit code: the command is RUN at audit time '
+          + 'through the shell capability seam (ctx.shell, so sandbox policy and output handling belong to the '
+          + 'composed executor) and only its exit code is observed (output discarded). Fail-closed on timeout '
+          + 'or signal death; requires the shell capability to be mounted and acceptanceCommandExecution: '
+          + 'true in the plugin config — command execution is OFF by default.',
+      },
     },
     output: {
       schema: {
@@ -872,11 +928,12 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
             required: true,
             items: { type: 'string' },
           },
-          log_verified: {
+          anchor_verified: {
             type: 'boolean',
             required: true,
-            description: 'True when the audit was backed by a matched session-log anchor (the '
-              + 'non-self-referential witness), false for self-reported evidence or no anchor.',
+            description: 'True when the audit was backed by a matched external-witness anchor (session ledger '
+              + 'or workspace disk — the non-self-referential witness), false for self-reported evidence or '
+              + 'no anchor.',
           },
           rework_needed: { type: 'boolean', required: true },
           deviation_exp_id: { type: 'string', required: true },
@@ -885,19 +942,49 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
       render: renderJson,
     },
     async execute(args, exec) {
-      let logEvidence: {
-        toolName: string
-        callId: string
-        expectedSucceeded: boolean
-        matched: boolean
-      } | null = null
+      let anchor: ClaimAnchor | null = null
       if (args.log_anchor !== undefined && exec.agent !== undefined) {
         const evidence = findToolCallEvidence(exec.agent.session, args.log_anchor.tool_name)
-        logEvidence = {
+        anchor = {
+          kind: 'log',
           toolName: args.log_anchor.tool_name,
           callId: evidence?.callId ?? '',
           expectedSucceeded: args.log_anchor.expect_succeeded,
           matched: evidence !== null && evidence.succeeded === args.log_anchor.expect_succeeded,
+        }
+      } else if (args.file_anchor !== undefined) {
+        const result = await verifyFileAnchor({
+          path: args.file_anchor.path,
+          expect: args.file_anchor.expect,
+          ...args.file_anchor.hash === undefined || args.file_anchor.hash.length === 0 ? {} : { hash: args.file_anchor.hash },
+          ...args.file_anchor.text === undefined || args.file_anchor.text.length === 0 ? {} : { text: args.file_anchor.text },
+        })
+        anchor = {
+          kind: 'file',
+          path: result.path,
+          expect: result.expect,
+          ...result.hash === undefined ? {} : { hash: result.hash },
+          ...result.text === undefined ? {} : { text: result.text },
+          matched: result.matched,
+        }
+      } else if (args.command_anchor !== undefined) {
+        if (!service.resolved.acceptanceCommandExecution) {
+          throw new Error(
+            'verify_claim: command anchors are disabled — enable acceptanceCommandExecution in the '
+            + 'cognitive-pipeline plugin config before anchoring claims to a command exit code',
+          )
+        }
+        const result = await verifyCommandAnchor({
+          command: args.command_anchor.command,
+          expect: args.command_anchor.expect,
+          timeoutMs: service.resolved.acceptanceCommandTimeoutMs,
+        }, (command, timeoutMs) => service.runCommandExitCode(command, timeoutMs))
+        anchor = {
+          kind: 'command',
+          command: result.command,
+          expect: result.expect,
+          exitCode: result.exitCode,
+          matched: result.matched,
         }
       }
       const audit = await service.auditClaim({
@@ -905,7 +992,7 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
         situation: args.situation,
         ...args.evidence === undefined || args.evidence.length === 0 ? {} : { evidence: args.evidence },
         ...args.prediction_id === undefined || args.prediction_id.length === 0 ? {} : { predictionId: args.prediction_id },
-        ...logEvidence === null ? {} : { logEvidence },
+        ...anchor === null ? {} : { anchor },
       })
       return {
         audit_id: audit.auditId,
@@ -913,7 +1000,7 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
         applied_check_ids: [...audit.appliedCheckIds],
         satisfied_check_ids: [...audit.satisfiedCheckIds],
         violated_check_ids: [...audit.violatedCheckIds],
-        log_verified: audit.logVerified,
+        anchor_verified: audit.anchorVerified,
         rework_needed: audit.reworkNeeded,
         deviation_exp_id: audit.deviationExpId ?? '',
       }
@@ -975,5 +1062,140 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
       }
     },
     presentCall: args => ({ card: 'generic', title: `Update acceptance check ${args.check_id}`, kind: 'other' }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'propose_acceptance_update',
+    description: 'Run the acceptance-criterion proposal route: gather the demonstrably failing active criteria '
+      + '(deviation rate at/above the threshold with enough invoked audits) and their evidence ledgers, ask the '
+      + 'LLM route to propose rewrites or retirements, and apply ONLY the proposals that pass the experience '
+      + 'gate — a proposal must target a failing criterion, carry a rationale, and carry concrete rewrite text. '
+      + 'This is how the pipeline amends its own verification norms from experience: the route proposes, the '
+      + 'evidence gate disposes. Without a failing criterion or an explicit LLM route, nothing is proposed or '
+      + 'applied. Applied rewrites bump the criterion revision; the evidence ledger is never reset.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          flagged_checks: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                check_id: { type: 'string', required: true },
+                criterion: { type: 'string', required: true },
+                invoked_count: { type: 'number', required: true },
+                violated_count: { type: 'number', required: true },
+                deviation_rate: { type: 'number', required: true },
+                machine_verified_count: { type: 'number', required: true },
+                cumulative_error: { type: 'number', required: true },
+              },
+            },
+          },
+          proposals: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                check_id: { type: 'string', required: true },
+                action: { type: 'string', required: true, enum: ['rewrite', 'retire'] },
+                criterion: { type: 'string', required: true },
+                rationale: { type: 'string', required: true },
+              },
+            },
+          },
+          applied_checks: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                check_id: { type: 'string', required: true },
+                status: { type: 'string', required: true, enum: ['active', 'retired'] },
+                revision: { type: 'number', required: true },
+                criterion: { type: 'string', required: true },
+              },
+            },
+          },
+        },
+      },
+      render: renderJson,
+    },
+    async execute(_args, exec) {
+      const result = await service.proposeAcceptanceUpdate({
+        ...callContext(exec),
+        signal: exec.signal,
+      })
+      return {
+        flagged_checks: result.flagged.map(check => ({
+          check_id: check.checkId,
+          criterion: check.criterion,
+          invoked_count: check.invokedCount,
+          violated_count: check.violatedCount,
+          deviation_rate: Number((check.violatedCount / check.invokedCount).toFixed(3)),
+          machine_verified_count: check.machineVerifiedCount,
+          cumulative_error: Number(check.cumulativeError.toFixed(3)),
+        })),
+        proposals: result.proposals.map(proposal => ({
+          check_id: proposal.checkId,
+          action: proposal.action,
+          criterion: proposal.criterion ?? '',
+          rationale: proposal.rationale,
+        })),
+        applied_checks: result.applied.map(check => ({
+          check_id: check.checkId,
+          status: check.status,
+          revision: check.revision,
+          criterion: check.criterion,
+        })),
+      }
+    },
+    presentCall: () => ({ card: 'generic', title: 'Propose acceptance update', kind: 'read' }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'learn_trigger_jumps',
+    description: 'Learn the trigger-jump lexicon from the experience store: the associative layer over the '
+      + 'injection trigger words. Co-occurrence jumps are built deterministically (a token that appears with a '
+      + 'trigger across enough distinct important experiences becomes a jump toward it), and when an explicit '
+      + 'LLM route exists, synonym-variant jumps (卡住↔卡壳) are proposed additionally — those enter with zero '
+      + 'co-occurrence evidence and are validated by the citation loop instead. The rebuild carries each '
+      + 'surviving jump\'s measured utility and applies reinforcement: jumps whose injections were actually '
+      + 'cited are boosted, and jumps that never pay off are pruned. Call it after meaningful new experiences '
+      + 'accumulate, so the injection gate keeps learning which words should open it.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          jump_count: { type: 'number', required: true },
+          cooccurrence_count: { type: 'number', required: true },
+          llm_added: { type: 'number', required: true },
+          pruned: { type: 'number', required: true },
+        },
+      },
+      render: renderJson,
+    },
+    async execute(_args, exec) {
+      const result = await service.learnTriggerJumps({
+        ...callContext(exec),
+        signal: exec.signal,
+      })
+      return {
+        jump_count: result.jumpCount,
+        cooccurrence_count: result.cooccurrenceCount,
+        llm_added: result.llmAdded,
+        pruned: result.pruned,
+      }
+    },
+    presentCall: () => ({ card: 'generic', title: 'Learn trigger jumps', kind: 'read' }),
   }))
 }

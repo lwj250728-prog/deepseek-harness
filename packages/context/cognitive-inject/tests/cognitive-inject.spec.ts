@@ -12,6 +12,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { agentEvents, Inbox, type Agent, type AgentStatus } from '@deepseek-ai/dsh-agent'
 import * as cognitiveInject from '@deepseek-ai/dsh-cognitive-inject'
 import type { Config } from '@deepseek-ai/dsh-cognitive-inject'
+import { triggeredBy } from '@deepseek-ai/dsh-cognitive-inject'
 import * as cognitivePipeline from '@deepseek-ai/dsh-cognitive-pipeline'
 import { CallId, createUserMessage, LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -60,11 +61,16 @@ class ScriptedAdapter extends LlmAdapter {
   }
 }
 
-async function mount(config: Config = {}, route?: { provider: string; model: string; script: readonly string[] }) {
+async function mount(
+  config: Config = {},
+  route?: { provider: string; model: string; script: readonly string[] },
+  pipelineExtra: Record<string, unknown> = {},
+) {
   const root = mkdtempSync(join(tmpdir(), 'cognition-inject-'))
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
-  const pipelineConfig: { enabled: boolean; root: string; provider?: string; model?: string } = { enabled: false, root }
+  const pipelineConfig: { enabled: boolean; root: string; provider?: string; model?: string } & Record<string, unknown>
+    = { enabled: false, root, ...pipelineExtra }
   if (route !== undefined) {
     pipelineConfig.provider = route.provider
     pipelineConfig.model = route.model
@@ -410,6 +416,59 @@ describe('cognitive-inject priming', () => {
       expect(injected.length).toBe(1)
       expect(injected[0]).toContain('exp_1')
       expect(injected[0]).not.toContain('exp_2')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('opens the trigger gate through a learned jump word alone (跳转词)', async () => {
+    // A jump word the store never derived (multi-char LLM-style variant) is the
+    // ONLY signal: no static trigger, empty derived lexicon → the jump route
+    // decides. Scale 0.7 makes one weight-1.0 jump cross the 0.6 threshold.
+    const { ctx, teardown } = await mount({}, undefined, { triggerJumpWeightScale: 0.7 })
+    try {
+      ctx.cognitivePipeline.store.upsertTriggerJump({
+        jumpWord: '发版',
+        triggers: [{ trigger: '发布', weight: 1.0, evidenceCount: 0 }],
+        evidenceCount: 0,
+        source: 'llm',
+        rationale: '发版是发布的口语变体',
+        hitCount: 0,
+        citedCount: 0,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      })
+      const message = createUserMessage({
+        content: [{ type: 'text', text: '这周要发版，需要注意什么' }],
+        source: { kind: 'user' },
+      })
+      const verdict = triggeredBy([message], ctx.cognitivePipeline, 4)
+      expect(verdict.fired).toBe(true)
+      expect(verdict.triggerSource).toBe('jump:发版→发布')
+      expect(verdict.jumpWords).toEqual(['发版'])
+
+      // Control: without the jump the same message stays inert (no static
+      // trigger, empty derived lexicon).
+      const bare = await mount()
+      try {
+        const message2 = createUserMessage({
+          content: [{ type: 'text', text: '这周要发版，需要注意什么' }],
+          source: { kind: 'user' },
+        })
+        expect(triggeredBy([message2], bare.ctx.cognitivePipeline, 4).fired).toBe(false)
+      } finally {
+        await bare.teardown()
+      }
+
+      // The injection record carries the jump source for citation measurement.
+      const record = ctx.cognitivePipeline.recordInjection({
+        expIds: ['exp_1'],
+        triggerSource: verdict.triggerSource,
+        sessionId: 's1',
+        jumpWords: verdict.jumpWords,
+      })
+      expect(record.jumpWords).toEqual(['发版'])
+      expect(record.triggerSource).toBe('jump:发版→发布')
     } finally {
       await teardown()
     }

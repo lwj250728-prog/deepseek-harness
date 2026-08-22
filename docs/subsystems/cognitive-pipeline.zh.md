@@ -202,7 +202,7 @@
 
 ## 验收准则与声明审计
 
-验收准则是可复用的验证规范，智能体在把声明当作既成事实前对其执行审计。管线记录的是证据的**存在性**，而非证据的真伪——它无法验证自己的声明；真伪由后续解析结果与用户裁决。退役准则被冻结：其证据账本永不重置，审计也不再应用它。
+验收准则是可复用的验证规范，智能体在把声明当作既成事实前对其执行审计。管线记录的是证据的**存在性**，而非证据的真伪——它无法验证自己的声明；真伪由后续解析结果与用户裁决。当声明锚定到外部见证者（`log_anchor` 指向会话日志、`file_anchor` 指向工作区磁盘、`command_anchor` 指向命令的真实退出码）时，改由见证者机械裁决：锚点匹配即满足，缺失或失配即违规，与自述证据无关——见证者是非自指见证，锚定到见证者的声明无法仅凭自述过关。准则也通过经验自我修订：`propose_acceptance_update` 请 LLM 路由为证据证明失败的准则提出重写或退役提案，经验闸门只应用那些指向失败准则、携带理由且携带具体重写文本的提案。退役准则被冻结：其证据账本永不重置，审计也不再应用它。
 
 ```ts type-equiv
 /** One acceptance criterion: a reusable verification norm learned from
@@ -226,6 +226,12 @@ interface AcceptanceCheck {
   readonly passedCount: number
   /** Audits where the claim was made without evidence for this check. */
   readonly violatedCount: number
+  /** Passes backed by a mechanically-verified external-witness anchor (a
+   * session-log tool call or a workspace file state) rather than self-reported
+   * evidence alone — the non-self-referential subset of the passed ledger, so
+   * the pipeline can see how much of its acceptance rests on witnesses other
+   * than the model's own report. */
+  readonly machineVerifiedCount: number
   /** Rolling sum of |calibrated − observed| of resolved predictions whose
    * audit violated this check — "claims made without verification correlate
    * with bad outcomes" is measured on the same ruler as every prediction. */
@@ -236,6 +242,73 @@ interface AcceptanceCheck {
   readonly revision: number
   readonly createdAt: number
   readonly updatedAt: number
+}
+```
+
+```ts type-equiv
+/** A mechanically-verified external-witness anchor for a claim audit. The
+ * witness is never the model's memory: a session-ledger tool call, a
+ * workspace file state, or a command's exit code read/run at audit time.
+ * When a claim anchors to a witness, the witness decides — a missing or
+ * mismatched anchor violates the claim regardless of self-reported evidence. */
+type ClaimAnchor =
+  | {
+    readonly kind: 'log'
+    /** The tool name whose most recent settled call is the witness. */
+    readonly toolName: string
+    /** The matched `tool/call` event's call id ('' when not found). */
+    readonly callId: string
+    /** The success flag the claim asserted about the call. */
+    readonly expectedSucceeded: boolean
+    /** Whether the ledger matched the expectation. */
+    readonly matched: boolean
+  }
+  | {
+    readonly kind: 'file'
+    /** The workspace path the claim asserted about. */
+    readonly path: string
+    /** The file-state expectation the claim asserted. */
+    readonly expect: FileExpect
+    /** The expected hash for `matches-hash`. */
+    readonly hash?: string
+    /** The searched substring for `contains`. */
+    readonly text?: string
+    /** Whether the file state matched the expectation (false on unreadable). */
+    readonly matched: boolean
+  }
+  | {
+    readonly kind: 'command'
+    /** The command whose exit code is the witness. */
+    readonly command: string
+    /** The exit-code expectation the claim asserted. */
+    readonly expect: CommandExpect
+    /** The observed exit code, null when the command could not settle (spawn
+     * error or timeout — fail-closed). */
+    readonly exitCode: number | null
+    /** Whether the exit code matched the expectation (false when un-settled). */
+    readonly matched: boolean
+  }
+```
+
+```ts type-equiv
+/** One LLM-proposed acceptance-criterion update (template 8), before the
+ * experience gate: a proposal only touches the ledger when it targets a
+ * demonstrably failing criterion (deviation rate at/above the threshold with
+ * enough invoked audits), carries a rationale, and carries concrete rewrite
+ * text for `rewrite` — criteria are self-amended only through the data gate,
+ * never by fiat. */
+interface AcceptanceProposal {
+  /** The criterion to update; must be a currently failing active check. */
+  readonly checkId: string
+  readonly action: 'rewrite' | 'retire'
+  /** New criterion statement for `rewrite` (required). */
+  readonly criterion?: string
+  /** New evidence hint for `rewrite` (required). */
+  readonly evidenceHint?: string
+  /** New trigger marker for `rewrite` (optional). */
+  readonly trigger?: string
+  /** Why the change is warranted, citing the criterion's ledger evidence. */
+  readonly rationale: string
 }
 ```
 
@@ -252,6 +325,16 @@ interface ClaimAudit {
   /** The verification statement the claim carried; empty means the claim was
    * made without evidence. */
   readonly evidence: string
+  /** The mechanically-verified external-witness anchor the claim referenced,
+   * when one was requested: a session-ledger tool call (`log`) or a workspace
+   * file state (`file`), plus whether the witness matched the expectation.
+   * The witness decides — a missing or mismatched anchor is a violation
+   * regardless of self-reported evidence. Null when no anchor was requested. */
+  readonly anchor: ClaimAnchor | null
+  /** True when the audit's satisfied checks were backed by a matched
+   * external-witness anchor (the non-self-referential witness), false when
+   * they rested on self-reported evidence alone. */
+  readonly anchorVerified: boolean
   /** Optional prediction the claim is about; its report feedback folds into
    * the violated checks' error ledger. */
   readonly predictionId: string | null
@@ -261,6 +344,60 @@ interface ClaimAudit {
    * when no check crossed the gate. */
   readonly deviationExpId: string | null
   readonly createdAt: number
+}
+```
+
+## 跳转词表与注入记录
+
+注入触发词之上的联想层，以及每次注入的持久痕迹，共同喂养引用率强化环。
+
+```ts type-equiv
+/** One trigger-jump association: a word whose presence activates
+ * evidence-backed trigger words in the injection gate — the associative layer
+ * over the static and derived trigger lexicons. Every jump carries its
+ * evidence (distinct experiences, summed importance, or an LLM rationale),
+ * its measured utility (citation rate from the injection loop), and its
+ * source — nothing enters the lexicon without an accountable basis. */
+interface TriggerJump {
+  /** The jump word (a token in experience text or an LLM-proposed variant). */
+  readonly jumpWord: string
+  /** The trigger words this jump activates, with evidence-backed weights. */
+  readonly triggers: readonly {
+    readonly trigger: string
+    readonly weight: number
+    readonly evidenceCount: number
+  }[]
+  /** Total distinct experiences backing this jump (0 for LLM-sourced jumps). */
+  readonly evidenceCount: number
+  readonly source: TriggerJumpSource
+  /** Why an LLM-sourced jump exists; empty for co-occurrence jumps. */
+  readonly rationale: string
+  /** Times this jump was hit in the injection gate. */
+  readonly hitCount: number
+  /** Times a hit was followed by a cited injection (measured utility). */
+  readonly citedCount: number
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+```
+
+```ts type-equiv
+/** One injection event, recorded for citation-rate measurement: did the model
+ * actually use the injected experience? The answer folds back into the jump
+ * words that contributed to the trigger, feeding the reinforcement loop. */
+interface InjectionRecord {
+  readonly injectionId: string
+  readonly createdAt: number
+  /** The expIds injected. */
+  readonly expIds: readonly string[]
+  /** The trigger that fired, e.g. `static:怎么` / `jump:卡壳→卡住`. */
+  readonly triggerSource: string
+  /** The jump words (if any) that contributed to the trigger. */
+  readonly jumpWords: readonly string[]
+  /** The session the injection happened in, when known. */
+  readonly sessionId: string | null
+  /** Whether a later assistant message referenced an injected expId (null until settled). */
+  readonly cited: boolean | null
 }
 ```
 
@@ -718,18 +855,25 @@ async defineAcceptanceCheck(input: { criterion: string trigger: string evidenceH
  * are those whose trigger marker appears in the claim or its situation; a
  * claim with no applicable check audits as `not-applicable` and touches no
  * ledger. An applicable check is satisfied when the claim carries evidence
- * (non-empty), violated when it does not — presence, not truth. Violated
- * checks accumulate in the criterion's ledger, and a criterion whose invoked
- * count clears the evidence minimum while its deviation rate crosses the
- * threshold flags `reworkNeeded` and records one deviation meta experience
- * so the cold loop can cluster the pipeline's own acceptance-failure
- * patterns.
+ * (non-empty), violated when it does not — presence, not truth. When the
+ * claim carries an external-witness `anchor` (a session-ledger tool call or
+ * a workspace file state, mechanically verified by the tool layer), the
+ * witness decides instead: a matched anchor satisfies, a missing or
+ * mismatched anchor violates regardless of self-reported evidence — the
+ * witness is non-self-referential, so an anchored claim cannot be validated
+ * by self-report alone. Violated checks accumulate in the criterion's
+ * ledger, and a criterion whose invoked count clears the evidence minimum
+ * while its deviation rate crosses the threshold flags `reworkNeeded` and
+ * records one deviation meta experience so the cold loop can cluster the
+ * pipeline's own acceptance-failure patterns.
  * @param input - the claim, its situation, the verification statement (empty
- *   when the claim is made without evidence), and an optional prediction the
- *   claim is about.
+ *   when the claim is made without evidence), an optional prediction the
+ *   claim is about, and an optional mechanically-verified external-witness
+ *   anchor (computed by the tool layer from the executing session's ledger
+ *   or the workspace disk).
  * @returns the recorded audit.
  */
-async auditClaim(input: { claim: string situation: string evidence?: string predictionId?: string }): Promise<ClaimAudit>
+async auditClaim(input: { claim: string situation: string evidence?: string predictionId?: string anchor?: ClaimAnchor | null }): Promise<ClaimAudit>
 
 /**
  * Rewrite an active criterion's statement/evidence hint, or retire it. A
@@ -741,12 +885,91 @@ async auditClaim(input: { claim: string situation: string evidence?: string pred
  *   optional retire flag.
  * @returns the updated criterion.
  */
-async updateAcceptanceCheck(input: { checkId: string criterion?: string evidenceHint?: string retire?: boolean }): Promise<AcceptanceCheck>
+async updateAcceptanceCheck(input: { checkId: string criterion?: string evidenceHint?: string trigger?: string retire?: boolean }): Promise<AcceptanceCheck>
+
+/**
+ * Run the acceptance-criterion proposal route: gather the demonstrably
+ * failing active criteria (deviation gate crossed) and their evidence
+ * ledgers, ask the LLM route to propose rewrites or retirements, and apply
+ * only the proposals that pass the experience gate — a proposal must target
+ * a failing criterion, carry a rationale, and carry concrete rewrite text.
+ * This is how the pipeline amends its own verification norms from
+ * experience: the route proposes, the evidence gate disposes. Without a
+ * failing criterion or an explicit route, nothing is proposed or applied.
+ * @param call - optional session/signal context.
+ * @returns the flagged criteria, the route's (ungated) proposals, and the
+ *   criteria the gate actually applied.
+ */
+async proposeAcceptanceUpdate(call?: PipelineCallContext): Promise<{ flagged: readonly AcceptanceCheck[] proposals: readonly AcceptanceProposal[] applied: readonly AcceptanceCheck[] }>
 
 /** All acceptance criteria (public for inspection).
  * @returns a detached criterion list, insertion order.
  */
 acceptanceChecks(): readonly AcceptanceCheck[]
+
+/**
+ * Run one command through the shell capability seam and settle on its exit
+ * code — the exit-code witness for command anchors. The pipeline never
+ * spawns processes itself: the composed shell executor owns execution,
+ * sandbox policy, and output handling, and the pipeline observes only the
+ * exit code (output is discarded). Fail-closed: a timeout or a signal death
+ * resolves to null (cannot verify is a violation, never a pass). When no
+ * shell executor is mounted the call fails loud rather than silently
+ * degrading — a composed deployment without `ctx.shell` cannot run command
+ * anchors at all.
+ * @param command - the command line to run via the shell executor.
+ * @param timeoutMs - hard timeout; on expiry the executor kills the command
+ *   and this resolves to null.
+ * @returns the exit code, or null when the command could not settle.
+ */
+async runCommandExitCode(command: string, timeoutMs: number): Promise<number | null>
+
+/**
+ * Learn the trigger-jump lexicon from the experience store: the associative
+ * layer over the static and derived trigger words. Co-occurrence jumps are
+ * built deterministically (a token co-occurring with a trigger across enough
+ * distinct important experiences becomes a jump toward that trigger, gated
+ * by `triggerJumpEvidenceMin`, capped per trigger and in total, normalized
+ * to [0.3, 1]); when an explicit LLM route exists, template 9 additionally
+ * proposes synonym-variant jumps (words that never co-occur, like 卡住↔卡壳)
+ * which enter with zero evidence and a conservative weight — the citation
+ * loop is their evidence gate. The rebuild carries each surviving jump's
+ * measured utility (hit/cited counts) and applies reinforcement: a jump
+ * whose citation rate clears `triggerJumpPruneHits` hits is boosted toward 1
+ * by its rate, and one at/below `triggerJumpPruneRate` is pruned.
+ * @param call - optional session/signal context for the LLM enhancement.
+ * @returns the build summary.
+ */
+async learnTriggerJumps(call?: PipelineCallContext): Promise<{ jumpCount: number cooccurrenceCount: number llmAdded: number pruned: number }>
+
+/** The trigger-jump lexicon (public for the inject plugin's gate).
+ * @returns a detached jump list, insertion order.
+ */
+triggerJumps(): readonly TriggerJump[]
+
+/**
+ * Record one injection event for citation-rate measurement. The inject
+ * plugin calls this after folding the reference block into the step; the
+ * jump words that contributed to the trigger are carried so their measured
+ * utility can be folded when the citation settles.
+ * @param input - the injected expIds, the fired trigger source, the
+ *   contributing jump words, and the session id when known.
+ * @returns the recorded injection.
+ */
+recordInjection(input: { expIds: readonly string[] triggerSource: string sessionId?: string | null jumpWords?: readonly string[] }): InjectionRecord
+
+/**
+ * Settle every unresolved injection of one session against the turn's
+ * assistant text: an injection is cited when the text references any of its
+ * expIds, otherwise not. Each settled outcome folds into the contributing
+ * jump words' hit/cited ledger — the measured utility that the next
+ * {@link learnTriggerJumps} reinforcement uses. Flushes the pending writes
+ * so the settlement is durable.
+ * @param sessionId - the session whose injections to settle.
+ * @param turnText - the turn's assistant/outcome text.
+ * @returns how many injections were settled and how many were cited.
+ */
+async settleInjectionCitations(sessionId: string, turnText: string): Promise<{ settled: number; cited: number }>
 
 /** Recent claim audits (public for inspection).
  * @param limit - how many audits, newest first (default 10).
@@ -775,5 +998,5 @@ taxonomy(): TaxonomyState | null
 tempStrategies(): readonly TempStrategy[]
 ```
 
-Source: [`packages/cognition/cognitive-pipeline/src/service.ts:469`](../../packages/cognition/cognitive-pipeline/src/service.ts)
+Source: [`packages/cognition/cognitive-pipeline/src/service.ts:551`](../../packages/cognition/cognitive-pipeline/src/service.ts)
 <!-- END GENERATED cordis-surface -->

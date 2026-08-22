@@ -9,6 +9,7 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import type {} from '@deepseek-ai/dsh-shell'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { ColdEngine } from './cold-engine.ts'
@@ -17,13 +18,24 @@ import { EmbeddingScorer } from './embedding.ts'
 import type { ResolvedEmbeddingConfig } from './embedding.ts'
 import { HotEngine } from './hot-engine.ts'
 import type { HotEngineConfig } from './hot-engine.ts'
-import { CognitivePipelineError, deriveReference, evaluateAccumulation, extractSar, resolveRoute } from './llm.ts'
+import {
+  CognitivePipelineError,
+  deriveReference,
+  evaluateAccumulation,
+  extractSar,
+  hasExplicitRoute,
+  proposeAcceptanceUpdates,
+  proposeTriggerJumps,
+  resolveRoute,
+} from './llm.ts'
 import type { CognitiveLlmRoute } from './llm.ts'
 import { cognitionPrefix } from './prompts.ts'
 import { CognitiveStore } from './store.ts'
 import type {
   AcceptanceCheck,
+  AcceptanceProposal,
   CalibrationBucket,
+  ClaimAnchor,
   ClaimAudit,
   Cluster,
   CognitiveLoopStats,
@@ -31,6 +43,7 @@ import type {
   ExplorationTask,
   FeedbackInput,
   FeedbackResult,
+  InjectionRecord,
   InspectResult,
   LoopExecutionReceipt,
   LoopExecutionRequest,
@@ -45,9 +58,18 @@ import type {
   SimulateInput,
   TaxonomyState,
   TempStrategy,
+  TriggerJump,
   TurnEpisode,
 } from './types.ts'
 import { actionVector, cosine, outcomeVector, signatureHash, tokenize, utilityScore } from './vectorizer.ts'
+import {
+  STATIC_TRIGGERS,
+  STOP_WORDS,
+  accumulateTriggerJumps,
+  deriveTriggerWords,
+  emptyJumpAccumulator,
+  importanceOf,
+} from './triggers.ts'
 
 /** Meta-experience deduplication: skip recording a routing-failure when an
  * action-vector-identical meta experience already exists (default 0.8). */
@@ -140,6 +162,30 @@ export interface CognitivePipelineConfig {
   /** Violation ratio (violated/invoked) at/above which an applied criterion
    * flags rework on an audit (default 0.5). */
   acceptanceDeviationThreshold?: number
+  /** Whether `verify_claim` command anchors may actually run the supplied
+   * command and settle on its exit code. A model-supplied command is a
+   * real execution surface, so this is OFF by default (default false). */
+  acceptanceCommandExecution?: boolean
+  /** Hard timeout for one command anchor, in milliseconds (default 30000);
+   * a command that does not settle fails closed. */
+  acceptanceCommandTimeoutMs?: number
+  /** Minimum distinct experiences backing a co-occurrence trigger jump before
+   * it enters the lexicon (default 3). */
+  triggerJumpEvidenceMin?: number
+  /** How many jumps one trigger word may keep (default 20). */
+  triggerJumpMaxPerTrigger?: number
+  /** Total cap on the jump table (default 400); the lowest-weight jumps drop. */
+  triggerJumpTotalCap?: number
+  /** Gate-time scaling of a jump's contribution to the trigger score; a single
+   * jump never opens the gate alone when `scale × 1 < 0.6` (default 0.5). */
+  triggerJumpWeightScale?: number
+  /** Citation-rate boost added to a jump's weight during reinforcement
+   * (default 0.2). */
+  triggerJumpCitationBoost?: number
+  /** Citation rate at/below which a measured jump is pruned (default 0.1). */
+  triggerJumpPruneRate?: number
+  /** Minimum hits before a jump is eligible for pruning (default 5). */
+  triggerJumpPruneHits?: number
   /** Cold-loop max sample ratio of the population (default 0.15). */
   maxSampleRatio?: number
   /** Evidence hard-constraint minimum count (default 3). */
@@ -193,6 +239,24 @@ export interface ResolvedCognitivePipelineConfig {
   readonly acceptanceMinEvidenceCount: number
   /** Violation ratio at/above which an applied criterion flags rework. */
   readonly acceptanceDeviationThreshold: number
+  /** Whether command anchors may actually run model-supplied commands. */
+  readonly acceptanceCommandExecution: boolean
+  /** Hard timeout for one command anchor, in milliseconds. */
+  readonly acceptanceCommandTimeoutMs: number
+  /** Minimum distinct experiences backing a co-occurrence trigger jump. */
+  readonly triggerJumpEvidenceMin: number
+  /** How many jumps one trigger word may keep. */
+  readonly triggerJumpMaxPerTrigger: number
+  /** Total cap on the jump table. */
+  readonly triggerJumpTotalCap: number
+  /** Gate-time scaling of a jump's contribution to the trigger score. */
+  readonly triggerJumpWeightScale: number
+  /** Citation-rate boost added to a jump's weight during reinforcement. */
+  readonly triggerJumpCitationBoost: number
+  /** Citation rate at/below which a measured jump is pruned. */
+  readonly triggerJumpPruneRate: number
+  /** Minimum hits before a jump is eligible for pruning. */
+  readonly triggerJumpPruneHits: number
   /** Real-embedding configuration, or null when the seam is disabled. */
   readonly embedding: ResolvedEmbeddingConfig | null
   /** Active-exploration budget (scheme 2). */
@@ -245,6 +309,15 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   autoAccumulate: z.boolean().default(false),
   acceptanceMinEvidenceCount: z.number().step(1).min(1).default(3),
   acceptanceDeviationThreshold: z.number().min(0).max(1).default(0.5),
+  acceptanceCommandExecution: z.boolean().default(false),
+  acceptanceCommandTimeoutMs: z.number().step(1).min(100).default(30_000),
+  triggerJumpEvidenceMin: z.number().step(1).min(1).default(3),
+  triggerJumpMaxPerTrigger: z.number().step(1).min(1).default(20),
+  triggerJumpTotalCap: z.number().step(1).min(1).default(400),
+  triggerJumpWeightScale: z.number().min(0).max(1).default(0.5),
+  triggerJumpCitationBoost: z.number().min(0).max(1).default(0.2),
+  triggerJumpPruneRate: z.number().min(0).max(1).default(0.1),
+  triggerJumpPruneHits: z.number().step(1).min(1).default(5),
   maxSampleRatio: z.number().min(0.01).max(1).default(0.15),
   evidenceMinCount: z.number().step(1).min(1).default(3),
   evidenceMaxDistance: z.number().min(0).max(1).default(0.85),
@@ -318,6 +391,15 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
     autoAccumulate: config.autoAccumulate ?? false,
     acceptanceMinEvidenceCount: config.acceptanceMinEvidenceCount ?? 3,
     acceptanceDeviationThreshold: config.acceptanceDeviationThreshold ?? 0.5,
+    acceptanceCommandExecution: config.acceptanceCommandExecution ?? false,
+    acceptanceCommandTimeoutMs: config.acceptanceCommandTimeoutMs ?? 30_000,
+    triggerJumpEvidenceMin: config.triggerJumpEvidenceMin ?? 3,
+    triggerJumpMaxPerTrigger: config.triggerJumpMaxPerTrigger ?? 20,
+    triggerJumpTotalCap: config.triggerJumpTotalCap ?? 400,
+    triggerJumpWeightScale: config.triggerJumpWeightScale ?? 0.5,
+    triggerJumpCitationBoost: config.triggerJumpCitationBoost ?? 0.2,
+    triggerJumpPruneRate: config.triggerJumpPruneRate ?? 0.1,
+    triggerJumpPruneHits: config.triggerJumpPruneHits ?? 5,
     embedding: config.embedding === undefined
       ? null
       : Object.freeze({
@@ -1258,7 +1340,7 @@ export class CognitivePipelineService extends Service {
       invokedCount: 0,
       passedCount: 0,
       violatedCount: 0,
-      logVerifiedCount: 0,
+      machineVerifiedCount: 0,
       cumulativeError: 0,
       errorFoldCount: 0,
       revision: 1,
@@ -1276,19 +1358,21 @@ export class CognitivePipelineService extends Service {
    * claim with no applicable check audits as `not-applicable` and touches no
    * ledger. An applicable check is satisfied when the claim carries evidence
    * (non-empty), violated when it does not — presence, not truth. When the
-   * claim carries a `logEvidence` anchor, the session ledger decides instead:
-   * a matched anchor satisfies, a missing or mismatched anchor violates
-   * regardless of self-reported evidence — the log is the non-self-referential
-   * witness, so a claim that anchors to the ledger cannot be validated by
-   * self-report alone. Violated checks accumulate in the criterion's ledger,
-   * and a criterion whose invoked count clears the evidence minimum while its
-   * deviation rate crosses the threshold flags `reworkNeeded` and records one
-   * deviation meta experience so the cold loop can cluster the pipeline's own
-   * acceptance-failure patterns.
+   * claim carries an external-witness `anchor` (a session-ledger tool call or
+   * a workspace file state, mechanically verified by the tool layer), the
+   * witness decides instead: a matched anchor satisfies, a missing or
+   * mismatched anchor violates regardless of self-reported evidence — the
+   * witness is non-self-referential, so an anchored claim cannot be validated
+   * by self-report alone. Violated checks accumulate in the criterion's
+   * ledger, and a criterion whose invoked count clears the evidence minimum
+   * while its deviation rate crosses the threshold flags `reworkNeeded` and
+   * records one deviation meta experience so the cold loop can cluster the
+   * pipeline's own acceptance-failure patterns.
    * @param input - the claim, its situation, the verification statement (empty
    *   when the claim is made without evidence), an optional prediction the
-   *   claim is about, and an optional mechanically-verified session-log anchor
-   *   (computed by the tool layer from the executing session's ledger).
+   *   claim is about, and an optional mechanically-verified external-witness
+   *   anchor (computed by the tool layer from the executing session's ledger
+   *   or the workspace disk).
    * @returns the recorded audit.
    */
   async auditClaim(input: {
@@ -1296,12 +1380,7 @@ export class CognitivePipelineService extends Service {
     situation: string
     evidence?: string
     predictionId?: string
-    logEvidence?: {
-      toolName: string
-      callId: string
-      expectedSucceeded: boolean
-      matched: boolean
-    } | null
+    anchor?: ClaimAnchor | null
   }): Promise<ClaimAudit> {
     const claim = input.claim.trim()
     const situation = input.situation.trim()
@@ -1309,8 +1388,8 @@ export class CognitivePipelineService extends Service {
       throw new CognitivePipelineError('cognitive-pipeline: claim must not be empty', 'EMPTY_CLAIM')
     }
     const evidence = (input.evidence ?? '').trim()
-    const anchor = input.logEvidence ?? null
-    const logVerified = anchor !== null && anchor.matched
+    const anchor = input.anchor ?? null
+    const anchorVerified = anchor !== null && anchor.matched
     const haystack = `${situation} ${claim}`
     const active = this.store.acceptanceSnapshot().filter(check => check.status === 'active')
     const applied = active.filter(check => check.trigger.length > 0 && haystack.includes(check.trigger))
@@ -1327,8 +1406,8 @@ export class CognitivePipelineService extends Service {
         satisfiedCheckIds: [],
         violatedCheckIds: [],
         evidence,
-        logAnchor: anchor,
-        logVerified: false,
+        anchor,
+        anchorVerified: false,
         predictionId,
         reworkNeeded: false,
         deviationExpId: null,
@@ -1340,14 +1419,15 @@ export class CognitivePipelineService extends Service {
     }
     const satisfiedCheckIds: string[] = []
     const violatedCheckIds: string[] = []
-    // When the claim anchors to the session ledger, the ledger decides: a
-    // matched anchor satisfies, a missing or mismatched anchor violates —
-    // regardless of self-reported evidence. Without an anchor, presence of
-    // self-reported evidence decides (presence, not truth).
+    // When the claim anchors to an external witness (the session ledger or the
+    // workspace disk), the witness decides: a matched anchor satisfies, a
+    // missing or mismatched anchor violates — regardless of self-reported
+    // evidence. Without an anchor, presence of self-reported evidence decides
+    // (presence, not truth).
     const passed = anchor === null ? evidence.length > 0 : anchor.matched
     const firstCrossingChecks: AcceptanceCheck[] = []
     for (const check of applied) {
-      const updated = this.store.applyAuditStats(check.checkId, passed, logVerified)
+      const updated = this.store.applyAuditStats(check.checkId, passed, anchorVerified)
       if (passed) satisfiedCheckIds.push(check.checkId)
       else violatedCheckIds.push(check.checkId)
       // Deviation gate: flag only on the audit where the criterion FIRST
@@ -1383,8 +1463,8 @@ export class CognitivePipelineService extends Service {
       satisfiedCheckIds,
       violatedCheckIds,
       evidence,
-      logAnchor: anchor,
-      logVerified,
+      anchor,
+      anchorVerified,
       predictionId,
       reworkNeeded,
       deviationExpId,
@@ -1409,6 +1489,7 @@ export class CognitivePipelineService extends Service {
     checkId: string
     criterion?: string
     evidenceHint?: string
+    trigger?: string
     retire?: boolean
   }): Promise<AcceptanceCheck> {
     const current = this.store.getAcceptanceCheck(input.checkId)
@@ -1435,9 +1516,10 @@ export class CognitivePipelineService extends Service {
     }
     const criterion = input.criterion?.trim()
     const evidenceHint = input.evidenceHint?.trim()
-    if (criterion === undefined && evidenceHint === undefined) {
+    const trigger = input.trigger?.trim()
+    if (criterion === undefined && evidenceHint === undefined && trigger === undefined) {
       throw new CognitivePipelineError(
-        'cognitive-pipeline: update needs criterion, evidenceHint, or retire',
+        'cognitive-pipeline: update needs criterion, evidenceHint, trigger, or retire',
         'EMPTY_ACCEPTANCE_UPDATE',
       )
     }
@@ -1453,9 +1535,16 @@ export class CognitivePipelineService extends Service {
         'EMPTY_ACCEPTANCE_UPDATE',
       )
     }
+    if (trigger !== undefined && trigger.length === 0) {
+      throw new CognitivePipelineError(
+        'cognitive-pipeline: trigger must not be empty',
+        'EMPTY_ACCEPTANCE_UPDATE',
+      )
+    }
     const updated = this.store.updateAcceptanceCheck(input.checkId, {
       ...criterion === undefined ? {} : { criterion },
       ...evidenceHint === undefined ? {} : { evidenceHint },
+      ...trigger === undefined ? {} : { trigger },
       updatedAt: Date.now(),
       revision: current.revision + 1,
     })
@@ -1463,11 +1552,284 @@ export class CognitivePipelineService extends Service {
     return updated
   }
 
+  /**
+   * Run the acceptance-criterion proposal route: gather the demonstrably
+   * failing active criteria (deviation gate crossed) and their evidence
+   * ledgers, ask the LLM route to propose rewrites or retirements, and apply
+   * only the proposals that pass the experience gate — a proposal must target
+   * a failing criterion, carry a rationale, and carry concrete rewrite text.
+   * This is how the pipeline amends its own verification norms from
+   * experience: the route proposes, the evidence gate disposes. Without a
+   * failing criterion or an explicit route, nothing is proposed or applied.
+   * @param call - optional session/signal context.
+   * @returns the flagged criteria, the route's (ungated) proposals, and the
+   *   criteria the gate actually applied.
+   */
+  async proposeAcceptanceUpdate(call?: PipelineCallContext): Promise<{
+    flagged: readonly AcceptanceCheck[]
+    proposals: readonly AcceptanceProposal[]
+    applied: readonly AcceptanceCheck[]
+  }> {
+    const active = this.store.acceptanceSnapshot().filter(check => check.status === 'active')
+    const flagged = active.filter(check =>
+      check.invokedCount >= this.resolved.acceptanceMinEvidenceCount
+      && check.violatedCount / check.invokedCount >= this.resolved.acceptanceDeviationThreshold)
+    if (flagged.length === 0) return { flagged: [], proposals: [], applied: [] }
+    const deviationMeta = this.store.experiencesSnapshot()
+      .filter(exp => exp.meta === true && exp.sar.situation.includes('验收准则持续被违反'))
+      .map(exp => ({ expId: exp.expId, text: exp.sar.situation }))
+    const decision = await proposeAcceptanceUpdates(this.ctx, this.resolved.route, flagged, deviationMeta, {
+      sessionId: call?.sessionId,
+      signal: call?.signal,
+    })
+    const flaggedIds = new Set(flagged.map(check => check.checkId))
+    const applied: AcceptanceCheck[] = []
+    for (const proposal of decision.proposals) {
+      // The experience gate: only demonstrably failing criteria, only with a
+      // rationale, only with concrete rewrite text. Anything else is dropped
+      // without touching the ledger.
+      if (!flaggedIds.has(proposal.checkId)) continue
+      if (proposal.rationale.trim().length === 0) continue
+      if (proposal.action === 'rewrite' && (proposal.criterion?.trim().length ?? 0) === 0) continue
+      const updated = proposal.action === 'retire'
+        ? await this.updateAcceptanceCheck({ checkId: proposal.checkId, retire: true })
+        : await this.updateAcceptanceCheck({
+          checkId: proposal.checkId,
+          ...proposal.criterion === undefined ? {} : { criterion: proposal.criterion },
+          ...proposal.evidenceHint === undefined ? {} : { evidenceHint: proposal.evidenceHint },
+          ...proposal.trigger === undefined ? {} : { trigger: proposal.trigger },
+        })
+      applied.push(updated)
+    }
+    return { flagged, proposals: decision.proposals, applied }
+  }
+
   /** All acceptance criteria (public for inspection).
    * @returns a detached criterion list, insertion order.
    */
   acceptanceChecks(): readonly AcceptanceCheck[] {
     return this.store.acceptanceSnapshot()
+  }
+
+  /**
+   * Run one command through the shell capability seam and settle on its exit
+   * code — the exit-code witness for command anchors. The pipeline never
+   * spawns processes itself: the composed shell executor owns execution,
+   * sandbox policy, and output handling, and the pipeline observes only the
+   * exit code (output is discarded). Fail-closed: a timeout or a signal death
+   * resolves to null (cannot verify is a violation, never a pass). When no
+   * shell executor is mounted the call fails loud rather than silently
+   * degrading — a composed deployment without `ctx.shell` cannot run command
+   * anchors at all.
+   * @param command - the command line to run via the shell executor.
+   * @param timeoutMs - hard timeout; on expiry the executor kills the command
+   *   and this resolves to null.
+   * @returns the exit code, or null when the command could not settle.
+   */
+  async runCommandExitCode(command: string, timeoutMs: number): Promise<number | null> {
+    const shell = this.ctx.get('shell')
+    if (shell === undefined) {
+      throw new CognitivePipelineError(
+        'cognitive-pipeline: command anchors require the shell capability (ctx.shell) to be mounted in the composition',
+        'SHELL_CAPABILITY_UNAVAILABLE',
+      )
+    }
+    const spec = shell.resolve({ command, timeoutMs })
+    const result = await shell.run(spec)
+    // A timeout kill or a signal death settles without a usable exit code.
+    return result.timedOut || result.signal !== null ? null : result.exitCode
+  }
+
+  /**
+   * Learn the trigger-jump lexicon from the experience store: the associative
+   * layer over the static and derived trigger words. Co-occurrence jumps are
+   * built deterministically (a token co-occurring with a trigger across enough
+   * distinct important experiences becomes a jump toward that trigger, gated
+   * by `triggerJumpEvidenceMin`, capped per trigger and in total, normalized
+   * to [0.3, 1]); when an explicit LLM route exists, template 9 additionally
+   * proposes synonym-variant jumps (words that never co-occur, like 卡住↔卡壳)
+   * which enter with zero evidence and a conservative weight — the citation
+   * loop is their evidence gate. The rebuild carries each surviving jump's
+   * measured utility (hit/cited counts) and applies reinforcement: a jump
+   * whose citation rate clears `triggerJumpPruneHits` hits is boosted toward 1
+   * by its rate, and one at/below `triggerJumpPruneRate` is pruned.
+   * @param call - optional session/signal context for the LLM enhancement.
+   * @returns the build summary.
+   */
+  async learnTriggerJumps(call?: PipelineCallContext): Promise<{
+    jumpCount: number
+    cooccurrenceCount: number
+    llmAdded: number
+    pruned: number
+  }> {
+    const now = Date.now()
+    const accumulator = emptyJumpAccumulator()
+    const derived = deriveTriggerWords(this)
+    accumulateTriggerJumps(this, accumulator, derived)
+    const existing = new Map(this.store.triggerJumpsSnapshot().map(jump => [jump.jumpWord, jump]))
+    const jumps = new Map<string, TriggerJump>()
+    for (const [jumpWord, byTrigger] of accumulator) {
+      const candidates = [...byTrigger.entries()]
+        .filter(([, acc]) => acc.evidenceCount >= this.resolved.triggerJumpEvidenceMin)
+        .map(([trigger, acc]) => ({ trigger, acc }))
+      if (candidates.length === 0) continue
+      const maxImportance = Math.max(...candidates.map(candidate => candidate.acc.importance))
+      const kept = [...candidates]
+        .sort((a, b) => b.acc.importance - a.acc.importance)
+        .slice(0, this.resolved.triggerJumpMaxPerTrigger)
+      const prior = existing.get(jumpWord)
+      jumps.set(jumpWord, {
+        jumpWord,
+        triggers: kept.map(({ trigger, acc }) => ({
+          trigger,
+          weight: round3(0.3 + 0.7 * (acc.importance / maxImportance)),
+          evidenceCount: acc.evidenceCount,
+        })),
+        evidenceCount: Math.max(...kept.map(candidate => candidate.acc.evidenceCount)),
+        source: 'cooccurrence',
+        rationale: '',
+        hitCount: prior?.hitCount ?? 0,
+        citedCount: prior?.citedCount ?? 0,
+        createdAt: prior?.createdAt ?? now,
+        updatedAt: now,
+      })
+    }
+
+    // LLM enhancement: synonym variants enter with zero co-occurrence evidence
+    // and a conservative weight; the citation loop is their evidence gate.
+    let llmAdded = 0
+    if (hasExplicitRoute(this.resolved.route)) {
+      const samples = this.store.experiencesSnapshot()
+        .filter(exp => importanceOf(exp) > 0)
+        .slice(0, 10)
+        .map(exp => ({ expId: exp.expId, text: `${exp.sar.situation}。${exp.sar.action}` }))
+      const decision = await proposeTriggerJumps(this.ctx, this.resolved.route, {
+        staticTriggers: [...STATIC_TRIGGERS],
+        derived: [...derived.entries()].map(([word, weight]) => ({ word, weight })),
+        samples,
+      }, {
+        sessionId: call?.sessionId,
+        signal: call?.signal,
+      })
+      for (const proposal of decision.jumps) {
+        if (!STATIC_TRIGGERS.has(proposal.trigger) && !derived.has(proposal.trigger)) continue
+        for (const variant of proposal.variants) {
+          if (variant === proposal.trigger || STOP_WORDS.has(variant) || jumps.has(variant)) continue
+          jumps.set(variant, {
+            jumpWord: variant,
+            triggers: [{ trigger: proposal.trigger, weight: 0.4, evidenceCount: 0 }],
+            evidenceCount: 0,
+            source: 'llm',
+            rationale: proposal.reason,
+            hitCount: 0,
+            citedCount: 0,
+            createdAt: now,
+            updatedAt: now,
+          })
+          llmAdded += 1
+        }
+      }
+    }
+
+    // Total cap: keep the highest-weight jumps when the table overflows.
+    let list = [...jumps.values()]
+    const cap = this.resolved.triggerJumpTotalCap
+    if (list.length > cap) {
+      list = list
+        .sort((a, b) => maxJumpWeight(b) - maxJumpWeight(a))
+        .slice(0, cap)
+    }
+
+    // Reinforcement: measured jumps (enough hits) are boosted by citation rate
+    // and pruned when their rate never pays off.
+    let pruned = 0
+    const reinforced: TriggerJump[] = []
+    for (const jump of list) {
+      if (jump.hitCount >= this.resolved.triggerJumpPruneHits) {
+        const rate = jump.citedCount / jump.hitCount
+        if (rate <= this.resolved.triggerJumpPruneRate) {
+          pruned += 1
+          continue
+        }
+        const boost = rate * this.resolved.triggerJumpCitationBoost
+        reinforced.push({
+          ...jump,
+          triggers: jump.triggers.map(entry => ({ ...entry, weight: clamp01(entry.weight + boost) })),
+          updatedAt: now,
+        })
+      } else {
+        reinforced.push(jump)
+      }
+    }
+    this.store.replaceTriggerJumps(reinforced)
+    return {
+      jumpCount: reinforced.length,
+      cooccurrenceCount: reinforced.filter(jump => jump.source === 'cooccurrence').length,
+      llmAdded,
+      pruned,
+    }
+  }
+
+  /** The trigger-jump lexicon (public for the inject plugin's gate).
+   * @returns a detached jump list, insertion order.
+   */
+  triggerJumps(): readonly TriggerJump[] {
+    return this.store.triggerJumpsSnapshot()
+  }
+
+  /**
+   * Record one injection event for citation-rate measurement. The inject
+   * plugin calls this after folding the reference block into the step; the
+   * jump words that contributed to the trigger are carried so their measured
+   * utility can be folded when the citation settles.
+   * @param input - the injected expIds, the fired trigger source, the
+   *   contributing jump words, and the session id when known.
+   * @returns the recorded injection.
+   */
+  recordInjection(input: {
+    expIds: readonly string[]
+    triggerSource: string
+    sessionId?: string | null
+    jumpWords?: readonly string[]
+  }): InjectionRecord {
+    const record: InjectionRecord = {
+      injectionId: this.store.nextInjectionId(),
+      createdAt: Date.now(),
+      expIds: [...input.expIds],
+      triggerSource: input.triggerSource,
+      jumpWords: [...(input.jumpWords ?? [])],
+      sessionId: input.sessionId ?? null,
+      cited: null,
+    }
+    this.store.recordInjection(record)
+    return record
+  }
+
+  /**
+   * Settle every unresolved injection of one session against the turn's
+   * assistant text: an injection is cited when the text references any of its
+   * expIds, otherwise not. Each settled outcome folds into the contributing
+   * jump words' hit/cited ledger — the measured utility that the next
+   * {@link learnTriggerJumps} reinforcement uses. Flushes the pending writes
+   * so the settlement is durable.
+   * @param sessionId - the session whose injections to settle.
+   * @param turnText - the turn's assistant/outcome text.
+   * @returns how many injections were settled and how many were cited.
+   */
+  async settleInjectionCitations(sessionId: string, turnText: string): Promise<{ settled: number; cited: number }> {
+    const pending = this.store.injectionsSnapshot()
+      .filter(record => record.sessionId === sessionId && record.cited === null)
+    let settled = 0
+    let cited = 0
+    for (const record of pending) {
+      const mentioned = record.expIds.some(expId => turnText.includes(expId))
+      this.store.settleInjection(record.injectionId, mentioned)
+      this.store.foldJumpCitation(record.jumpWords, mentioned)
+      settled += 1
+      if (mentioned) cited += 1
+    }
+    await this.store.flush()
+    return { settled, cited }
   }
 
   /** Recent claim audits (public for inspection).
@@ -1598,4 +1960,23 @@ export class CognitivePipelineService extends Service {
  */
 export function scoreUtility(utility: OutcomeUtility): number {
   return utilityScore(utility)
+}
+
+/** Round to three decimals (jump weights stay compact in the persisted table). */
+function round3(value: number): number {
+  return Math.round(value * 1000) / 1000
+}
+
+/** Clamp into [0, 1]. */
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value))
+}
+
+/** The highest trigger weight of one jump (used for the total-cap ordering). */
+function maxJumpWeight(jump: TriggerJump): number {
+  let max = 0
+  for (const entry of jump.triggers) {
+    if (entry.weight > max) max = entry.weight
+  }
+  return max
 }

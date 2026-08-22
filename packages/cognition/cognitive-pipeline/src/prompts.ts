@@ -6,7 +6,7 @@
  * @module @deepseek-ai/dsh-cognitive-pipeline/prompts
  */
 
-import type { Experience, TaxonomyState } from './types.ts'
+import type { AcceptanceCheck, Experience, TaxonomyState } from './types.ts'
 
 /** Template 1: SAR triplet extraction and utility scoring. */
 export const SAR_SYSTEM_PROMPT = [
@@ -274,4 +274,94 @@ export function frameRefineRetrievalInput(
 ): string {
   return `【当前情境】：${query.situation}\n【拟采取行动】：${query.action}\n\n【候选经验】（按融合相似度排序）：\n`
     + candidates.map(hit => `- [${hit.expId}] (语义相似度 ${hit.similarity.toFixed(2)}) ${hit.text}`).join('\n')
+}
+
+/** Template 8: propose acceptance-criterion updates from evidence — the
+ * pipeline amends its own verification norms only through the experience
+ * gate (only failing criteria, only with rationale and concrete text). */
+export const PROPOSE_ACCEPTANCE_SYSTEM_PROMPT = [
+  '你是认知管线的"验收准则修订官"。现在提供给你若干条【已被证据证明持续失败的验收准则】（违规率越过阈值、审计次数达标）及其证据账本，以及相关的偏离元经验。',
+  '【修订任务】：',
+  '1. 对每条失败的准则，决定是【重写】(rewrite) 还是【退役】(retire)。',
+  '2. 重写：给出新的 criterion（准则陈述，保持"声称X前必须给出Y证据"式）、evidence_hint（证据提示）与 trigger（触发标记，可选）——必须针对该准则为何失败；退役：该准则已无法通过改写挽救（例如触发条件本身不再适用）。',
+  '【修订规则】：',
+  '- 只允许修订【提供的失败准则】中的条目；不得新增准则，不得修订未列出的准则。',
+  '- 每条提案必须给出 rationale（理由），引用该准则账本中的具体证据（invoked/violated 次数、违规率、机器见证通过数、累计误差）。',
+  '- 把握不准时宁可不提案（proposals 可为空数组），绝不凭空改写。',
+  '【输出JSON格式】：',
+  '{',
+  '  "proposals": [',
+  '    {',
+  '      "check_id": "check_N",',
+  '      "action": "rewrite 或 retire",',
+  '      "criterion": "string（重写时必填）",',
+  '      "evidence_hint": "string（重写时必填）",',
+  '      "trigger": "string（重写时选填）",',
+  '      "rationale": "string（必填，引用账本证据）"',
+  '    }',
+  '  ]',
+  '}',
+].join('\n')
+
+/** Frame template-8 input with the failing criteria and the deviation evidence. */
+export function frameProposeAcceptanceInput(
+  flagged: readonly AcceptanceCheck[],
+  deviationMeta: readonly { expId: string; text: string }[],
+): string {
+  const checks = flagged.map(check => [
+    `- [${check.checkId}] 准则「${check.criterion}」 trigger「${check.trigger}」`,
+    `  账本：invoked=${check.invokedCount} passed=${check.passedCount} violated=${check.violatedCount} 违规率=${(check.violatedCount / check.invokedCount * 100).toFixed(0)}%`,
+    `  机器见证通过=${check.machineVerifiedCount} 累计误差=${check.cumulativeError.toFixed(3)}（${check.errorFoldCount} 次回流）`,
+  ].join('\n')).join('\n')
+  return `【证据证明失败的准则】：\n${checks}\n\n`
+    + (deviationMeta.length === 0
+      ? '【相关偏离元经验】：（无）'
+      : '【相关偏离元经验】：\n' + deviationMeta.map(exp => `- [${exp.expId}] ${exp.text}`).join('\n'))
+}
+
+/** Template 9: propose synonym-variant trigger jumps from the LLM route — the
+ * associative layer BEYOND co-occurrence. Co-occurrence can only learn words
+ * that actually appear together in experience text; paraphrases (卡住↔卡壳)
+ * never co-occur. Every variant must attach to a real trigger word and carry a
+ * reason. LLM-sourced jumps enter with zero co-occurrence evidence and a
+ * conservative weight — the citation loop is their evidence gate: they are
+ * boosted only when injections they helped trigger are actually cited, and
+ * pruned when they never pay off. */
+export const PROPOSE_TRIGGER_JUMPS_SYSTEM_PROMPT = [
+  '你是认知管线的"触发联想官"。现在提供给你触发词表（静态行为词 + 经验库派生词）与若干条重要经验。',
+  '【联想任务】：',
+  '1. 为触发词表中的词，找出【同义/近义/口语变体】——用户可能用这些词表达同一件事，但它们从不与触发词在同一经验中共现（例如"卡住"↔"卡壳/挂起/死循环/卡顿"、"发布"↔"发版/上线/灰度"）。',
+  '2. 只允许为【已提供的触发词】添加变体；不得发明新的触发词。',
+  '【联想规则】：',
+  '- 每个变体必须与触发词含义紧密相关（同义或强近义），宁可少而准，不可多而泛。',
+  '- 每个变体必须给出 reason（一句话理由，说明为什么用户会用这个词表达同一情境）。',
+  '- 变体是单个词或短短语，不得是整句。',
+  '- 把握不准时宁可不提案（jumps 可为空数组）。',
+  '【输出JSON格式】：',
+  '{',
+  '  "jumps": [',
+  '    {',
+  '      "trigger": "触发词（必须是提供的触发词表中的词）",',
+  '      "variants": ["变体1", "变体2"],',
+  '      "reason": "一句话理由"',
+  '    }',
+  '  ]',
+  '}',
+].join('\n')
+
+/** Frame template-9 input with the trigger lexicons and important experiences. */
+export function frameProposeTriggerJumpsInput(
+  staticTriggers: readonly string[],
+  derived: readonly { word: string; weight: number }[],
+  samples: readonly { expId: string; text: string }[],
+): string {
+  const derivedLine = derived.length === 0
+    ? '（无——冷启动）'
+    : derived.map(entry => `${entry.word}(${entry.weight.toFixed(2)})`).join('、')
+  return `【静态行为触发词】：\n${staticTriggers.join('、')}\n\n`
+    + `【经验库派生触发词】：\n${derivedLine}\n\n`
+    + '【重要经验样例】（用于理解词的真实语境）：\n'
+    + (samples.length === 0
+      ? '（无）'
+      : samples.map(sample => `- [${sample.expId}] ${sample.text}`).join('\n'))
 }

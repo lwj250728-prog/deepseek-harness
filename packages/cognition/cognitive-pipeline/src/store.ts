@@ -19,10 +19,12 @@ import type {
   ExplorationState,
   ExplorationTask,
   ExplorationTaskStatus,
+  InjectionRecord,
   LoopExecutionReceipt,
   Prediction,
   TaxonomyState,
   TempStrategy,
+  TriggerJump,
 } from './types.ts'
 import { ACTION_VECTOR_DIM, actionVector } from './vectorizer.ts'
 
@@ -109,6 +111,8 @@ export class CognitiveStore {
   private loopExecutions = new Map<string, LoopExecutionReceipt>()
   private acceptance = new Map<string, AcceptanceCheck>()
   private claimAudits = new Map<string, ClaimAudit>()
+  private triggerJumps = new Map<string, TriggerJump>()
+  private injections = new Map<string, InjectionRecord>()
   private taxonomyState: TaxonomyState | null = null
   private nextExpSeq = 1
   private nextPredictionSeq = 1
@@ -116,6 +120,7 @@ export class CognitiveStore {
   private nextTaskSeq = 1
   private nextAcceptanceSeq = 1
   private nextAuditSeq = 1
+  private nextInjectionSeq = 1
 
   /**
    * @param root - directory that will hold the JSONL/JSON state files.
@@ -134,7 +139,7 @@ export class CognitiveStore {
     const [
       experiences, predictions, tempStrategies, clusters, calibration,
       channelWeights, exploration, tasks, loopExecutions, acceptance,
-      claimAudits, taxonomy,
+      claimAudits, triggerJumps, injections, taxonomy,
     ] = await Promise.all([
       readFile(this.file('experiences.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('predictions.jsonl'), 'utf8').catch(() => ''),
@@ -147,6 +152,8 @@ export class CognitiveStore {
       readFile(this.file('loop_executions.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('acceptance.json'), 'utf8').catch(() => ''),
       readFile(this.file('claim_audits.jsonl'), 'utf8').catch(() => ''),
+      readFile(this.file('trigger_jumps.json'), 'utf8').catch(() => ''),
+      readFile(this.file('injections.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('taxonomy.json'), 'utf8').catch(() => ''),
     ])
     for (const record of parseLines(experiences)) {
@@ -250,13 +257,19 @@ export class CognitiveStore {
           if (typeof record !== 'object' || record === null) continue
           const check = record as AcceptanceCheck
           if (typeof check.checkId !== 'string' || typeof check.criterion !== 'string') continue
-          // Rows predating the log-anchored ledger lack logVerifiedCount;
-          // normalize to zero so the counter fold starts clean instead of on NaN.
+          // Rows predating the machine-verified ledger carry logVerifiedCount
+          // (and older ones nothing); normalize to the renamed counter so the
+          // fold starts clean instead of on NaN.
+          const rawCheck = record as unknown as { logVerifiedCount?: unknown }
+          const legacyCount = typeof rawCheck.logVerifiedCount === 'number'
+            && Number.isInteger(rawCheck.logVerifiedCount)
+            ? rawCheck.logVerifiedCount
+            : 0
           this.acceptance.set(check.checkId, {
             ...check,
-            logVerifiedCount: Number.isInteger(check.logVerifiedCount) && check.logVerifiedCount >= 0
-              ? check.logVerifiedCount
-              : 0,
+            machineVerifiedCount: Number.isInteger(check.machineVerifiedCount) && check.machineVerifiedCount >= 0
+              ? check.machineVerifiedCount
+              : legacyCount,
           })
           const seq = Number(check.checkId.replace('check_', ''))
           if (Number.isFinite(seq)) this.nextAcceptanceSeq = Math.max(this.nextAcceptanceSeq, seq + 1)
@@ -267,14 +280,51 @@ export class CognitiveStore {
       if (typeof record !== 'object' || record === null) continue
       const audit = record as ClaimAudit
       if (typeof audit.auditId !== 'string' || typeof audit.claim !== 'string') continue
-      // Rows predating the log-anchored audit lack the anchor fields.
+      // Rows predating the unified anchor carry logAnchor/logVerified; read the
+      // raw row and map the legacy log anchor onto the unified `anchor` shape
+      // so a missing anchorVerified normalizes to false, not undefined.
+      const rawAudit = record as unknown as {
+        anchorVerified?: unknown
+        logVerified?: unknown
+        logAnchor?: { toolName?: unknown; callId?: unknown; expectedSucceeded?: unknown; matched?: unknown } | null
+      }
+      const legacyLog = rawAudit.logAnchor
+      const anchor = audit.anchor ?? (typeof legacyLog === 'object' && legacyLog !== null
+        ? {
+          kind: 'log' as const,
+          toolName: typeof legacyLog.toolName === 'string' ? legacyLog.toolName : '',
+          callId: typeof legacyLog.callId === 'string' ? legacyLog.callId : '',
+          expectedSucceeded: legacyLog.expectedSucceeded === true,
+          matched: legacyLog.matched === true,
+        }
+        : null)
       this.claimAudits.set(audit.auditId, {
         ...audit,
-        logAnchor: audit.logAnchor ?? null,
-        logVerified: audit.logVerified === true,
+        anchor,
+        // Current rows carry anchorVerified; legacy rows carry logVerified.
+        anchorVerified: rawAudit.anchorVerified === true || rawAudit.logVerified === true,
       })
       const seq = Number(audit.auditId.replace('audit_', ''))
       if (Number.isFinite(seq)) this.nextAuditSeq = Math.max(this.nextAuditSeq, seq + 1)
+    }
+    if (triggerJumps !== '') {
+      const parsed = JSON.parse(triggerJumps) as unknown
+      if (Array.isArray(parsed)) {
+        for (const record of parsed) {
+          if (typeof record !== 'object' || record === null) continue
+          const jump = record as TriggerJump
+          if (typeof jump.jumpWord !== 'string' || jump.jumpWord.length === 0) continue
+          this.triggerJumps.set(jump.jumpWord, jump)
+        }
+      }
+    }
+    for (const record of parseLines(injections)) {
+      if (typeof record !== 'object' || record === null) continue
+      const injection = record as InjectionRecord
+      if (typeof injection.injectionId !== 'string') continue
+      this.injections.set(injection.injectionId, injection)
+      const seq = Number(injection.injectionId.replace('inject_', ''))
+      if (Number.isFinite(seq)) this.nextInjectionSeq = Math.max(this.nextInjectionSeq, seq + 1)
     }
     if (taxonomy !== '') {
       const parsed = JSON.parse(taxonomy) as unknown
@@ -892,15 +942,16 @@ export class CognitiveStore {
 
   /** Fold one audit's verdict into one criterion's evidence ledger: invoked
    * always increments, and the audit counts as passed (evidence present) or
-   * violated (no evidence). Passes backed by a matched session-log anchor
-   * additionally increment the log-verified counter, so the ledger separates
-   * machine-witnessed satisfaction from self-reported satisfaction.
+   * violated (no evidence). Passes backed by a matched external-witness anchor
+   * (a session-log tool call or a workspace file state) additionally increment
+   * the machine-verified counter, so the ledger separates machine-witnessed
+   * satisfaction from self-reported satisfaction.
    * @param checkId - the applied criterion.
    * @param passed - whether the claim carried evidence for it.
-   * @param logVerified - whether that evidence was a matched log anchor.
+   * @param machineVerified - whether that evidence was a matched external anchor.
    * @returns the updated criterion.
    */
-  applyAuditStats(checkId: string, passed: boolean, logVerified = false): AcceptanceCheck {
+  applyAuditStats(checkId: string, passed: boolean, machineVerified: boolean = false): AcceptanceCheck {
     const current = this.acceptance.get(checkId)
     if (current === undefined) {
       throw new Error(`cognitive-pipeline: acceptance check "${checkId}" not found`)
@@ -910,7 +961,7 @@ export class CognitiveStore {
       invokedCount: current.invokedCount + 1,
       passedCount: current.passedCount + (passed ? 1 : 0),
       violatedCount: current.violatedCount + (passed ? 0 : 1),
-      logVerifiedCount: current.logVerifiedCount + (passed && logVerified ? 1 : 0),
+      machineVerifiedCount: current.machineVerifiedCount + (passed && machineVerified ? 1 : 0),
     }
     this.acceptance.set(checkId, next)
     this.enqueue('acceptance.json', [...this.acceptance.values()])
@@ -938,6 +989,93 @@ export class CognitiveStore {
     this.acceptance.set(checkId, next)
     this.enqueue('acceptance.json', [...this.acceptance.values()])
     return next
+  }
+
+  // ── trigger jumps + injection records ─────────────────────────────────────
+
+  /** Upsert one trigger-jump association (keyed by jump word).
+   * @param jump - the jump to add or replace.
+   */
+  upsertTriggerJump(jump: TriggerJump): void {
+    this.triggerJumps.set(jump.jumpWord, jump)
+    this.enqueue('trigger_jumps.json', [...this.triggerJumps.values()])
+  }
+
+  /** Read one trigger jump by jump word.
+   * @param jumpWord - the jump word.
+   * @returns the jump, or undefined.
+   */
+  getTriggerJump(jumpWord: string): TriggerJump | undefined {
+    return this.triggerJumps.get(jumpWord)
+  }
+
+  /** Snapshot of every trigger jump, insertion order. */
+  triggerJumpsSnapshot(): readonly TriggerJump[] {
+    return [...this.triggerJumps.values()]
+  }
+
+  /** Replace the whole trigger-jump table (a rebuild replaces the structure;
+   * the service carries citation stats across the rebuild).
+   * @param jumps - the new table.
+   */
+  replaceTriggerJumps(jumps: readonly TriggerJump[]): void {
+    this.triggerJumps = new Map(jumps.map(jump => [jump.jumpWord, jump]))
+    this.enqueue('trigger_jumps.json', [...this.triggerJumps.values()])
+  }
+
+  /** Allocate the next injection-record id.
+   * @returns `inject_<n>`.
+   */
+  nextInjectionId(): string {
+    const id = `inject_${this.nextInjectionSeq}`
+    this.nextInjectionSeq += 1
+    return id
+  }
+
+  /** Record one injection event.
+   * @param record - the injection to add (id must be unique).
+   */
+  recordInjection(record: InjectionRecord): void {
+    this.injections.set(record.injectionId, record)
+    this.enqueueLines('injections.jsonl', [...this.injections.values()])
+  }
+
+  /** Snapshot of every injection record, insertion order. */
+  injectionsSnapshot(): readonly InjectionRecord[] {
+    return [...this.injections.values()]
+  }
+
+  /** Settle one injection's citation outcome.
+   * @param injectionId - the injection to settle.
+   * @param cited - whether a later assistant message referenced an injected expId.
+   */
+  settleInjection(injectionId: string, cited: boolean): void {
+    const current = this.injections.get(injectionId)
+    if (current === undefined || current.cited !== null) return
+    this.injections.set(injectionId, { ...current, cited })
+    this.enqueueLines('injections.jsonl', [...this.injections.values()])
+  }
+
+  /** Fold one settled injection's citation outcome into the contributing jump
+   * words' measured-utility ledger (hitCount always, citedCount when cited).
+   * @param jumpWords - the jump words that contributed to the trigger.
+   * @param cited - whether the injection was cited.
+   */
+  foldJumpCitation(jumpWords: readonly string[], cited: boolean): void {
+    if (jumpWords.length === 0) return
+    let changed = false
+    for (const word of jumpWords) {
+      const jump = this.triggerJumps.get(word)
+      if (jump === undefined) continue
+      this.triggerJumps.set(word, {
+        ...jump,
+        hitCount: jump.hitCount + 1,
+        citedCount: jump.citedCount + (cited ? 1 : 0),
+        updatedAt: Date.now(),
+      })
+      changed = true
+    }
+    if (changed) this.enqueue('trigger_jumps.json', [...this.triggerJumps.values()])
   }
 
   // ── clusters + taxonomy ──────────────────────────────────────────────────

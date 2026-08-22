@@ -504,11 +504,15 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   TaxonomyState: 'cognitive-pipeline.md',
   TempStrategy: 'cognitive-pipeline.md',
   AcceptanceCheck: 'cognitive-pipeline.md',
+  AcceptanceProposal: 'cognitive-pipeline.md',
+  ClaimAnchor: 'cognitive-pipeline.md',
   ClaimAudit: 'cognitive-pipeline.md',
   ExplorationTask: 'cognitive-pipeline.md',
+  InjectionRecord: 'cognitive-pipeline.md',
   LoopExecutionReceipt: 'cognitive-pipeline.md',
   LoopExecutionSink: 'cognitive-pipeline.md',
   MetaLoopSpec: 'cognitive-pipeline.md',
+  TriggerJump: 'cognitive-pipeline.md',
   TurnEpisode: 'cognitive-pipeline.md',
 }
 
