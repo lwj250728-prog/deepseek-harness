@@ -37,6 +37,9 @@ export { CognitiveLoopRegistry, CognitivePipelineService, Config }
 export type { CognitivePipelineConfig } from './service.ts'
 export * from './types.ts'
 export * from './vectorizer.ts'
+/** Task-restatement detection, shared by the accumulation gate (reject new
+ * records) and the injection retrieval (skip existing ones). */
+export { isTaskRestatement } from './task-restatement.ts'
 /** Template-7 retrieval refinement, reused by consumers (cognitive-inject)
  * as the pre-injection veto gate. */
 export { refineRetrieval, refineRetrievalFallback } from './llm.ts'

@@ -77,6 +77,7 @@ import {
   assembleChain,
   childChainIdsOf,
 } from './cognition-objects.ts'
+import { isTaskRestatement } from './task-restatement.ts'
 import type { CognitionObjectKind } from './cognition-objects.ts'
 
 /** Meta-experience deduplication: skip recording a routing-failure when an
@@ -924,6 +925,12 @@ export class CognitivePipelineService extends Service {
       signal: call?.signal,
     })
     if (!decision.shouldAccumulate || decision.sar === null) return null
+    // Deterministic task-restatement rejection: even when the LLM gate judged
+    // the delegation turn "worth remembering", a record whose action merely
+    // re-states the task instruction (no real tool trace) would pollute every
+    // later injection for the same task (the exp_155/168/173 lesson). The
+    // prompt rule is advisory; this check is the enforcement.
+    if (isTaskRestatement({ sar: decision.sar })) return null
     const expId = this.store.nextExpId()
     const sar: SarTriplet = {
       situation: decision.sar.situation,
