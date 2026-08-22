@@ -116,6 +116,7 @@ function seedExperience(
   action: string,
   outcome: string,
   utility: { materialGain: number; emotionalValence: number; energyCost: number } = { materialGain: 6, emotionalValence: 6, energyCost: 5 },
+  selfReflexive?: boolean,
 ): void {
   store.addExperience({
     expId,
@@ -138,6 +139,7 @@ function seedExperience(
     simulated: false,
     verification: 'verified',
     evidenceScore: 0,
+    ...selfReflexive === true ? { selfReflexive: true } : {},
   })
 }
 
@@ -416,6 +418,22 @@ describe('cognitive-inject priming', () => {
       expect(injected.length).toBe(1)
       expect(injected[0]).toContain('exp_1')
       expect(injected[0]).not.toContain('exp_2')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('marks self-reflexive experiences in the injected block (ACTION 未经外部见证)', async () => {
+    const { ctx, teardown } = await mount()
+    try {
+      // A self-reflexive restart experience: its action may be speculative.
+      seedExperience(ctx.cognitivePipeline.store, 'exp_sr', '需要重启 DSH 服务', '停止进程并重启服务', '服务已恢复', undefined, true)
+      const { agent } = stubAgent('selfref-inject')
+      const injected = await fire(ctx, agent, 1, 1, '帮我重启 DSH Web 服务')
+      expect(injected.length).toBe(1)
+      expect(injected[0]).toContain('exp_sr')
+      expect(injected[0]).toContain('自反操作')
+      expect(injected[0]).toContain('未经外部见证')
     } finally {
       await teardown()
     }

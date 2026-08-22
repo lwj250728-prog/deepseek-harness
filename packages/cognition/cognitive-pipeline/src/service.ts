@@ -949,6 +949,7 @@ export class CognitivePipelineService extends Service {
       simulated: false,
       verification: 'verified',
       evidenceScore: 0,
+      ...episode.selfReflexive ? { selfReflexive: true } : {},
     })
     return expId
   }

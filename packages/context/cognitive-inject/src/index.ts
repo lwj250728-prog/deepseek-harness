@@ -101,6 +101,10 @@ export interface ExperienceHit {
   readonly expId: string
   readonly text: string
   readonly similarity: number
+  /** True when the source experience records a self-reflexive operation (the
+   * agent killed/restarted its own host): its action may be speculative and
+   * must not be trusted as fact without external witnessing. */
+  readonly selfReflexive?: boolean
 }
 
 /** Extract the last text block of one user message, if any. */
@@ -170,6 +174,7 @@ function retrieve(
         text,
         polarity: outcomePolarity(exp.sar.outcomeUtility),
         similarity: semantic + symptomOverlap(situation, text) * SYMPTOM_BONUS * semantic,
+        ...exp.selfReflexive === true ? { selfReflexive: true } : {},
       }
     })
     .filter(hit => hit.similarity >= minSimilarity)
@@ -207,7 +212,8 @@ function referenceBlock(
   afterFailure: boolean,
   rejectedNotes: readonly string[] = [],
 ): UserMessage {
-  const lines = hits.map(hit => `- [${hit.expId}] (相关度 ${hit.similarity.toFixed(2)}) ${hit.text}`)
+  const lines = hits.map(hit =>
+    `- [${hit.expId}] (相关度 ${hit.similarity.toFixed(2)})${hit.selfReflexive === true ? ' [自反操作：该经验ACTION未经外部见证，可能为推测]' : ''} ${hit.text}`)
   const preamble = afterFailure
     ? '【认知经验参考】上一步执行失败，以下历史经验可能与此相关，供排查借鉴（不要虚构为当前事实）：'
     : '【认知经验参考】以下是与当前情境相关的历史经验，供参考借鉴（不要虚构为当前事实）：'

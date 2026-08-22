@@ -88,6 +88,13 @@
   readonly parentNodeId?: string
   /** The chain-internal order of this node. Absent on legacy rows. */
   readonly sequence?: number
+  /** True when this experience records a self-reflexive operation (the agent
+   * terminated or restarted its own host process): the causal chain after the
+   * kill is unobservable from the recording session, so the SAR action may be
+   * speculative and must not be asserted as fact without external witnessing.
+   * Consumers (injection, prediction) should surface this trust marker.
+   * Absent on legacy rows. */
+  readonly selfReflexive?: boolean
 }
 ```
 
@@ -533,6 +540,11 @@ interface TurnEpisode {
   readonly failed: boolean
   /** The turn sequence number. */
   readonly turnId: number
+  /** Whether the turn performed a self-reflexive operation (e.g. killing its
+   * own host process): the causal chain after the operation is unobservable
+   * from this session's ledger, so any reconstructed action after it may be
+   * speculative and needs external witnessing to be trusted. */
+  readonly selfReflexive: boolean
 }
 ```
 

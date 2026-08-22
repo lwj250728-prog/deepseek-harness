@@ -103,6 +103,13 @@ export interface Experience {
   readonly parentNodeId?: string
   /** The chain-internal order of this node. Absent on legacy rows. */
   readonly sequence?: number
+  /** True when this experience records a self-reflexive operation (the agent
+   * terminated or restarted its own host process): the causal chain after the
+   * kill is unobservable from the recording session, so the SAR action may be
+   * speculative and must not be asserted as fact without external witnessing.
+   * Consumers (injection, prediction) should surface this trust marker.
+   * Absent on legacy rows. */
+  readonly selfReflexive?: boolean
 }
 
 /** One logged hot-loop prediction (the prediction log row). */

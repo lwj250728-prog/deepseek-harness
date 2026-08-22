@@ -3433,7 +3433,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'Experience',
-    declaration: 'export interface Experience {\n    readonly expId: string;\n    readonly sar: SarTriplet;\n    readonly actionVector: readonly number[];\n    readonly outcomeVector: readonly number[];\n    readonly embedding?: readonly number[];\n    readonly clusterId: number | null;\n    readonly strategyLabel: string | null;\n    readonly timestamp: number;\n    readonly predictionError: number | null;\n    readonly cumulativeError: number;\n    readonly hitCount: number;\n    readonly positiveCount: number;\n    readonly simulated: boolean;\n    readonly verification: ExperienceVerification;\n    readonly evidenceScore: number;\n    readonly meta?: boolean;\n    readonly chainId?: string;\n    readonly parentNodeId?: string;\n    readonly sequence?: number;\n}',
+    declaration: 'export interface Experience {\n    readonly expId: string;\n    readonly sar: SarTriplet;\n    readonly actionVector: readonly number[];\n    readonly outcomeVector: readonly number[];\n    readonly embedding?: readonly number[];\n    readonly clusterId: number | null;\n    readonly strategyLabel: string | null;\n    readonly timestamp: number;\n    readonly predictionError: number | null;\n    readonly cumulativeError: number;\n    readonly hitCount: number;\n    readonly positiveCount: number;\n    readonly simulated: boolean;\n    readonly verification: ExperienceVerification;\n    readonly evidenceScore: number;\n    readonly meta?: boolean;\n    readonly chainId?: string;\n    readonly parentNodeId?: string;\n    readonly sequence?: number;\n    readonly selfReflexive?: boolean;\n}',
   },
   {
     name: 'ExperienceVerification',
