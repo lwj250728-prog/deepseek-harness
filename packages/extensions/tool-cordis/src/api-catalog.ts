@@ -3065,7 +3065,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ChainExperience',
-    declaration: 'export interface ChainExperience {\n    readonly chainId: string;\n    readonly goal: string;\n    readonly anchorSessionId: string | null;\n    readonly status: ChainStatus;\n    readonly steps: readonly ChainStep[];\n    readonly memberExpIds: readonly string[];\n    readonly delegationNodeIds: readonly string[];\n    readonly childChainIds: readonly string[];\n    readonly collapsedCount: number;\n    readonly summary: string;\n    readonly hitCount: number;\n    readonly citedCount: number;\n    readonly createdAt: number;\n    readonly updatedAt: number;\n}',
+    declaration: 'export interface ChainExperience {\n    readonly chainId: string;\n    readonly goal: string;\n    readonly anchorSessionId: string | null;\n    readonly status: ChainStatus;\n    readonly steps: readonly ChainStep[];\n    readonly memberExpIds: readonly string[];\n    readonly delegationNodeIds: readonly string[];\n    readonly childChainIds: readonly string[];\n    readonly collapsedCount: number;\n    readonly summary: string;\n    readonly selfReflexive?: boolean;\n    readonly hitCount: number;\n    readonly citedCount: number;\n    readonly createdAt: number;\n    readonly updatedAt: number;\n}',
   },
   {
     name: 'ChainStatus',

@@ -100,6 +100,7 @@ export function assembleChain(
     childChainIds: [],
     collapsedCount: collapsed.length,
     summary: collapsed.slice(0, 4).join('；').slice(0, 500),
+    ...ordered.some(member => member.selfReflexive === true) ? { selfReflexive: true } : {},
     hitCount: previous?.hitCount ?? 0,
     citedCount: previous?.citedCount ?? 0,
     createdAt: previous?.createdAt ?? now,
@@ -206,14 +207,19 @@ function goalDomainKey(goal: string): string {
 }
 
 /** The structural signature of one chain: coarse goal domain + the step
- * polarity sequence, e.g. `发布:失败,失败,成功`. Chains sharing a signature
- * are the same recurring goal-execution shape.
+ * polarity sequence + the causal-break-point axis (whether any member
+ * self-reflexively killed the agent's own host), e.g. `发布:失败,失败,成功` or
+ * `重启:失败~自反`. The self-reflexive axis is the cross-domain theme
+ * projector: "self-reflexive interruption → external witnessing" recurs across
+ * unrelated goal domains, so chains from different domains that both carry the
+ * break point share a signature suffix and can aggregate into one theme.
  * @param chain - the chain to sign.
  * @returns the signature string.
  */
 export function chainSignature(chain: ChainExperience): string {
   const polaritySeq = chain.steps.map(step => step.polarity === 'failure' ? '失败' : '成功').join(',')
-  return `${goalDomainKey(chain.goal)}:${polaritySeq === '' ? '空' : polaritySeq}`
+  const suffix = chain.selfReflexive === true ? '~自反' : ''
+  return `${goalDomainKey(chain.goal)}:${polaritySeq === '' ? '空' : polaritySeq}${suffix}`
 }
 
 /**

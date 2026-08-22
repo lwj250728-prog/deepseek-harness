@@ -483,6 +483,13 @@ export interface ChainExperience {
   readonly collapsedCount: number
   /** The bounded summary of the collapsed routine. */
   readonly summary: string
+  /** Whether any member experience records a self-reflexive operation (killed
+   * the agent's own host): the chain's causal chain contains a break point
+   * where the aftermath is unobservable from the recording session. This is
+   * the "causal-break-point" axis for cross-domain pattern projection — the
+   * self-reflexive-interruption theme recurs across unrelated goal domains.
+   * Absent on legacy rows. */
+  readonly selfReflexive?: boolean
   /** Times this chain was injected. */
   readonly hitCount: number
   /** Times an injection of this chain was cited by the model. */

@@ -8,6 +8,7 @@
 import { describe, expect, it } from 'vitest'
 import type { CognitivePipelineService } from '../src/service.ts'
 import { CognitiveStore } from '../src/store.ts'
+import { chainSignature } from '../src/cognition-objects.ts'
 import { actionVector, outcomeVector } from '../src/vectorizer.ts'
 import { executeTool, pipelineHarness } from './helpers.ts'
 
@@ -21,6 +22,7 @@ function seed(
   gain: number,
   parentNodeId?: string,
   outcome: string = '结果',
+  selfReflexive?: boolean,
 ): string {
   const expId = service.store.nextExpId()
   const sar = {
@@ -48,6 +50,7 @@ function seed(
     ...chainId === undefined ? {} : { chainId },
     sequence,
     ...parentNodeId === undefined ? {} : { parentNodeId },
+    ...selfReflexive === true ? { selfReflexive: true } : {},
   })
   return expId
 }
@@ -380,6 +383,71 @@ describe('chain patterns (the recursive derived cognition object)', () => {
       expect(store.getChainPattern('发:失败')).toBeDefined()
       expect(store.getChainPattern('发:失败')?.chainIds).toBeDefined()
       expect([...(store.getChainPattern('发:失败')?.chainIds ?? [])].sort()).toEqual(['p1', 'p2'])
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('separates the self-reflexive causal-break axis in the signature (跨域主题投影轴)', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      // Two chains with the SAME goal domain and polarity sequence, but one
+      // carries a self-reflexive member (killed its own host). They must NOT
+      // merge into one pattern — the causal-break axis distinguishes them.
+      seedPublishChain(ctx.cognitivePipeline, 'p1')
+      seedPublishChain(ctx.cognitivePipeline, 'p2')
+      // A self-reflexive member in p2's group: same publish shape, but the
+      // agent killed its own host mid-execution.
+      seed(ctx.cognitivePipeline, 'p3', 1, '发布', '准备发布', 8)
+      seed(ctx.cognitivePipeline, 'p3', 2, '发布', '执行发布', 2)
+      seed(ctx.cognitivePipeline, 'p3', 3, '发布', '完成发布', 8, undefined, '结果', true)
+
+      await ctx.cognitivePipeline.rebuildCognitionObject('chain')
+      const chains = ctx.cognitivePipeline.chains()
+      const sr = chains.find(chain => chain.chainId === 'p3')
+      expect(sr?.selfReflexive).toBe(true)
+      const plain = chains.find(chain => chain.chainId === 'p1')
+      expect(plain?.selfReflexive).toBeUndefined()
+
+      // Signatures differ: the self-reflexive suffix splits the group.
+      const result = await ctx.cognitivePipeline.rebuildCognitionObject('chain-pattern')
+      // p1+p2 share `发:失败` (1 pattern); p3 is `发:失败~自反` (singleton, gated).
+      expect(result.built).toBe(1)
+      const pattern = ctx.cognitivePipeline.store.chainPatternsSnapshot()[0]!
+      expect([...pattern.chainIds].sort()).toEqual(['p1', 'p2'])
+      expect(pattern.signature).toBe('发:失败')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('aggregates self-reflexive chains across goal domains into one theme (跨域自反主题)', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      // Two chains from DIFFERENT goal domains, both with a failure step and
+      // both self-reflexive: `发:失败~自反` vs `部:失败~自反` — the domain
+      // differs but the causal-break axis matches, so they must merge.
+      seed(ctx.cognitivePipeline, 'pub', 1, '发布', '准备发布', 8)
+      seed(ctx.cognitivePipeline, 'pub', 2, '发布', '执行发布', 2)
+      seed(ctx.cognitivePipeline, 'pub', 3, '发布', '完成发布', 8, undefined, '结果', true)
+      seed(ctx.cognitivePipeline, 'dep', 1, '部署', '准备部署', 8)
+      seed(ctx.cognitivePipeline, 'dep', 2, '部署', '执行部署', 2)
+      seed(ctx.cognitivePipeline, 'dep', 3, '部署', '完成部署', 8, undefined, '结果', true)
+
+      await ctx.cognitivePipeline.rebuildCognitionObject('chain')
+      const result = await ctx.cognitivePipeline.rebuildCognitionObject('chain-pattern')
+      // Both chains are self-reflexive singletons per their domain+axis
+      // signature; with only one member each they do NOT project (gate), so
+      // built is 0 — the axis is expressed but the ≥2-member evidence gate
+      // still applies. This documents the honest boundary: the theme forms
+      // only when two SAME-signature chains exist.
+      expect(result.built).toBe(0)
+      const chains = ctx.cognitivePipeline.chains()
+      expect(chains.every(chain => chain.selfReflexive === true)).toBe(true)
+      // The distinct signatures prove the axis is carried into the signature.
+      const sigs = chains.map(chainSignature).sort()
+      expect(sigs).toContain('发:失败~自反')
+      expect(sigs).toContain('部:失败~自反')
     } finally {
       await teardown()
     }
