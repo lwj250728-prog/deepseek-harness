@@ -180,6 +180,7 @@ export class CognitiveStore {
         ...typeof exp.chainId === 'string' ? { chainId: exp.chainId } : {},
         ...typeof exp.parentNodeId === 'string' ? { parentNodeId: exp.parentNodeId } : {},
         ...Number.isInteger(exp.sequence) ? { sequence: exp.sequence } : {},
+        ...exp.selfReflexive === true ? { selfReflexive: true } : {},
       })
       this.nextExpSeq = Math.max(this.nextExpSeq, expSeqOf(exp.expId) + 1)
     }

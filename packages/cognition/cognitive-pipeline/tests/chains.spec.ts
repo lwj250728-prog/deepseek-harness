@@ -524,4 +524,38 @@ describe('solidified strategies (the self-verifying rule)', () => {
       await teardown()
     }
   })
+
+  it('folds strategy usage through injection settlement (生命周期接入执行回路)', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const strategy = ctx.cognitivePipeline.solidifyStrategy({
+        goalDomain: '重启',
+        action: '调用 autorestart 脚本',
+        verificationAnchor: 'selfPerformed=true',
+      })
+      // A strategy injection settles as cited → positive use; another settles
+      // uncited → still a use with negative outcome.
+      ctx.cognitivePipeline.recordInjection({
+        expIds: ['exp_1'],
+        triggerSource: 'static:重启',
+        sessionId: 's-strategy-1',
+        strategyId: strategy.strategyId,
+      })
+      ctx.cognitivePipeline.recordInjection({
+        expIds: ['exp_2'],
+        triggerSource: 'static:重启',
+        sessionId: 's-strategy-1',
+        strategyId: strategy.strategyId,
+      })
+      await ctx.cognitivePipeline.settleInjectionCitations('s-strategy-1', '按 exp_1 的固化策略调用 autorestart 脚本')
+      const stored = ctx.cognitivePipeline.store.getSolidifiedStrategy(strategy.strategyId)!
+      // One cited (exp_1 referenced → positive) + one uncited (negative):
+      // hit=2, positive=1, violated=1.
+      expect(stored.hitCount).toBe(2)
+      expect(stored.positiveCount).toBe(1)
+      expect(stored.violatedCount).toBe(1)
+    } finally {
+      await teardown()
+    }
+  })
 })

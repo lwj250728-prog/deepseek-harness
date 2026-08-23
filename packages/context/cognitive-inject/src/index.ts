@@ -493,6 +493,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         triggerSource: verdict.triggerSource,
         sessionId: agent.session.id,
         jumpWords: verdict.jumpWords,
+        strategyId: strategy.strategyId,
       })
       return {
         kind: 'enter',

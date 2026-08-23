@@ -1849,6 +1849,7 @@ export class CognitivePipelineService extends Service {
     sessionId?: string | null
     jumpWords?: readonly string[]
     chainId?: string | null
+    strategyId?: string | null
   }): InjectionRecord {
     const record: InjectionRecord = {
       injectionId: this.store.nextInjectionId(),
@@ -1857,6 +1858,7 @@ export class CognitivePipelineService extends Service {
       triggerSource: input.triggerSource,
       jumpWords: [...(input.jumpWords ?? [])],
       chainId: input.chainId ?? null,
+      strategyId: input.strategyId ?? null,
       sessionId: input.sessionId ?? null,
       cited: null,
     }
@@ -1892,6 +1894,15 @@ export class CognitivePipelineService extends Service {
         // pattern the chain belongs to (the pattern's measure step).
         this.foldObjectFeedback('chain', record.chainId, mentioned)
         this.foldObjectFeedback('chain-pattern', record.chainId, mentioned)
+      }
+      if (record.strategyId !== null) {
+        // Fold the strategy usage into its lifecycle ledger: a cited strategy
+        // (the model referenced its action/anchor) counts as positive, an
+        // injected-but-unused one still counts as a use with a negative
+        // outcome — so the drift sensor accumulates evidence either way and
+        // the deviation gate can flag rework when the strategy stops paying
+        // off (P2-1: the lifecycle was previously dead code with no caller).
+        this.store.foldSolidifiedStrategyUsage(record.strategyId, mentioned)
       }
       settled += 1
       if (mentioned) cited += 1

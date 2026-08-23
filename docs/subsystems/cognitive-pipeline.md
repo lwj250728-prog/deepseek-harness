@@ -457,6 +457,11 @@ interface InjectionRecord {
   readonly jumpWords: readonly string[]
   /** The chain (if any) whose structured steps were injected. */
   readonly chainId: string | null
+  /** The solidified strategy (if any) that was injected instead of scattered
+   * experiences. Carried so the citation settlement can fold the usage
+   * outcome into the strategy's lifecycle ledger (hit/positive/violated),
+   * keeping its drift sensor alive. Absent on legacy rows. */
+  readonly strategyId: string | null
   /** The session the injection happened in, when known. */
   readonly sessionId: string | null
   /** Whether a later assistant message referenced an injected expId (null until settled). */
@@ -1131,7 +1136,7 @@ triggerJumps(): readonly TriggerJump[]
  *   contributing jump words, and the session id when known.
  * @returns the recorded injection.
  */
-recordInjection(input: { expIds: readonly string[] triggerSource: string sessionId?: string | null jumpWords?: readonly string[] chainId?: string | null }): InjectionRecord
+recordInjection(input: { expIds: readonly string[] triggerSource: string sessionId?: string | null jumpWords?: readonly string[] chainId?: string | null strategyId?: string | null }): InjectionRecord
 
 /**
  * Settle every unresolved injection of one session against the turn's
