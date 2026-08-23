@@ -289,15 +289,27 @@ function referenceBlock(
 function solidifiedStrategyForHits(
   service: CognitivePipelineService,
   hits: readonly ExperienceHit[],
+  situation: string,
 ): SolidifiedStrategy | undefined {
+  // Channel 1: a hit's experience carries a chainId; if that chain seeded a
+  // solidified strategy, the strategy is the converged rule.
   const chainIds = new Set<string>()
   for (const hit of hits) {
     const exp = service.store.getExperience(hit.expId)
     if (exp?.chainId !== undefined) chainIds.add(exp.chainId)
   }
-  if (chainIds.size === 0) return undefined
+  if (chainIds.size > 0) {
+    for (const strategy of service.solidifiedStrategies()) {
+      if (strategy.sourceChainId !== '' && chainIds.has(strategy.sourceChainId)) return strategy
+    }
+  }
+  // Channel 2: goal-domain matching. Legacy experiences (exp_100/101) were
+  // accumulated BEFORE chain tagging, so they carry no chainId — but they are
+  // the top hits for the task. When the situation text carries the strategy's
+  // goal domain, the strategy still applies (the injection key is the domain,
+  // not the chain link).
   for (const strategy of service.solidifiedStrategies()) {
-    if (strategy.sourceChainId !== '' && chainIds.has(strategy.sourceChainId)) return strategy
+    if (strategy.goalDomain.length > 0 && situation.includes(strategy.goalDomain)) return strategy
   }
   return undefined
 }
@@ -473,7 +485,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     // is the converged form: it tells the executor exactly what to run and how
     // to check it worked, so the task converges instead of re-deriving each
     // time (the "restart DSH" case: exp_101's script, solidified).
-    const strategy = solidifiedStrategyForHits(ctx.cognitivePipeline, hits)
+    const strategy = solidifiedStrategyForHits(ctx.cognitivePipeline, hits, situation)
     if (strategy !== undefined) {
       const block = strategyBlock(strategy)
       ctx.cognitivePipeline.recordInjection({
