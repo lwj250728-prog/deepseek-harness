@@ -57,6 +57,7 @@ import type {
   RememberInput,
   SarTriplet,
   SimulateInput,
+  SolidifiedStrategy,
   TaxonomyState,
   TempStrategy,
   TriggerJump,
@@ -1992,6 +1993,72 @@ export class CognitivePipelineService extends Service {
     this.store.upsertChain(withChildren)
     await this.store.flush()
     return withChildren
+  }
+
+  /**
+   * Solidify a repeated successful operation into a reusable, self-verifying
+   * strategy. A chain that repeatedly converged on the same concrete action
+   * with a machine-checkable acceptance (the restart chain's selfPerformed
+   * script is the canonical case) is promoted from SAR memory to a strategy:
+   * action + verification anchor (the drift sensor) + invoked/violated
+   * lifecycle + pre-checks. The goal domain becomes the injection key, so a
+   * later executor facing the same goal gets the STRATEGY (short, verifiable)
+   * instead of scattered experiences (long, unverified).
+   * @param input - the strategy definition.
+   * @returns the created strategy.
+   */
+  solidifyStrategy(input: {
+    goalDomain: string
+    action: string
+    verificationAnchor: string
+    preChecks?: readonly string[]
+    sourceChainId?: string
+  }): SolidifiedStrategy {
+    const strategyId = this.store.nextSolidifiedStrategyId()
+    const strategy: SolidifiedStrategy = {
+      strategyId,
+      goalDomain: input.goalDomain,
+      action: input.action,
+      verificationAnchor: input.verificationAnchor,
+      preChecks: [...(input.preChecks ?? [])],
+      sourceChainId: input.sourceChainId ?? '',
+      hitCount: 0,
+      positiveCount: 0,
+      violatedCount: 0,
+      reworkNeeded: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+    this.store.upsertSolidifiedStrategy(strategy)
+    return strategy
+  }
+
+  /** The solidified strategy serving one goal domain, if any.
+   * @param goalDomain - the goal domain key (e.g. `重启`).
+   * @returns the strategy, or undefined.
+   */
+  solidifiedStrategyFor(goalDomain: string): SolidifiedStrategy | undefined {
+    return this.store.getSolidifiedStrategyByDomain(goalDomain)
+  }
+
+  /** All solidified strategies (public for inspection).
+   * @returns the strategy list.
+   */
+  solidifiedStrategies(): readonly SolidifiedStrategy[] {
+    return this.store.solidifiedStrategiesSnapshot()
+  }
+
+  /**
+   * Record one use of a solidified strategy and fold its outcome into the
+   * lifecycle ledger. Every use re-checks the environment through the
+   * verification anchor — the drift sensor — so a strategy that no longer
+   * matches the environment accumulates violations and is flagged for rework
+   * instead of failing silently.
+   * @param strategyId - the strategy id.
+   * @param positive - whether the verification anchor held on this use.
+   */
+  recordSolidifiedStrategyUsage(strategyId: string, positive: boolean): void {
+    this.store.foldSolidifiedStrategyUsage(strategyId, positive)
   }
 
   /** All chains (public for inspection and consumers).

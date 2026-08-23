@@ -117,6 +117,7 @@ function seedExperience(
   outcome: string,
   utility: { materialGain: number; emotionalValence: number; energyCost: number } = { materialGain: 6, emotionalValence: 6, energyCost: 5 },
   selfReflexive?: boolean,
+  chainId?: string,
 ): void {
   store.addExperience({
     expId,
@@ -140,6 +141,7 @@ function seedExperience(
     verification: 'verified',
     evidenceScore: 0,
     ...selfReflexive === true ? { selfReflexive: true } : {},
+    ...chainId === undefined ? {} : { chainId },
   })
 }
 
@@ -519,6 +521,41 @@ describe('cognitive-inject priming', () => {
       // The restatement is skipped; the genuine experience is injected instead.
       expect(injected[0]).not.toContain('exp_tsk')
       expect(injected[0]).toContain('exp_real')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('injects a solidified strategy when the retrieved experience links to its chain (策略优先)', async () => {
+    const { ctx, teardown } = await mount()
+    try {
+      // A chain-linked experience for the restart goal.
+      seedExperience(
+        ctx.cognitivePipeline.store,
+        'exp_chain',
+        '需要重启本机的 DSH Web 服务',
+        '调用 dsh-web-autorestart.ps1 执行重启',
+        '重启成功，selfPerformed=true',
+        undefined,
+        false,
+        'chain-restart',
+      )
+      // The solidified strategy seeded by that chain.
+      ctx.cognitivePipeline.solidifyStrategy({
+        goalDomain: '重启',
+        action: '调用 scripts/dsh-web-autorestart.ps1',
+        verificationAnchor: 'restart-result.json ok=true AND selfPerformed=true',
+        preChecks: ['端口 3080 存在监听'],
+        sourceChainId: 'chain-restart',
+      })
+      const { agent } = stubAgent('strategy-inject')
+      const injected = await fire(ctx, agent, 1, 1, '帮我重启 DSH Web 服务')
+      expect(injected.length).toBe(1)
+      // The STRATEGY block is injected, not scattered experiences.
+      expect(injected[0]).toContain('【固化策略 重启】')
+      expect(injected[0]).toContain('验收锚点')
+      expect(injected[0]).toContain('autorestart.ps1')
+      expect(injected[0]).toContain('前置校验')
     } finally {
       await teardown()
     }

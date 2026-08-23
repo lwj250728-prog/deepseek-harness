@@ -170,6 +170,50 @@ The scratchpad strategy, the lifetime calibration decile, the cold-loop cluster,
 ```
 
 ```ts type-equiv
+/**
+ * A solidified strategy: a repeated successful operation (e.g. "restart DSH =
+ * call scripts/dsh-web-autorestart.ps1") promoted from SAR memory to a
+ * reusable, self-verifying rule. Four parts make it safe against environment
+ * drift:
+ * 1. ACTION — the concrete operation (the script/command that succeeded).
+ * 2. VERIFICATION ANCHOR — a machine-checkable acceptance (e.g. the restart
+ *    result's ok=true AND selfPerformed=true), the "drift sensor": every use
+ *    re-checks whether the environment still matches what was solidified.
+ * 3. LIFECYCLE — an invoked/violated ledger with a deviation gate: when the
+ *    violation rate crosses the threshold, the strategy is flagged for
+ *    rework/retirement instead of failing silently.
+ * 4. PRE-CHECK — conditions verified BEFORE executing (e.g. port 3080 exists,
+ *    script file exists), moving drift detection from after-the-fact to
+ *    before-the-action.
+ * Absent on legacy stores.
+ */
+interface SolidifiedStrategy {
+  /** Stable id, e.g. `solidified-1`. */
+  readonly strategyId: string
+  /** The goal domain this strategy serves (e.g. `重启`), the injection key. */
+  readonly goalDomain: string
+  /** The concrete action (script/command) that succeeded repeatedly. */
+  readonly action: string
+  /** The verification anchor: how to machine-check the action succeeded. */
+  readonly verificationAnchor: string
+  /** Pre-check conditions evaluated before executing (empty = none). */
+  readonly preChecks: readonly string[]
+  /** The chain that seeded this strategy (evidence link). */
+  readonly sourceChainId: string
+  /** Times this strategy was used. */
+  readonly hitCount: number
+  /** Times a use ended positively (the verification anchor held). */
+  readonly positiveCount: number
+  /** Times a use failed the verification anchor or a pre-check. */
+  readonly violatedCount: number
+  /** Whether the deviation gate has flagged this strategy for rework. */
+  readonly reworkNeeded: boolean
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+```
+
+```ts type-equiv
 /** Lifetime calibration statistics for one confidence decile. */ interface CalibrationBucket {
   /** Decile index 0–9 covering [bucketIndex*10, (bucketIndex+1)*10) percent. */
   readonly bucketIndex: number
@@ -1142,6 +1186,42 @@ async rebuildCognitionObject(name: string): Promise<{ kind: string; built: numbe
  */
 async consolidateChain(chainId: string, goal?: string): Promise<ChainExperience | null>
 
+/**
+ * Solidify a repeated successful operation into a reusable, self-verifying
+ * strategy. A chain that repeatedly converged on the same concrete action
+ * with a machine-checkable acceptance (the restart chain's selfPerformed
+ * script is the canonical case) is promoted from SAR memory to a strategy:
+ * action + verification anchor (the drift sensor) + invoked/violated
+ * lifecycle + pre-checks. The goal domain becomes the injection key, so a
+ * later executor facing the same goal gets the STRATEGY (short, verifiable)
+ * instead of scattered experiences (long, unverified).
+ * @param input - the strategy definition.
+ * @returns the created strategy.
+ */
+solidifyStrategy(input: { goalDomain: string action: string verificationAnchor: string preChecks?: readonly string[] sourceChainId?: string }): SolidifiedStrategy
+
+/** The solidified strategy serving one goal domain, if any.
+ * @param goalDomain - the goal domain key (e.g. `重启`).
+ * @returns the strategy, or undefined.
+ */
+solidifiedStrategyFor(goalDomain: string): SolidifiedStrategy | undefined
+
+/** All solidified strategies (public for inspection).
+ * @returns the strategy list.
+ */
+solidifiedStrategies(): readonly SolidifiedStrategy[]
+
+/**
+ * Record one use of a solidified strategy and fold its outcome into the
+ * lifecycle ledger. Every use re-checks the environment through the
+ * verification anchor — the drift sensor — so a strategy that no longer
+ * matches the environment accumulates violations and is flagged for rework
+ * instead of failing silently.
+ * @param strategyId - the strategy id.
+ * @param positive - whether the verification anchor held on this use.
+ */
+recordSolidifiedStrategyUsage(strategyId: string, positive: boolean): void
+
 /** All chains (public for inspection and consumers).
  * @returns a detached chain list, insertion order.
  */
@@ -1223,5 +1303,5 @@ taxonomy(): TaxonomyState | null
 tempStrategies(): readonly TempStrategy[]
 ```
 
-Source: [`packages/cognition/cognitive-pipeline/src/service.ts:581`](../../packages/cognition/cognitive-pipeline/src/service.ts)
+Source: [`packages/cognition/cognitive-pipeline/src/service.ts:583`](../../packages/cognition/cognitive-pipeline/src/service.ts)
 <!-- END GENERATED cordis-surface -->

@@ -453,3 +453,75 @@ describe('chain patterns (the recursive derived cognition object)', () => {
     }
   })
 })
+
+describe('solidified strategies (the self-verifying rule)', () => {
+  it('solidifies a strategy with action, anchor, pre-checks, and lifecycle', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const strategy = ctx.cognitivePipeline.solidifyStrategy({
+        goalDomain: '重启',
+        action: '调用 scripts/dsh-web-autorestart.ps1',
+        verificationAnchor: 'restart-result.json ok=true AND selfPerformed=true',
+        preChecks: ['端口 3080 存在监听', '脚本文件存在'],
+        sourceChainId: 'chain-restart',
+      })
+      expect(strategy.strategyId).toBe('solidified-1')
+      expect(strategy.goalDomain).toBe('重启')
+      expect(strategy.preChecks.length).toBe(2)
+      expect(strategy.reworkNeeded).toBe(false)
+
+      // Lookup by goal domain (the injection key).
+      expect(ctx.cognitivePipeline.solidifiedStrategyFor('重启')?.action).toContain('autorestart')
+      expect(ctx.cognitivePipeline.solidifiedStrategies().length).toBe(1)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('flags a strategy for rework when the deviation gate crosses (environment drift)', async () => {
+    const { ctx, root, teardown } = await pipelineHarness()
+    try {
+      const strategy = ctx.cognitivePipeline.solidifyStrategy({
+        goalDomain: '重启',
+        action: '调用旧脚本',
+        verificationAnchor: 'selfPerformed=true',
+      })
+      // 2 successes then 2 failures: hit=4, violated=2 → gate (≥3, 50%) crosses.
+      ctx.cognitivePipeline.recordSolidifiedStrategyUsage(strategy.strategyId, true)
+      ctx.cognitivePipeline.recordSolidifiedStrategyUsage(strategy.strategyId, true)
+      ctx.cognitivePipeline.recordSolidifiedStrategyUsage(strategy.strategyId, false)
+      ctx.cognitivePipeline.recordSolidifiedStrategyUsage(strategy.strategyId, false)
+      await ctx.cognitivePipeline.flush()
+      const stored = ctx.cognitivePipeline.store.getSolidifiedStrategy(strategy.strategyId)!
+      expect(stored.hitCount).toBe(4)
+      expect(stored.positiveCount).toBe(2)
+      expect(stored.violatedCount).toBe(2)
+      expect(stored.reworkNeeded).toBe(true)
+
+      // Persisted: a fresh store reloads the strategy with its lifecycle.
+      const store = new CognitiveStore(root)
+      await store.load()
+      expect(store.getSolidifiedStrategy(strategy.strategyId)?.reworkNeeded).toBe(true)
+      expect(store.getSolidifiedStrategy(strategy.strategyId)?.violatedCount).toBe(2)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('does not flag rework below the deviation gate', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const strategy = ctx.cognitivePipeline.solidifyStrategy({
+        goalDomain: '发布',
+        action: '调用发布脚本',
+        verificationAnchor: 'HTTP 200',
+      })
+      ctx.cognitivePipeline.recordSolidifiedStrategyUsage(strategy.strategyId, true)
+      ctx.cognitivePipeline.recordSolidifiedStrategyUsage(strategy.strategyId, false)
+      // hit=2 < 3: gate not reached, no rework.
+      expect(ctx.cognitivePipeline.store.getSolidifiedStrategy(strategy.strategyId)?.reworkNeeded).toBe(false)
+    } finally {
+      await teardown()
+    }
+  })
+})

@@ -176,6 +176,48 @@ export interface TempStrategy {
   readonly sourceExpId: string | null
 }
 
+/**
+ * A solidified strategy: a repeated successful operation (e.g. "restart DSH =
+ * call scripts/dsh-web-autorestart.ps1") promoted from SAR memory to a
+ * reusable, self-verifying rule. Four parts make it safe against environment
+ * drift:
+ * 1. ACTION — the concrete operation (the script/command that succeeded).
+ * 2. VERIFICATION ANCHOR — a machine-checkable acceptance (e.g. the restart
+ *    result's ok=true AND selfPerformed=true), the "drift sensor": every use
+ *    re-checks whether the environment still matches what was solidified.
+ * 3. LIFECYCLE — an invoked/violated ledger with a deviation gate: when the
+ *    violation rate crosses the threshold, the strategy is flagged for
+ *    rework/retirement instead of failing silently.
+ * 4. PRE-CHECK — conditions verified BEFORE executing (e.g. port 3080 exists,
+ *    script file exists), moving drift detection from after-the-fact to
+ *    before-the-action.
+ * Absent on legacy stores.
+ */
+export interface SolidifiedStrategy {
+  /** Stable id, e.g. `solidified-1`. */
+  readonly strategyId: string
+  /** The goal domain this strategy serves (e.g. `重启`), the injection key. */
+  readonly goalDomain: string
+  /** The concrete action (script/command) that succeeded repeatedly. */
+  readonly action: string
+  /** The verification anchor: how to machine-check the action succeeded. */
+  readonly verificationAnchor: string
+  /** Pre-check conditions evaluated before executing (empty = none). */
+  readonly preChecks: readonly string[]
+  /** The chain that seeded this strategy (evidence link). */
+  readonly sourceChainId: string
+  /** Times this strategy was used. */
+  readonly hitCount: number
+  /** Times a use ended positively (the verification anchor held). */
+  readonly positiveCount: number
+  /** Times a use failed the verification anchor or a pre-check. */
+  readonly violatedCount: number
+  /** Whether the deviation gate has flagged this strategy for rework. */
+  readonly reworkNeeded: boolean
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
 /** One active-exploration attempt (scheme 2): a scratchpad created within the
  * curiosity budget. ROI is tracked from the strategy's terminal state, then
  * validated by the strategy's real-world reuse: when a later prediction reuses

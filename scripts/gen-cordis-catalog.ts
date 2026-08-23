@@ -515,6 +515,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   LoopExecutionReceipt: 'cognitive-pipeline.md',
   LoopExecutionSink: 'cognitive-pipeline.md',
   MetaLoopSpec: 'cognitive-pipeline.md',
+  SolidifiedStrategy: 'cognitive-pipeline.md',
   TriggerJump: 'cognitive-pipeline.md',
   TurnEpisode: 'cognitive-pipeline.md',
 }

@@ -2062,6 +2062,11 @@
     },
     {
       "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "SolidifiedStrategy",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
       "symbol": "TriggerJump",
       "source": "packages/cognition/cognitive-pipeline/src/types.ts"
     },

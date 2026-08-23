@@ -24,6 +24,7 @@ import type {
   InjectionRecord,
   LoopExecutionReceipt,
   Prediction,
+  SolidifiedStrategy,
   TaxonomyState,
   TempStrategy,
   TriggerJump,
@@ -119,6 +120,7 @@ export class CognitiveStore {
   private injections = new Map<string, InjectionRecord>()
   private chains = new Map<string, ChainExperience>()
   private chainPatterns = new Map<string, ChainPattern>()
+  private solidifiedStrategies = new Map<string, SolidifiedStrategy>()
   private taxonomyState: TaxonomyState | null = null
   private nextExpSeq = 1
   private nextPredictionSeq = 1
@@ -126,6 +128,7 @@ export class CognitiveStore {
   private nextTaskSeq = 1
   private nextAcceptanceSeq = 1
   private nextAuditSeq = 1
+  private nextStrategySeq = 1
   private nextInjectionSeq = 1
 
   /**
@@ -146,6 +149,7 @@ export class CognitiveStore {
       experiences, predictions, tempStrategies, clusters, calibration,
       channelWeights, exploration, tasks, loopExecutions, acceptance,
       claimAudits, triggerJumps, injections, chains, chainPatterns, taxonomy,
+      solidifiedStrategies,
     ] = await Promise.all([
       readFile(this.file('experiences.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('predictions.jsonl'), 'utf8').catch(() => ''),
@@ -163,6 +167,7 @@ export class CognitiveStore {
       readFile(this.file('chains.json'), 'utf8').catch(() => ''),
       readFile(this.file('chain_patterns.json'), 'utf8').catch(() => ''),
       readFile(this.file('taxonomy.json'), 'utf8').catch(() => ''),
+      readFile(this.file('solidified_strategies.json'), 'utf8').catch(() => ''),
     ])
     for (const record of parseLines(experiences)) {
       if (typeof record !== 'object' || record === null) continue
@@ -365,6 +370,19 @@ export class CognitiveStore {
           const pattern = record as ChainPattern
           if (typeof pattern.patternId !== 'string' || pattern.patternId.length === 0) continue
           this.chainPatterns.set(pattern.patternId, pattern)
+        }
+      }
+    }
+    if (solidifiedStrategies !== '') {
+      const parsed = JSON.parse(solidifiedStrategies) as unknown
+      if (Array.isArray(parsed)) {
+        for (const record of parsed) {
+          if (typeof record !== 'object' || record === null) continue
+          const strategy = record as SolidifiedStrategy
+          if (typeof strategy.strategyId !== 'string' || strategy.strategyId.length === 0) continue
+          this.solidifiedStrategies.set(strategy.strategyId, strategy)
+          const seq = Number(strategy.strategyId.replace('solidified-', ''))
+          if (Number.isFinite(seq)) this.nextStrategySeq = Math.max(this.nextStrategySeq, seq + 1)
         }
       }
     }
@@ -934,6 +952,15 @@ export class CognitiveStore {
     return id
   }
 
+  /** The next solidified-strategy id.
+   * @returns `solidified-<n>`.
+   */
+  nextSolidifiedStrategyId(): string {
+    const id = `solidified-${this.nextStrategySeq}`
+    this.nextStrategySeq += 1
+    return id
+  }
+
   /** Store one acceptance criterion and enqueue its persistence.
    * @param check - the criterion to add.
    */
@@ -1225,6 +1252,66 @@ export class CognitiveStore {
     }
     this.chainPatterns.set(patternId, { ...pattern, hitCount, citedCount, updatedAt: Date.now() })
     this.enqueue('chain_patterns.json', [...this.chainPatterns.values()])
+  }
+
+  // ── solidified strategies ─────────────────────────────────────────────────
+
+  /** Read one solidified strategy by id.
+   * @param strategyId - the strategy id.
+   * @returns the strategy, or undefined.
+   */
+  getSolidifiedStrategy(strategyId: string): SolidifiedStrategy | undefined {
+    return this.solidifiedStrategies.get(strategyId)
+  }
+
+  /** Read the solidified strategy serving one goal domain, if any.
+   * @param goalDomain - the goal domain key (e.g. `重启`).
+   * @returns the strategy, or undefined.
+   */
+  getSolidifiedStrategyByDomain(goalDomain: string): SolidifiedStrategy | undefined {
+    return [...this.solidifiedStrategies.values()].find(strategy => strategy.goalDomain === goalDomain)
+  }
+
+  /** Snapshot of every solidified strategy, insertion order.
+   * @returns the strategy list.
+   */
+  solidifiedStrategiesSnapshot(): readonly SolidifiedStrategy[] {
+    return [...this.solidifiedStrategies.values()]
+  }
+
+  /** Add or replace one solidified strategy.
+   * @param strategy - the strategy to persist.
+   */
+  upsertSolidifiedStrategy(strategy: SolidifiedStrategy): void {
+    this.solidifiedStrategies.set(strategy.strategyId, strategy)
+    this.enqueue('solidified_strategies.json', [...this.solidifiedStrategies.values()])
+  }
+
+  /** Fold one usage outcome into a strategy's lifecycle ledger: every use
+   * increments hitCount; a positive outcome (verification anchor held) also
+   * increments positiveCount; a failure (anchor failed or a pre-check tripped)
+   * increments violatedCount and flags rework when the deviation gate crosses
+   * (≥3 invoked, ≥50% violated — the acceptance-criteria gate shape).
+   * @param strategyId - the strategy id.
+   * @param positive - whether the use ended with the anchor holding.
+   */
+  foldSolidifiedStrategyUsage(strategyId: string, positive: boolean): void {
+    const strategy = this.solidifiedStrategies.get(strategyId)
+    if (strategy === undefined) return
+    const hitCount = strategy.hitCount + 1
+    const positiveCount = strategy.positiveCount + (positive ? 1 : 0)
+    const violatedCount = strategy.violatedCount + (positive ? 0 : 1)
+    const invoked = hitCount
+    const reworkNeeded = invoked >= 3 && violatedCount / invoked >= 0.5
+    this.solidifiedStrategies.set(strategyId, {
+      ...strategy,
+      hitCount,
+      positiveCount,
+      violatedCount,
+      reworkNeeded,
+      updatedAt: Date.now(),
+    })
+    this.enqueue('solidified_strategies.json', [...this.solidifiedStrategies.values()])
   }
 
   // ── clusters + taxonomy ──────────────────────────────────────────────────

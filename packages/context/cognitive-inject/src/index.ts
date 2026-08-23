@@ -29,7 +29,7 @@ import {
   tokenize,
 } from '@deepseek-ai/dsh-cognitive-pipeline'
 import type { CognitivePipelineService } from '@deepseek-ai/dsh-cognitive-pipeline'
-import type { OutcomePolarity } from '@deepseek-ai/dsh-cognitive-pipeline'
+import type { OutcomePolarity, SolidifiedStrategy } from '@deepseek-ai/dsh-cognitive-pipeline'
 import {
   DERIVED_TRIGGER_MIN,
   deriveTriggerWords,
@@ -229,6 +229,48 @@ function referenceBlock(
   })
 }
 
+/** Whether the retrieved hits link to a solidified strategy for their goal
+ * domain. A hit's experience carries a chainId; if that chain seeded a
+ * solidified strategy, the strategy is the converged rule for this situation.
+ * @param service - the pipeline service.
+ * @param hits - the retrieved experiences.
+ * @returns the solidified strategy, or undefined.
+ */
+function solidifiedStrategyForHits(
+  service: CognitivePipelineService,
+  hits: readonly ExperienceHit[],
+): SolidifiedStrategy | undefined {
+  const chainIds = new Set<string>()
+  for (const hit of hits) {
+    const exp = service.store.getExperience(hit.expId)
+    if (exp?.chainId !== undefined) chainIds.add(exp.chainId)
+  }
+  if (chainIds.size === 0) return undefined
+  for (const strategy of service.solidifiedStrategies()) {
+    if (strategy.sourceChainId !== '' && chainIds.has(strategy.sourceChainId)) return strategy
+  }
+  return undefined
+}
+
+/** Render a solidified strategy as a model-visible block: the converged rule
+ * with its action, verification anchor (drift sensor), pre-checks, and the
+ * current lifecycle state (so the executor knows whether it still holds). */
+function strategyBlock(strategy: SolidifiedStrategy): UserMessage {
+  const lines = [
+    `【固化策略 ${strategy.goalDomain}】目标域的收敛路径（由 ${strategy.sourceChainId} 链反复成功固化）：`,
+    `- 动作：${strategy.action}`,
+    `- 验收锚点（环境漂移传感器）：${strategy.verificationAnchor}`,
+    ...strategy.preChecks.length > 0 ? [`- 前置校验：${strategy.preChecks.join('；')}`] : [],
+    `- 生命周期：已用 ${strategy.hitCount} 次 / 成功 ${strategy.positiveCount} / 失败 ${strategy.violatedCount}`,
+    ...strategy.reworkNeeded ? ['- ⚠️ 偏离门已越过：该策略需重新学习，勿盲目沿用'] : [],
+  ]
+  const text = lines.join('\n')
+  return createUserMessage({
+    content: [{ type: 'text', text }],
+    source: { kind: 'plugin', plugin: name, form: 'snapshot', sections: [{ name, text }] },
+  })
+}
+
 /** Whether the agent's most recent tool result was a failure. */
 function isAfterFailure(agent: Agent): boolean {
   return lastFailed.get(agent) === true
@@ -359,6 +401,27 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (situation.trim().length === 0) return decision
     const hits = retrieve(ctx.cognitivePipeline, situation, threshold, topK)
     if (hits.length === 0) return decision
+    // Solidified-strategy priority: when the retrieved experiences link to a
+    // chain that seeded a solidified strategy (the repeated-success promotion),
+    // inject the STRATEGY — a short, machine-verifiable rule with a drift
+    // sensor — instead of the scattered, unverified experiences. The strategy
+    // is the converged form: it tells the executor exactly what to run and how
+    // to check it worked, so the task converges instead of re-deriving each
+    // time (the "restart DSH" case: exp_101's script, solidified).
+    const strategy = solidifiedStrategyForHits(ctx.cognitivePipeline, hits)
+    if (strategy !== undefined) {
+      const block = strategyBlock(strategy)
+      ctx.cognitivePipeline.recordInjection({
+        expIds: hits.map(hit => hit.expId),
+        triggerSource: verdict.triggerSource,
+        sessionId: agent.session.id,
+        jumpWords: verdict.jumpWords,
+      })
+      return {
+        kind: 'enter',
+        messages: [...decision.messages, block],
+      }
+    }
     // Veto gate: retrieval may surface over-threshold candidates that do not
     // genuinely fit (a literal hit is not transferability). The template-7
     // refine route judges each candidate; every accepted one is injected
