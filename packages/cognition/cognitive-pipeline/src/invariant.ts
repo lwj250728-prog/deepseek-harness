@@ -51,6 +51,18 @@ const install: InvariantInstaller = (ctx: Context, fail: (message: string) => ne
         fail(`experience ${exp.expId} has a settlement quality outside [0,10]`)
       }
     }
+    const diseq = exp.disequilibrium
+    if (diseq !== undefined) {
+      if (!Number.isFinite(diseq.atTs) || diseq.atTs < 0) {
+        fail(`experience ${exp.expId} has a disequilibrium with an invalid timestamp`)
+      }
+      if (!Number.isFinite(diseq.sampleQuality) || diseq.sampleQuality < 0 || diseq.sampleQuality > 10) {
+        fail(`experience ${exp.expId} has a disequilibrium sample quality outside [0,10]`)
+      }
+      if (!Number.isFinite(diseq.zScore) || diseq.zScore < 0) {
+        fail(`experience ${exp.expId} has a disequilibrium with an invalid z-score`)
+      }
+    }
   }
   for (const cluster of service.store.clustersSnapshot()) {
     // polarity is normalized at the store load boundary, so the union is

@@ -29,7 +29,7 @@ import type {
   TempStrategy,
   TriggerJump,
 } from './types.ts'
-import { ACTION_VECTOR_DIM, actionVector } from './vectorizer.ts'
+import { ACTION_VECTOR_DIM, DEFAULT_DISEQUILIBRIUM_MIN_SAMPLES, DEFAULT_DISEQUILIBRIUM_Z, actionVector, disequilibriumOf } from './vectorizer.ts'
 
 /** How many calibration deciles the lifetime stats keep. */
 export const CALIBRATION_BUCKETS = 10
@@ -595,6 +595,9 @@ export class CognitiveStore {
    * @param actualOutcome - the observed outcome text.
    * @param predictionError - absolute error in [0, 1].
    * @param outcomeQuality - optional result quality 0-10 to fold into the bound experience.
+   * @param disequilibriumGate - optional gate parameters; when supplied, each
+   * quality-carrying settlement is judged against the prior sample
+   * distribution and a threshold-crossing deviation flags the experience.
    * @returns the resolved prediction.
    */
   resolvePrediction(
@@ -602,6 +605,7 @@ export class CognitiveStore {
     actualOutcome: string,
     predictionError: number,
     outcomeQuality?: number,
+    disequilibriumGate?: { zThreshold: number; minSamples: number },
   ): Prediction {
     const current = this.predictions.get(predictionId)
     if (current === undefined) {
@@ -637,9 +641,23 @@ export class CognitiveStore {
           // One variance-ledger sample per quality-carrying settlement: the
           // raw quality (un-scaled) is appended, so the distribution over
           // samples measures how uncertain this experience's result really is.
-          ...outcomeQuality === undefined ? {} : {
-            settlements: [...(exp.settlements ?? []), { ts: now, quality: outcomeQuality }],
-          },
+          // The disequilibrium gate judges the new sample against the prior
+          // distribution; a threshold-crossing deviation flags the experience
+          // as an accommodation candidate (result distribution shifted).
+          ...outcomeQuality === undefined ? {} : (() => {
+            const prior = exp.settlements ?? []
+            const gate = disequilibriumGate ?? {
+              zThreshold: DEFAULT_DISEQUILIBRIUM_Z,
+              minSamples: DEFAULT_DISEQUILIBRIUM_MIN_SAMPLES,
+            }
+            const judgment = disequilibriumOf(prior, outcomeQuality, gate.zThreshold, gate.minSamples)
+            return {
+              settlements: [...prior, { ts: now, quality: outcomeQuality }],
+              ...judgment !== null && judgment.disequilibrated ? {
+                disequilibrium: { atTs: now, sampleQuality: outcomeQuality, zScore: judgment.zScore },
+              } : {},
+            }
+          })(),
         }
         this.experiences.set(exp.expId, next)
         this.enqueueLines('experiences.jsonl', [...this.experiences.values()])
@@ -1386,7 +1404,12 @@ export class CognitiveStore {
     experienceCount: number
     predictionCount: number
     resolvedPredictionCount: number
-    settlement: { sampleCount: number; sampledExperienceCount: number; multiSampleExperienceCount: number }
+    settlement: {
+      sampleCount: number
+      sampledExperienceCount: number
+      multiSampleExperienceCount: number
+      disequilibratedExperienceCount: number
+    }
   } {
     let resolved = 0
     for (const prediction of this.predictions.values()) {
@@ -1395,18 +1418,20 @@ export class CognitiveStore {
     let sampleCount = 0
     let sampledExperienceCount = 0
     let multiSampleExperienceCount = 0
+    let disequilibratedExperienceCount = 0
     for (const exp of this.experiences.values()) {
       const samples = exp.settlements ?? []
       if (samples.length === 0) continue
       sampleCount += samples.length
       sampledExperienceCount += 1
       if (samples.length >= 2) multiSampleExperienceCount += 1
+      if (exp.disequilibrium !== undefined) disequilibratedExperienceCount += 1
     }
     return {
       experienceCount: this.experiences.size,
       predictionCount: this.predictions.size,
       resolvedPredictionCount: resolved,
-      settlement: { sampleCount, sampledExperienceCount, multiSampleExperienceCount },
+      settlement: { sampleCount, sampledExperienceCount, multiSampleExperienceCount, disequilibratedExperienceCount },
     }
   }
 

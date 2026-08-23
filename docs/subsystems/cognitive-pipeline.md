@@ -48,6 +48,22 @@ An experience is a SAR triplet with two deterministic vectors: the action vector
 ```
 
 ```ts type-equiv
+/** A settled disequilibrium event: one settlement sample deviated from the
+ * experience's prior sample distribution beyond the gate threshold (z ≥
+ * `disequilibriumZThreshold` with ≥ `disequilibriumMinSamples` prior samples).
+ * The result distribution has shifted, so the recorded strategy may need
+ * re-evaluation (the driver framework's accommodation trigger) instead of
+ * being assimilated as noise. Set once, retained as audit history. */ interface DisequilibriumEvent {
+  /** Epoch milliseconds of the deviating settlement. */
+  readonly atTs: number
+  /** The deviating sample's raw quality (0–10). */
+  readonly sampleQuality: number
+  /** The deviation magnitude (|q − μ|/σ over the prior distribution). */
+  readonly zScore: number
+}
+```
+
+```ts type-equiv
 /** One stored experience (the main memory row). */ interface Experience {
   readonly expId: string
   readonly sar: SarTriplet
@@ -76,6 +92,10 @@ An experience is a SAR triplet with two deterministic vectors: the action vector
    * really is. Absent on legacy rows and on experiences with no resolved
    * prediction feedback. */
   readonly settlements?: readonly SettlementSample[]
+  /** The most recent disequilibrium event, when the settlement distribution
+   * shifted beyond the gate threshold: the recorded strategy may need
+   * re-evaluation. Absent on legacy rows and on experiences never flagged. */
+  readonly disequilibrium?: DisequilibriumEvent
   /** Times this experience's cluster matched a hot-loop prediction. */
   readonly hitCount: number
   /** Times the predicted outcome matched the actual outcome. */
@@ -791,12 +811,16 @@ The online/offline service I/O contracts.
   readonly predictionCount: number
   readonly resolvedPredictionCount: number
   /** Variance-ledger aggregate: coverage of the settlement distribution
-   * (experiences with samples / with ≥2 samples) and total sample count. */
+   * (experiences with samples / with ≥2 samples), total sample count, and how
+   * many experiences the disequilibrium gate has flagged. */
   readonly settlement: {
     readonly sampleCount: number
     readonly sampledExperienceCount: number
     /** Experiences with at least two samples — variance is computable. */
     readonly multiSampleExperienceCount: number
+    /** Experiences flagged by the disequilibrium gate (result distribution
+     * shifted beyond threshold — accommodation candidates). */
+    readonly disequilibratedExperienceCount: number
   }
   readonly clusterCount: number
   readonly activeTempStrategyCount: number

@@ -1957,6 +1957,11 @@
     },
     {
       "doc": "docs/subsystems/cognitive-pipeline.md",
+      "symbol": "DisequilibriumEvent",
+      "source": "packages/cognition/cognitive-pipeline/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/cognitive-pipeline.md",
       "symbol": "Experience",
       "source": "packages/cognition/cognitive-pipeline/src/types.ts"
     },

@@ -7,7 +7,7 @@
  * @module @deepseek-ai/dsh-cognitive-pipeline/vectorizer
  */
 
-import type { OutcomeUtility } from './types.ts'
+import type { OutcomeUtility, SettlementSample } from './types.ts'
 
 /** Action-vector dimension (the design's `all-MiniLM-L6-v2` stand-in). */
 export const ACTION_VECTOR_DIM = 384
@@ -15,6 +15,14 @@ export const ACTION_VECTOR_DIM = 384
 export const OUTCOME_VECTOR_DIM = 512
 /** Number of utility slots at the head of the outcome vector. */
 export const UTILITY_SLOTS = 3
+
+/** Default z-score threshold of the disequilibrium gate (μ±2σ, a ~5% tail
+ * event under the normal approximation). */
+export const DEFAULT_DISEQUILIBRIUM_Z = 2
+/** Default minimum prior samples before a distribution is trustworthy enough
+ * to judge a deviation (a one- or two-sample "distribution" has no variance
+ * signal, so no disequilibrium can fire below this). */
+export const DEFAULT_DISEQUILIBRIUM_MIN_SAMPLES = 3
 
 /** Utility feature slots scale to [-1, 1]. */
 const UTILITY_SCALE = 5
@@ -45,6 +53,37 @@ export function isPositiveOutcome(utility: OutcomeUtility): boolean {
 
 /** Tri-state polarity of an outcome on the composite utility axis. */
 export type OutcomePolarity = 'positive' | 'neutral' | 'negative'
+
+/**
+ * The disequilibrium gate: judge one new settlement sample against the prior
+ * sample distribution. The prior must hold at least {@link minSamples} samples
+ * or no judgment is made (a too-thin distribution carries no variance signal).
+ * Deviation is the sample's z-score against the prior mean/stddev; when it
+ * reaches {@link zThreshold} the result distribution has shifted, which is the
+ * driver framework's accommodation trigger — the recorded strategy may need
+ * re-evaluation instead of being assimilated as noise.
+ * @param prior - the settlement samples before this one.
+ * @param quality - the new sample's raw quality (0–10).
+ * @param zThreshold - the z-score threshold (default 2).
+ * @param minSamples - minimum prior sample count (default 3).
+ * @returns the deviation judgment, or null when the prior is too thin.
+ */
+export function disequilibriumOf(
+  prior: readonly SettlementSample[],
+  quality: number,
+  zThreshold: number = DEFAULT_DISEQUILIBRIUM_Z,
+  minSamples: number = DEFAULT_DISEQUILIBRIUM_MIN_SAMPLES,
+): { zScore: number; disequilibrated: boolean } | null {
+  if (prior.length < minSamples) return null
+  const mean = prior.reduce((sum, sample) => sum + sample.quality, 0) / prior.length
+  const variance = prior.reduce((sum, sample) => sum + (sample.quality - mean) ** 2, 0) / prior.length
+  const stddev = Math.sqrt(variance)
+  // A degenerate prior (all samples identical, σ = 0) has no dispersion to
+  // deviate from; any departure would be infinite, so no judgment either.
+  if (stddev < 1e-9) return null
+  const zScore = Math.abs(quality - mean) / stddev
+  return { zScore, disequilibrated: zScore >= zThreshold }
+}
 
 /** Failure-symptom markers that make an experience recallable by its signature. */
 export const SYMPTOM_MARKERS = [

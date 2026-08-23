@@ -131,6 +131,14 @@ export interface CognitivePipelineConfig {
    * validated (paid off in practice); at/above it counts as refuted
    * (default 0.3, the same threshold as predictionErrorThreshold). */
   exploreValidationErrorThreshold?: number
+  /** z-score threshold of the disequilibrium gate: a settlement sample
+   * deviating from the prior distribution by at least this many standard
+   * deviations flags the experience as an accommodation candidate
+   * (default 2, μ±2σ). */
+  disequilibriumZThreshold?: number
+  /** Minimum prior settlement samples before the disequilibrium gate judges a
+   * deviation; a thinner prior carries no variance signal (default 3). */
+  disequilibriumMinSamples?: number
   /** Layer-2 shrinkage alpha (default 50). */
   shrinkageAlpha?: number
   /** Minimum 80%-interval width (default 0.2). */
@@ -310,6 +318,8 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   exploreAutoDispatch: z.boolean().default(false),
   exploreValidationLearningRate: z.number().min(0).max(1).default(0.3),
   exploreValidationErrorThreshold: z.number().min(0).max(1).default(0.3),
+  disequilibriumZThreshold: z.number().min(0).default(2),
+  disequilibriumMinSamples: z.number().step(1).min(2).default(3),
   shrinkageAlpha: z.number().min(0).default(50),
   minConfidenceIntervalWidth: z.number().min(0).max(1).default(0.2),
   successReferenceThreshold: z.number().min(0).max(1).default(0.4),
@@ -386,6 +396,8 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
       exploreAutoDispatch: config.exploreAutoDispatch ?? false,
       exploreValidationLearningRate: config.exploreValidationLearningRate ?? 0.3,
       exploreValidationErrorThreshold: config.exploreValidationErrorThreshold ?? 0.3,
+      disequilibriumZThreshold: config.disequilibriumZThreshold ?? 2,
+      disequilibriumMinSamples: config.disequilibriumMinSamples ?? 3,
       tempStrategyTtlMs: config.tempStrategyTtlMs ?? 24 * 60 * 60 * 1000,
       tempStrategyMatchThreshold: config.tempStrategyMatchThreshold ?? 0.5,
     }),
@@ -988,8 +1000,19 @@ export class CognitivePipelineService extends Service {
     // penalized on large error — "什么样的相似才可迁移" grows from feedback.
     this.hot.learnFromFeedback(prediction, error)
     // Fold the feedback quality back into the bound experience's utility so
-    // resolved experiences carry a real label, not just an error.
-    this.store.resolvePrediction(input.predictionId, input.actualOutcome, error, input.outcomeQuality)
+    // resolved experiences carry a real label, not just an error. The
+    // variance-ledger sample is appended and the disequilibrium gate judges
+    // it against the prior distribution (accommodation trigger).
+    this.store.resolvePrediction(
+      input.predictionId,
+      input.actualOutcome,
+      error,
+      input.outcomeQuality,
+      {
+        zThreshold: this.resolved.hot.disequilibriumZThreshold,
+        minSamples: this.resolved.hot.disequilibriumMinSamples,
+      },
+    )
     this.store.recordCalibration(prediction.calibratedProbability, observed >= 0.5)
 
     // Evidence replacement for a simulated bound experience: one feedback

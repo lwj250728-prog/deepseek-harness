@@ -56,6 +56,11 @@ export interface HotEngineConfig {
   readonly exploreAutoDispatch: boolean
   readonly tempStrategyTtlMs: number
   readonly tempStrategyMatchThreshold: number
+  /** z-score threshold of the disequilibrium gate (default 2, μ±2σ). */
+  readonly disequilibriumZThreshold: number
+  /** Minimum prior settlement samples before the disequilibrium gate judges a
+   * deviation (default 3; a thinner prior carries no variance signal). */
+  readonly disequilibriumMinSamples: number
 }
 
 /** The semantic retrieval channel's scoring seam. The default implementation

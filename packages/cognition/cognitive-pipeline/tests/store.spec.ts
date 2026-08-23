@@ -200,6 +200,50 @@ describe('CognitiveStore', () => {
     }
   })
 
+  it('flags disequilibrium when a settlement deviates from the prior distribution', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cognition-store-'))
+    try {
+      const store = new CognitiveStore(dir)
+      await store.load()
+      // A stable prior (7,7,7,8) followed by a far sample (2): z ≈ 12 ≫ 2.
+      const exp = experience('exp_1', 5)
+      store.addExperience({ ...exp, settlements: [
+        { ts: 1, quality: 7 }, { ts: 2, quality: 7 },
+        { ts: 3, quality: 7 }, { ts: 4, quality: 8 },
+      ] })
+      store.addPrediction(prediction('pred_1', 0.5, 'exp_1'))
+      store.resolvePrediction('pred_1', '结果崩溃', 0.4, 2)
+      const flagged = store.getExperience('exp_1')
+      expect(flagged?.settlements).toHaveLength(5)
+      expect(flagged?.disequilibrium?.sampleQuality).toBe(2)
+      expect(flagged?.disequilibrium?.zScore).toBeGreaterThan(2)
+
+      // A sample within the prior's spread does not trigger the gate.
+      const stable = experience('exp_2', 5)
+      store.addExperience({ ...stable, settlements: [
+        { ts: 1, quality: 7 }, { ts: 2, quality: 7 },
+        { ts: 3, quality: 7 }, { ts: 4, quality: 8 },
+      ] })
+      store.addPrediction(prediction('pred_2', 0.5, 'exp_2'))
+      store.resolvePrediction('pred_2', '结果正常', 0.1, 7)
+      expect(store.getExperience('exp_2')?.disequilibrium).toBeUndefined()
+
+      // A too-thin prior (2 samples) carries no variance signal: no judgment.
+      const thin = experience('exp_3', 5)
+      store.addExperience({ ...thin, settlements: [{ ts: 1, quality: 7 }, { ts: 2, quality: 8 }] })
+      store.addPrediction(prediction('pred_3', 0.5, 'exp_3'))
+      store.resolvePrediction('pred_3', '结果异常', 0.4, 1)
+      expect(store.getExperience('exp_3')?.disequilibrium).toBeUndefined()
+
+      // The aggregate counts exactly the flagged experience.
+      const stats = store.stats()
+      expect(stats.settlement.sampleCount).toBe(5 + 5 + 3)
+      expect(stats.settlement.disequilibratedExperienceCount).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('applies a new taxonomy atomically and reassigns members', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cognition-store-'))
     try {
