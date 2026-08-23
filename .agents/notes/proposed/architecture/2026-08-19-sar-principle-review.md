@@ -28,6 +28,8 @@ The first-principles review explains why: six structural misalignments between w
 
 **F. Experiences are snapshots that never evolve.** After write, an experience changes only through error/utility backfill. `hitCount` accumulates on cluster matches but never enters retrieval ranking, the clustering axis, or any retention decision. There is no consolidation and no forgetting — precisely what the self-sustaining goal needs to add.
 
+**G. Disequilibrium is always assimilated — there is no variance perception, so there is no accommodation.** Piaget's disequilibrium is the engine of cognitive development: when an existing schema cannot absorb a new observation, the learner either assimilates (folds it into the old schema, e.g. "bad luck / bad soil") or accommodates (modifies the schema, e.g. the farmer who germinates seeds before transplanting). The farmer analogy splits learners by which path they take on the same anomaly: the ordinary learner assimilates the dead seedlings away, the talented one tolerates the disequilibrium and revises the procedure. The system today is the ordinary learner. `outcomeUtility` is a single-point self-report (materialGain = 7), so outcome variability is erased at encode time; prediction error only books keeping (exp_8 accumulated 0.67 with no resulting action); every success is assimilated as "the steps are right" and every failure as "the environment changed". The system never asks whether a step can be improved, because it never perceives that a step's result varies. Without variance perception there is no disequilibrium, and without disequilibrium there is no accommodation — the system has the "smart learner" half (follows steps, executes stably) and none of the "talented learner" half (revises steps through many rounds of reasoning and testing).
+
 ## Proposal
 
 The review's deliverable is a re-positioning of each SAR element's role, stated as the design constraint for every future self-sustaining mechanism. No mechanism is designed here; the constraint set is the gate.
@@ -51,6 +53,24 @@ Six constraints on self-sustaining design:
 5. **The clustering axis moves from utility pattern to behavior pattern plus outcome evidence.** Clusters become strategy-transfer units keyed by what was done and what was verified.
 6. **The situation gets an independent representation.** Otherwise situation similarity and action similarity stay conflated, and situation-driven recall cannot exist.
 
+### The driving-force framework: disequilibrium × variance × variant × iteration
+
+The review above answers "why does experience accumulate badly". The second review answers "what would make the system revise its own steps". Four stacked drivers power a talented learner's improvement, and each maps to a missing mechanism:
+
+1. **Variance perception.** The talented farmer knows the same steps give different results across fields and years; a deterministic outcome would make improvement pointless. The system erases variability by encoding a single self-reported utility. Variance must become a first-class quantity: every settlement appends one result sample to the experience, and variance over samples is the new measure. Without variance there is no disequilibrium, and without disequilibrium there is no improvement motive.
+2. **Disequilibrium detection.** At execution time, when the observed result departs from the experience's expected distribution beyond a threshold, disequilibrium fires. The response bifurcates explicitly: low departure assimilates (attribute to noise, keep the steps); high departure accommodates (enter improvement). Today the system always assimilates — error is booked, never acted on.
+3. **Variant generation.** The search space is the known step chain (the `chainSignature` causal axis): variants perturb one link at a time ("germinate first" is a perturbation of the sowing link's environment). Generation sources: single-link perturbation, analogical transfer from other domains, pain-point back-derivation. Improvement is not random exploration; it is a structured perturbation of a link whose result varies.
+4. **Iterative convergence.** Hypothesis → small test → observe → revise → retest, each round lowering uncertainty about the variant until it drops below the adoption threshold. Today's exploration is one-shot (budget-capped, single ROI settlement); a candidate needs multiple rounds to converge.
+
+The four drivers compose the motive: dissatisfaction (comes from the task — the farmer is dissatisfied because seedlings die), variance perception (comes from settlement — multiple results differ), comprehension drive (comes from the chain's causal structure), and disequilibrium tolerance (a designed threshold). The motive is not idle curiosity; it is dissatisfaction with uncertainty during execution, which anchors on the task stream (dissatisfaction) and the settlement stream (variance) — no invented goals.
+
+Four supplementary constraints:
+
+7. **An experience records a result distribution, not a single utility point.** Each settlement appends a sample; variance over samples becomes a first-order quantity. This is constraint 5's evidence made temporal, and the precondition of variance perception.
+8. **The disequilibrium bifurcation must be explicit.** The system must choose between assimilate (attribute to noise, keep the steps) and accommodate (generate variants, revise the steps) instead of defaulting to assimilate, which is today's implicit behavior.
+9. **Variant generation anchors on the known chain.** Improvement candidates are perturbations of the link whose result varies, not random actions; exploration budget is spent on structurally-grounded directions.
+10. **Improvement iterates to convergence.** A candidate undergoes multiple test rounds until its uncertainty drops below the adoption threshold; one-shot exploration does not graduate a revision.
+
 ## Alternatives considered
 
 **Keep prediction error as the working mechanism and only widen coverage.** Rejected: widening coverage makes every experience pass through predict/report, but the measurements show the loop itself is mis-placed (B: the main path is outside it; D: error does not equal value). Coverage would buy a better backtest, not a better encoding.
@@ -59,14 +79,19 @@ Six constraints on self-sustaining design:
 
 **Drop error entirely; keep only citation as the signal.** Rejected: error remains the correct trigger for where predictions are unreliable, which is what cold-loop re-clustering of hard regions needs. The fix is to demote error from value metric to attention trigger, not to delete it.
 
+**Drive improvement by behavioral cloning (replay demonstrated expertise).** Rejected: cloning replicates the "smart learner" half — follow the demonstrated steps faithfully — and by construction cannot produce the "talented learner" half, which is precisely the disequilibrium-driven revision of those steps. The farmer analogy is the counterexample: mastery of the procedure (assimilation) and revision of the procedure (accommodation) are different capabilities, and only the second yields improvement.
+
 ## Acceptance criteria
 
 - Every misalignment claim above maps to a src/ line or a data fact reproducible from `data/cognitive-pipeline/`; the note records the mapping.
 - The three measured facts (6.2% coverage, 0.22 spread, error–citation orthogonality) are reproducible from the JSONL data.
 - Every future self-sustaining mechanism design states, for each of the six constraints, either how it satisfies it or why it explicitly overrides it.
+- Each driver in the framework has an observable counterpart: variance = the distribution statistic over an experience's settlement samples; disequilibrium = a threshold-crossing trigger record; variant = an exploration task traceable to the perturbed chain link; iteration = multiple settlement rounds for the same candidate.
 
 ## Risks
 
 - **The review over-corrects.** Existing machinery (clusters, chains, acceptance criteria, deferred settlement) demonstrably works; the note re-positions SAR's value layer and does not condemn the store. Constraint 3 keeps error useful.
 - **Citation-led value needs a ledger that does not exist yet.** Constraint 4 depends on it; the ledger is a prerequisite, not a side effect.
 - **Situation representation may cost tokens or a new seam.** Constraint 6 is the least constrained; it may land after the other five.
+- **Over-accommodation: noise mistaken for disequilibrium.** Random fluctuation attributed to a step defect triggers meaningless variant generation. The disequilibrium threshold must be calibrated conservatively — the "宁缺毋滥" leak-aversion principle applied to improvement.
+- **Accommodation cost.** Revising a solidified strategy is itself risky (the restart domain proved this); variant tests must stay in the reversible, low-risk space, reusing the exploration reversibility gate.

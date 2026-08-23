@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/proposed/architecture/2026-08-19-sar-principle-review.md
-2026-08-19-sar-principle-review.md: c3048393a6f81dff7fdf15393216181c5d1df525
-2026-08-19-sar-principle-review.zh.md: a95c3268d3803e5b23f015c14898cbad8c048307
+2026-08-19-sar-principle-review.md: 39b16b5de7cd119aae320a0b6c274609e3cebb18
+2026-08-19-sar-principle-review.zh.md: 3c270d0069f3a7aa302873411d23509c45383016
