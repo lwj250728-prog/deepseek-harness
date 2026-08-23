@@ -14,7 +14,7 @@ import * as cognitiveInject from '@deepseek-ai/dsh-cognitive-inject'
 import type { Config } from '@deepseek-ai/dsh-cognitive-inject'
 import { triggeredBy } from '@deepseek-ai/dsh-cognitive-inject'
 import * as cognitivePipeline from '@deepseek-ai/dsh-cognitive-pipeline'
-import { CallId, createUserMessage, LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { CallId, createMessage, createUserMessage, LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -556,6 +556,59 @@ describe('cognitive-inject priming', () => {
       expect(injected[0]).toContain('验收锚点')
       expect(injected[0]).toContain('autorestart.ps1')
       expect(injected[0]).toContain('前置校验')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('enriches the veto-gate situation with prewarm context (上下文预热)', async () => {
+    // The veto route REJECTS the over-threshold candidate when the prewarm
+    // reveals the real context differs from the literal match. Setup: a
+    // "启动失败" experience that would match the short message "重启" by
+    // surface words, plus a veto route that sees the prewarm (the session was
+    // actually doing a build, not a restart) and rejects it.
+    const reject = JSON.stringify({
+      should_keep: false,
+      rejected_exp_id: 'exp_lit',
+      reason: '字面重合：会话实际在做构建，与启动失败排查无关',
+    })
+    const { ctx, teardown } = await mount({}, { provider: 'cognition-test', model: 'm', script: [reject] })
+    try {
+      seedExperience(
+        ctx.cognitivePipeline.store,
+        'exp_lit',
+        '服务启动失败需要排查日志',
+        '检查依赖并重启',
+        '恢复运行',
+      )
+      const { agent, session } = stubAgent('prewarm-inject')
+      // The session's ongoing activity: it is BUILDING, not restarting.
+      session.append('turn/start', { turn: 1 })
+      session.append('tool/call', { turn: 1, step: 1, callId: CallId('pre-1'), name: 'pwsh', arguments: '{}' })
+      ctx.emit('session/event', session, {
+        type: 'tool/call', turn: 1, step: 1, callId: CallId('pre-1'), name: 'pwsh', arguments: '{}',
+      } as never)
+      session.append('assistant/message', {
+        turn: 1, step: 1,
+        message: createMessage({
+          role: 'assistant',
+          content: [{ type: 'text', text: '构建进行中，正在编译前端' }],
+          source: { kind: 'model', provider: 'mock', model: 'mock' },
+        }),
+      }, { surfaceOp: 'append' })
+      ctx.emit('session/event', session, {
+        type: 'assistant/message', turn: 1, step: 1,
+        message: createMessage({
+          role: 'assistant',
+          content: [{ type: 'text', text: '构建进行中，正在编译前端' }],
+          source: { kind: 'model', provider: 'mock', model: 'mock' },
+        }),
+      } as never)
+
+      // Now a short message "重启" fires the trigger gate and retrieves exp_lit;
+      // the veto route, seeing the prewarm ("正在编译前端"), rejects it.
+      const injected = await fire(ctx, agent, 1, 2, '重启')
+      expect(injected).toHaveLength(0)
     } finally {
       await teardown()
     }

@@ -687,6 +687,29 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the consolidated chain, or null when the evidence gate (`chainMinMembers`) is not met.',
       },
       {
+        signature: 'solidifyStrategy(input: { goalDomain: string action: string verificationAnchor: string preChecks?: readonly string[] sourceChainId?: string }): SolidifiedStrategy',
+        description: 'Solidify a repeated successful operation into a reusable, self-verifying strategy. A chain that repeatedly converged on the same concrete action with a machine-checkable acceptance (the restart chain\'s selfPerformed script is the canonical case) is promoted from SAR memory to a strategy: action + verification anchor (the drift sensor) + invoked/violated lifecycle + pre-checks. The goal domain becomes the injection key, so a later executor facing the same goal gets the STRATEGY (short, verifiable) instead of scattered experiences (long, unverified).',
+        parameters: [{ name: 'input', description: 'the strategy definition.' }],
+        returns: 'the created strategy.',
+      },
+      {
+        signature: 'solidifiedStrategyFor(goalDomain: string): SolidifiedStrategy | undefined',
+        description: 'The solidified strategy serving one goal domain, if any.',
+        parameters: [{ name: 'goalDomain', description: 'the goal domain key (e.g. `重启`).' }],
+        returns: 'the strategy, or undefined.',
+      },
+      {
+        signature: 'solidifiedStrategies(): readonly SolidifiedStrategy[]',
+        description: 'All solidified strategies (public for inspection).',
+        parameters: [],
+        returns: 'the strategy list.',
+      },
+      {
+        signature: 'recordSolidifiedStrategyUsage(strategyId: string, positive: boolean): void',
+        description: 'Record one use of a solidified strategy and fold its outcome into the lifecycle ledger. Every use re-checks the environment through the verification anchor — the drift sensor — so a strategy that no longer matches the environment accumulates violations and is flagged for rework instead of failing silently.',
+        parameters: [{ name: 'strategyId', description: 'the strategy id.' }, { name: 'positive', description: 'whether the verification anchor held on this use.' }],
+      },
+      {
         signature: 'chains(): readonly ChainExperience[]',
         description: 'All chains (public for inspection and consumers).',
         parameters: [],
@@ -4586,6 +4609,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SkillViewOptions',
     declaration: 'export interface SkillViewOptions extends SkillLookupOptions {\n    readonly scope?: ScopeKey | undefined;\n}',
+  },
+  {
+    name: 'SolidifiedStrategy',
+    declaration: 'export interface SolidifiedStrategy {\n    readonly strategyId: string;\n    readonly goalDomain: string;\n    readonly action: string;\n    readonly verificationAnchor: string;\n    readonly preChecks: readonly string[];\n    readonly sourceChainId: string;\n    readonly hitCount: number;\n    readonly positiveCount: number;\n    readonly violatedCount: number;\n    readonly reworkNeeded: boolean;\n    readonly createdAt: number;\n    readonly updatedAt: number;\n}',
   },
   {
     name: 'SpillLocator',

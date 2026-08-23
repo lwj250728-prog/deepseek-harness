@@ -126,6 +126,56 @@ function situationText(messages: readonly UserMessage[], depth: number): string 
 /** The per-agent most recent tool outcome: true when the last tool result was a failure. */
 const lastFailed = new WeakMap<Agent, boolean>()
 
+/** Rolling prewarm context per session: a bounded summary of what the session
+ * has been DOING recently (tool calls, assistant output), used to enrich the
+ * veto-gate situation so a short message's literal overlap with an unrelated
+ * experience can be judged against the real ongoing context. */
+const prewarmContext = new WeakMap<Session, string>()
+
+/** How many prewarm entries a session keeps before trimming the oldest. */
+const PREWARM_MAX_ENTRIES = 6
+/** How long one prewarm entry may be (truncated to bound memory). */
+const PREWARM_ENTRY_MAX = 120
+
+/**
+ * Fold one session event into the session's prewarm context: a tool call
+ * appends "调用了 X", an assistant message appends its first text block
+ * (truncated). The summary is bounded — oldest entries drop first — so it
+ * stays a cheap rolling "what are we doing" window.
+ * @param prewarm - the per-session map.
+ * @param session - the session the event belongs to.
+ * @param event - the event to fold.
+ */
+function updatePrewarm(
+  prewarm: WeakMap<Session, string>,
+  session: Session,
+  event: SessionEvent,
+): void {
+  let entry: string | null = null
+  const data = event as unknown as Record<string, unknown>
+  switch (event.type) {
+    case 'tool/call': {
+      const name = typeof data.name === 'string' ? data.name : '?'
+      entry = `调用${name}`
+      break
+    }
+    case 'assistant/message': {
+      const message = data.message as { content?: readonly { type: string; text?: string }[] } | undefined
+      const text = message?.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join(' ')
+      if (text !== undefined && text.trim().length > 0) entry = text.trim().slice(0, PREWARM_ENTRY_MAX)
+      break
+    }
+    default:
+      return
+  }
+  if (entry === null) return
+  const current = prewarm.get(session) ?? ''
+  const entries = current.length === 0 ? [] : current.split('｜')
+  entries.push(entry)
+  const trimmed = entries.slice(-PREWARM_MAX_ENTRIES)
+  prewarm.set(session, trimmed.join('｜'))
+}
+
 /**
  * How much a failure-signature overlap may add on top of the semantic cosine,
  * scaled by the semantic score itself: a literal "失败" match sharpens recall
@@ -372,6 +422,12 @@ export function apply(ctx: Context, config: Config = {}): void {
   // referenced = cited). The outcome folds into the jump words that opened
   // the gate, feeding the jump-weight reinforcement loop.
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
+    // Prewarm context maintenance: keep a rolling summary of what this session
+    // is actually DOING (recent tool calls, recent assistant output), so a
+    // short message that triggers a literal-overlap false positive (the exp_67
+    // case: "重启" matching exp_1 by surface words) can be judged by the LLM
+    // veto route against the REAL ongoing context, not the isolated message.
+    updatePrewarm(prewarmContext, session, event)
     if (event.type !== 'turn/end') return
     const episode = reconstructTurn(session, event)
     void ctx.cognitivePipeline.settleInjectionCitations(session.id, episode.outcome)
@@ -401,6 +457,15 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (situation.trim().length === 0) return decision
     const hits = retrieve(ctx.cognitivePipeline, situation, threshold, topK)
     if (hits.length === 0) return decision
+    // Prewarm enrichment for the veto gate: a short message ("重启") may match
+    // an unrelated experience by surface words (exp_67's literal-overlap false
+    // positive). The veto route judges applicability — so it must see what the
+    // session is ACTUALLY doing, not the isolated message. The enriched
+    // situation = [rolling prewarm] + current message.
+    const prewarmed = prewarmContext.get(agent.session)
+    const vetoSituation = prewarmed !== undefined && prewarmed.length > 0
+      ? `【当前会话正在进行】${prewarmed}\n【当前消息】${situation}`
+      : situation
     // Solidified-strategy priority: when the retrieved experiences link to a
     // chain that seeded a solidified strategy (the repeated-success promotion),
     // inject the STRATEGY — a short, machine-verifiable rule with a drift
@@ -429,7 +494,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     // all-rejected suppresses injection. Without a route the route keeps the
     // candidates (deterministic degradation to the threshold-only behavior).
     const vetoed = await vetoTopCandidates(
-      ctx, ctx.cognitivePipeline.resolved.route, situation, hits, signal,
+      ctx, ctx.cognitivePipeline.resolved.route, vetoSituation, hits, signal,
     )
     if (vetoed.accepted.length === 0) return decision
     const block = referenceBlock(vetoed.accepted, afterFailure, vetoed.rejectedNotes)

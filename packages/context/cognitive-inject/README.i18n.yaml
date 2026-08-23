@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/context/cognitive-inject/README.md
-README.md: ae78ee8fdd188faee0cff4438e44ad6c851c45b1
-README.zh.md: e2c6bd47aaeaf7c3a19552a2c84458b75352d939
+README.md: 43dbcf4fda16bf8f278743af011b1e5e12435e4f
+README.zh.md: d07b2c96a05db73f86dd1475fe58315e383c22c5
