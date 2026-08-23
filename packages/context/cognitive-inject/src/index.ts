@@ -454,6 +454,19 @@ export function apply(ctx: Context, config: Config = {}): void {
   ): Promise<PreStepDecision> => {
     const decision = await next()
     if (decision.kind === 'reject' || signal.aborted || messages.length === 0) return decision
+    // Deferred settlement: a self-reflexive operation (e.g. restarting the
+    // host) interrupts the turn, so the turn/end citation settlement never
+    // fires — the injection stays pending (cited=null). Real memory settles
+    // at later recall, not at the event: settle any still-pending injections
+    // for this session against the CURRENT step's text (the "host recovered,
+    // now I remember what I used" case — exp_190).
+    const deferredText = situationText(decision.messages, resolved.contextDepth)
+    if (deferredText.trim().length > 0) {
+      void ctx.cognitivePipeline.settleInjectionCitations(agent.session.id, deferredText)
+        .catch((error: unknown) => {
+          ctx.logger.warn(`cognitive-inject: deferred citation settlement failed: ${String(error)}`)
+        })
+    }
     const afterFailure = isAfterFailure(agent)
     // Trigger gate: after a failed step always prime; otherwise only when the
     // current messages carry a trigger (static behavior word, a SAR-derived

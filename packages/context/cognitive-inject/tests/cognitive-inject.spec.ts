@@ -613,4 +613,29 @@ describe('cognitive-inject priming', () => {
       await teardown()
     }
   })
+
+  it('defers settlement: a pending injection is settled at the next pre-step (延迟结算)', async () => {
+    const { ctx, teardown } = await mount()
+    try {
+      // A pending injection (cited=null — e.g. interrupted by a host restart)
+      // carrying a strategy reference.
+      const { agent, session } = stubAgent('deferred-settle')
+      const record = ctx.cognitivePipeline.recordInjection({
+        expIds: ['exp_late'],
+        triggerSource: 'static:重启',
+        sessionId: session.id,
+        strategyId: 'solidified-1',
+      })
+      expect(record.cited).toBeNull()
+
+      // The next pre-step settles it: the step text references the expId, so
+      // the deferred settlement marks it cited and folds the strategy usage.
+      await fire(ctx, agent, 1, 1, '按 exp_late 的策略执行重启')
+      const settled = ctx.cognitivePipeline.store.injectionsSnapshot()
+        .find(inj => inj.injectionId === record.injectionId)
+      expect(settled?.cited).toBe(true)
+    } finally {
+      await teardown()
+    }
+  })
 })
