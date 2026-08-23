@@ -357,7 +357,8 @@ class MacProcessInspector extends PosixProcessInspector {
 }
 
 /**
- * Create the supported platform inspector or fail at plugin load.
+ * Create the supported platform inspector. Windows gets a non-inspecting
+ * fallback (no POSIX groups or /proc); other unknown platforms fail.
  * @param platform - target Node platform.
  * @param arch - target CPU architecture for Linux syscall numbers.
  * @param internals - filesystem/process boundary, injectable for deterministic tests.
@@ -370,5 +371,19 @@ export function createProcessInspector(
 ): ProcessInspector {
   if (platform === 'linux') return new LinuxProcessInspector(arch, internals)
   if (platform === 'darwin') return new MacProcessInspector(internals)
+  if (platform === 'win32') {
+    // Windows has no POSIX process groups or /proc. Every inspection reports
+    // "cannot prove" (undefined/false/[]) and signalling falls back to
+    // node-pty's own kill paths, so the PTY seam still functions there.
+    return {
+      foregroundPgid: () => undefined,
+      isStdinWaiting: () => false,
+      processTree: () => [],
+      processSession: () => [],
+      isAlive: () => false,
+      signalGroup: () => {},
+      signalProcess: () => {},
+    }
+  }
   throw new Error(`subprocess-local: terminal inspection is unsupported on platform ${platform}`)
 }

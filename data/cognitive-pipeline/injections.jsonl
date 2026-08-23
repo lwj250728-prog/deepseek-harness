@@ -29,3 +29,6 @@
 {"injectionId":"inject_29","createdAt":1787482799941,"expIds":["exp_1"],"triggerSource":"derived:重","jumpWords":[],"chainId":null,"strategyId":"solidified-1","sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":true}
 {"injectionId":"inject_30","createdAt":1787482991461,"expIds":["exp_189"],"triggerSource":"static:回忆","jumpWords":[],"chainId":null,"strategyId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":false}
 {"injectionId":"inject_31","createdAt":1787483798253,"expIds":["exp_1"],"triggerSource":"derived:重","jumpWords":[],"chainId":null,"strategyId":"solidified-1","sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":false}
+{"injectionId":"inject_32","createdAt":1787484627467,"expIds":["exp_106"],"triggerSource":"derived:完","jumpWords":[],"chainId":null,"strategyId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":true}
+{"injectionId":"inject_33","createdAt":1787485316396,"expIds":["exp_106"],"triggerSource":"derived:工","jumpWords":[],"chainId":null,"strategyId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":false}
+{"injectionId":"inject_34","createdAt":1787485892375,"expIds":["exp_135"],"triggerSource":"static:经验","jumpWords":[],"chainId":null,"strategyId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":false}

@@ -651,7 +651,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'a detached jump list, insertion order.',
       },
       {
-        signature: 'recordInjection(input: { expIds: readonly string[] triggerSource: string sessionId?: string | null jumpWords?: readonly string[] chainId?: string | null }): InjectionRecord',
+        signature: 'recordInjection(input: { expIds: readonly string[] triggerSource: string sessionId?: string | null jumpWords?: readonly string[] chainId?: string | null strategyId?: string | null }): InjectionRecord',
         description: 'Record one injection event for citation-rate measurement. The inject plugin calls this after folding the reference block into the step; the jump words that contributed to the trigger are carried so their measured utility can be folded when the citation settles.',
         parameters: [{ name: 'input', description: 'the injected expIds, the fired trigger source, the contributing jump words, and the session id when known.' }],
         returns: 'the recorded injection.',
@@ -3628,7 +3628,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'InjectionRecord',
-    declaration: 'export interface InjectionRecord {\n    readonly injectionId: string;\n    readonly createdAt: number;\n    readonly expIds: readonly string[];\n    readonly triggerSource: string;\n    readonly jumpWords: readonly string[];\n    readonly chainId: string | null;\n    readonly sessionId: string | null;\n    readonly cited: boolean | null;\n}',
+    declaration: 'export interface InjectionRecord {\n    readonly injectionId: string;\n    readonly createdAt: number;\n    readonly expIds: readonly string[];\n    readonly triggerSource: string;\n    readonly jumpWords: readonly string[];\n    readonly chainId: string | null;\n    readonly strategyId: string | null;\n    readonly sessionId: string | null;\n    readonly cited: boolean | null;\n}',
   },
   {
     name: 'InspectResult',
