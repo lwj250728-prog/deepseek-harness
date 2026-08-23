@@ -56,6 +56,7 @@ The model can then use the fifteen tools:
 - `rebuild_taxonomy` — run the cold loop (`scope: local | global`).
 - `inspect_memory` — read experiences, clusters, calibration buckets, and the taxonomy summary.
 - `register_loop` — register a named meta-cognition loop whose decisions flow through the same predict/report calibration ruler.
+- **校准健康监控 (calibration health)** — run `pnpm exec tsx packages/cognition/cognitive-pipeline/scripts/calibration-health.ts` any time to see whether prediction error is actually falling as experiences accumulate: lifetime/recent-window average `|calibrated − observed|`, a first-half→second-half trend verdict, and a bar chart of the cumulative learning curve. This is the pipeline's own "is learning real?" dashboard — the reviewer-style evidence that experience accumulation improves calibration rather than drifting with noise.
 - `define_acceptance_check` — define a reusable verification norm (criterion + trigger marker + evidence hint) with an empty, never-resettable evidence ledger.
 - `verify_claim` — audit one claim against the active criteria; supply `log_anchor` (session ledger), `file_anchor` (workspace disk), or `command_anchor` (actual exit code) to let the external witness mechanically decide instead of self-reported evidence.
 - `update_acceptance_check` — rewrite an active criterion or retire it (retired criteria are frozen).

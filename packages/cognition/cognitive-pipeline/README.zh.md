@@ -57,6 +57,7 @@
 - `rebuild_taxonomy` — 运行冷环路（`scope: local | global`）。
 - `inspect_memory` — 查看经验、簇、校准桶与分类法摘要。
 - `register_loop` — 注册具名元认知环路，其决策与所有预测走同一把 predict/report 校准尺子。
+- **校准健康监控** — 随时运行 `pnpm exec tsx packages/cognition/cognitive-pipeline/scripts/calibration-health.ts` 查看预测误差是否随经验积累真实下降：终生/近期窗口平均 `|calibrated − observed|`、前段→后段趋势判定、以及累计学习曲线的柱状图。这是管线自己的"学习是否真实"仪表盘——评审视角的证据：经验积累改善校准，而非随噪声漂移。
 - `define_acceptance_check` — 定义可复用验证规范（准则 + 触发标记 + 证据提示），账本为空且不可清零。
 - `verify_claim` — 用活跃准则审计一条声明；提供 `log_anchor`（会话日志）、`file_anchor`（工作区磁盘）或 `command_anchor`（真实退出码）可让外部见证者机械裁决而非依赖自述证据。
 - `update_acceptance_check` — 改写活跃准则或将其退役（退役即冻结）。
