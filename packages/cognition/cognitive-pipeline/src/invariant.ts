@@ -43,6 +43,14 @@ const install: InvariantInstaller = (ctx: Context, fail: (message: string) => ne
     if (exp.outcomeVector.length !== OUTCOME_VECTOR_DIM) {
       fail(`experience ${exp.expId} has outcomeVector of ${exp.outcomeVector.length} (expected ${OUTCOME_VECTOR_DIM})`)
     }
+    for (const sample of exp.settlements ?? []) {
+      if (!Number.isFinite(sample.ts) || sample.ts < 0) {
+        fail(`experience ${exp.expId} has a settlement with an invalid timestamp`)
+      }
+      if (!Number.isFinite(sample.quality) || sample.quality < 0 || sample.quality > 10) {
+        fail(`experience ${exp.expId} has a settlement quality outside [0,10]`)
+      }
+    }
   }
   for (const cluster of service.store.clustersSnapshot()) {
     // polarity is normalized at the store load boundary, so the union is

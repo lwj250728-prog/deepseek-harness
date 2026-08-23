@@ -1082,6 +1082,7 @@ export class CognitivePipelineService extends Service {
       experienceCount: stats.experienceCount,
       predictionCount: stats.predictionCount,
       resolvedPredictionCount: stats.resolvedPredictionCount,
+      settlement: stats.settlement,
       clusterCount: this.store.clustersSnapshot().length,
       activeTempStrategyCount: this.store.tempStrategiesSnapshot()
         .filter(strategy => strategy.status === 'active').length,

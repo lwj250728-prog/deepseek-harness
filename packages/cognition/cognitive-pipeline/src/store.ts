@@ -634,6 +634,12 @@ export class CognitiveStore {
           predictionError,
           cumulativeError: exp.cumulativeError + predictionError,
           sar: { ...exp.sar, outcomeUtility: utility },
+          // One variance-ledger sample per quality-carrying settlement: the
+          // raw quality (un-scaled) is appended, so the distribution over
+          // samples measures how uncertain this experience's result really is.
+          ...outcomeQuality === undefined ? {} : {
+            settlements: [...(exp.settlements ?? []), { ts: now, quality: outcomeQuality }],
+          },
         }
         this.experiences.set(exp.expId, next)
         this.enqueueLines('experiences.jsonl', [...this.experiences.values()])
@@ -1374,17 +1380,33 @@ export class CognitiveStore {
   }
 
   /** Simple in-memory + disk counts for inspection.
-   * @returns experience, prediction, and resolved counts.
+   * @returns experience, prediction, resolved, and settlement-ledger counts.
    */
-  stats(): { experienceCount: number; predictionCount: number; resolvedPredictionCount: number } {
+  stats(): {
+    experienceCount: number
+    predictionCount: number
+    resolvedPredictionCount: number
+    settlement: { sampleCount: number; sampledExperienceCount: number; multiSampleExperienceCount: number }
+  } {
     let resolved = 0
     for (const prediction of this.predictions.values()) {
       if (prediction.resolvedAt !== null) resolved += 1
+    }
+    let sampleCount = 0
+    let sampledExperienceCount = 0
+    let multiSampleExperienceCount = 0
+    for (const exp of this.experiences.values()) {
+      const samples = exp.settlements ?? []
+      if (samples.length === 0) continue
+      sampleCount += samples.length
+      sampledExperienceCount += 1
+      if (samples.length >= 2) multiSampleExperienceCount += 1
     }
     return {
       experienceCount: this.experiences.size,
       predictionCount: this.predictions.size,
       resolvedPredictionCount: resolved,
+      settlement: { sampleCount, sampledExperienceCount, multiSampleExperienceCount },
     }
   }
 

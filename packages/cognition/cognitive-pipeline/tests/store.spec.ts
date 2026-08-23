@@ -175,6 +175,26 @@ describe('CognitiveStore', () => {
       store.addPrediction(prediction('pred_3', 0.5, 'exp_3'))
       store.resolvePrediction('pred_3', '结果未知', 0.3)
       expect(store.getExperience('exp_3')?.sar.outcomeUtility.materialGain).toBe(5)
+
+      // Quality-carrying settlements append variance-ledger samples: the raw
+      // quality is kept un-scaled and multiple samples accumulate.
+      const settled = store.getExperience('exp_1')
+      expect(settled?.settlements).toHaveLength(1)
+      expect(settled?.settlements?.[0]?.quality).toBe(8)
+      expect(settled?.settlements?.[0]?.ts).toBeGreaterThan(0)
+      // A second settlement on the same experience appends, not overwrites.
+      store.addPrediction(prediction('pred_4', 0.5, 'exp_1'))
+      store.resolvePrediction('pred_4', '再来一次', 0.2, 6)
+      expect(store.getExperience('exp_1')?.settlements).toHaveLength(2)
+      expect(store.getExperience('exp_1')?.settlements?.[1]?.quality).toBe(6)
+      // No-quality settlement leaves the ledger empty for that experience.
+      expect(store.getExperience('exp_3')?.settlements).toBeUndefined()
+
+      // The stats aggregate counts sampled and multi-sample experiences.
+      const stats = store.stats()
+      expect(stats.settlement.sampleCount).toBe(3)
+      expect(stats.settlement.sampledExperienceCount).toBe(2)
+      expect(stats.settlement.multiSampleExperienceCount).toBe(1)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

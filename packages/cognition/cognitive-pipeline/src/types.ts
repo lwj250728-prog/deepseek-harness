@@ -16,6 +16,18 @@ export interface OutcomeUtility {
   readonly energyCost: number
 }
 
+/** One real execution-result sample of an experience, appended at each
+ * resolved prediction that carries an outcome quality. The settlement list is
+ * the variance ledger: its distribution measures how uncertain the
+ * experience's result actually is (the driver framework's variance
+ * perception), in contrast to the single-point self-reported utility. */
+export interface SettlementSample {
+  /** Epoch milliseconds of the settlement. */
+  readonly ts: number
+  /** Raw outcome quality 0–10 (5 = neutral), the un-scaled signal. */
+  readonly quality: number
+}
+
 /** The retrieval channels fused by the hot loop, mirroring the parallel
  * recall channels of human memory (类比/情境/症状/因果). */
 export type ChannelKey = 'semantic' | 'situational' | 'symptom' | 'outcome'
@@ -72,6 +84,12 @@ export interface Experience {
   readonly predictionError: number | null
   /** Rolling sum of absolute prediction errors (the rebuild trigger). */
   readonly cumulativeError: number
+  /** Append-only execution-result samples (the variance ledger). Each resolved
+   * prediction carrying an outcome quality appends one sample here, so the
+   * distribution over samples measures how uncertain the experience's result
+   * really is. Absent on legacy rows and on experiences with no resolved
+   * prediction feedback. */
+  readonly settlements?: readonly SettlementSample[]
   /** Times this experience's cluster matched a hot-loop prediction. */
   readonly hitCount: number
   /** Times the predicted outcome matched the actual outcome. */
@@ -854,6 +872,14 @@ export interface InspectResult {
   readonly experienceCount: number
   readonly predictionCount: number
   readonly resolvedPredictionCount: number
+  /** Variance-ledger aggregate: coverage of the settlement distribution
+   * (experiences with samples / with ≥2 samples) and total sample count. */
+  readonly settlement: {
+    readonly sampleCount: number
+    readonly sampledExperienceCount: number
+    /** Experiences with at least two samples — variance is computable. */
+    readonly multiSampleExperienceCount: number
+  }
   readonly clusterCount: number
   readonly activeTempStrategyCount: number
   readonly calibrationBuckets: readonly CalibrationBucket[]

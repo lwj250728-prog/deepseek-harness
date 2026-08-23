@@ -498,6 +498,16 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           experience_count: { type: 'number', required: true },
           prediction_count: { type: 'number', required: true },
           resolved_prediction_count: { type: 'number', required: true },
+          settlement: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            properties: {
+              sample_count: { type: 'number', required: true },
+              sampled_experience_count: { type: 'number', required: true },
+              multi_sample_experience_count: { type: 'number', required: true },
+            },
+          },
           cluster_count: { type: 'number', required: true },
           active_temp_strategy_count: { type: 'number', required: true },
           channel_weights: {
@@ -633,6 +643,11 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
         experience_count: result.experienceCount,
         prediction_count: result.predictionCount,
         resolved_prediction_count: result.resolvedPredictionCount,
+        settlement: {
+          sample_count: result.settlement.sampleCount,
+          sampled_experience_count: result.settlement.sampledExperienceCount,
+          multi_sample_experience_count: result.settlement.multiSampleExperienceCount,
+        },
         cluster_count: result.clusterCount,
         active_temp_strategy_count: result.activeTempStrategyCount,
         channel_weights: {
