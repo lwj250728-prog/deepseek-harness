@@ -20,7 +20,7 @@ import type {
   TaxonomyState,
   TempStrategy,
 } from './types.ts'
-import { actionVector, cosine, outcomePolarity, outcomeVector, utilityScore } from './vectorizer.ts'
+import { cosine, outcomePolarity, outcomeVector, situationVector, utilityScore } from './vectorizer.ts'
 
 /** Fully resolved cold-loop thresholds (no optional fields). */
 export interface ColdEngineConfig {
@@ -716,7 +716,7 @@ export class ColdEngine {
         sampleCount: members.length,
         cumPredictionError: cumError,
         polarity: candidate.polarity,
-        situationCentroid: centroidOf(evidence.map(exp => actionVector(exp.sar.situation, []))),
+        situationCentroid: centroidOf(evidence.map(exp => situationVector(exp.sar.situation))),
       })
     }
 

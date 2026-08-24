@@ -20,6 +20,7 @@ import {
   cosine,
   outcomePolarity,
   signatureHash,
+  situationVector,
   symptomOverlap,
 } from './vectorizer.ts'
 
@@ -191,16 +192,16 @@ export class HotEngine {
   private channelScores(
     exp: Experience,
     queryAction: string,
-    situationVector: number[] | null,
+    situationVec: number[] | null,
     queryText: string,
     queryEmbedding: readonly number[] | null,
   ): readonly number[] {
     const semantic = queryEmbedding !== null && exp.embedding !== undefined
       ? cosine(queryEmbedding, exp.embedding)
       : this.scorer.score(queryAction, exp)
-    const situational = situationVector === null
+    const situational = situationVec === null
       ? 0
-      : cosine(situationVector, actionVector(exp.sar.situation, []))
+      : cosine(situationVec, situationVector(exp.sar.situation))
     const symptom = symptomOverlap(queryText, `${exp.sar.situation}。${exp.sar.action}。${exp.sar.outcome}`)
     const outcome = this.queryHasFailureMarker(queryText) && outcomePolarity(exp.sar.outcomeUtility) === 'negative' ? 1 : 0
     return [semantic, situational, symptom, outcome]
@@ -221,12 +222,12 @@ export class HotEngine {
    */
   retrieveTopK(action: string, k: number, situation: string = '', queryEmbedding: readonly number[] | null = null): RankedHit[] {
     const weights = this.store.channelWeightsSnapshot()
-    const situationVector = situation.trim().length > 0 ? actionVector(situation, []) : null
+    const situationVec = situation.trim().length > 0 ? situationVector(situation) : null
     const queryText = `${action} ${situation}`.trim()
     const keys: readonly (keyof ChannelWeights)[] = ['semantic', 'situational', 'symptom', 'outcome']
     const scored = this.store.experiencesSnapshot()
       .map((exp) => {
-        const raws = this.channelScores(exp, action, situationVector, queryText, queryEmbedding)
+        const raws = this.channelScores(exp, action, situationVec, queryText, queryEmbedding)
         const channels = raws.map((raw, index) => raw * weights[keys[index] ?? 'semantic'])
         // Citation reinforcement (constraint 4's strengthen): an experience a
         // decision actually adopted ranks above an equally similar unused one.
@@ -422,7 +423,7 @@ export class HotEngine {
     if (clusters.length === 0) {
       return { cluster: null, similarity: 0, margin: 0, coverage: 'no-taxonomy' }
     }
-    const vector = actionVector(situation, [])
+    const vector = situationVector(situation)
     const scored = clusters
       .map(cluster => ({ cluster, score: cosine(vector, cluster.situationCentroid) }))
       .sort((a, b) => b.score - a.score)
@@ -467,7 +468,7 @@ export class HotEngine {
    * @returns the matched success reference, or null.
    */
   private matchSuccessReference(situation: string): SuccessReference | null {
-    const vector = actionVector(situation, [])
+    const vector = situationVector(situation)
     let best: SuccessReference | null = null
     let bestScore = this.config.successReferenceThreshold
     for (const cluster of this.store.clustersSnapshot()) {

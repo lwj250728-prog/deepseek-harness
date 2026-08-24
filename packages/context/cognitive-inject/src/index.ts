@@ -24,6 +24,7 @@ import {
   isTaskRestatement,
   outcomePolarity,
   refineRetrieval,
+  situationVector,
   symptomOverlap,
   tokenize,
 } from '@deepseek-ai/dsh-cognitive-pipeline'
@@ -212,13 +213,14 @@ function retrieve(
   topK: number,
 ): readonly RankedHit[] {
   const vector = actionVector(situation, [])
+  const situationVec = situationVector(situation)
   const hits = service.store.experiencesSnapshot()
     .filter(exp => !isTaskRestatement(exp))
     .map((exp): RankedHit => {
       const text = `${exp.sar.situation}。${exp.sar.action}。${exp.sar.outcome}`
       const semantic = Math.max(
         cosine(vector, exp.actionVector),
-        cosine(vector, actionVector(exp.sar.situation, [])),
+        cosine(situationVec, situationVector(exp.sar.situation)),
       )
       return {
         expId: exp.expId,

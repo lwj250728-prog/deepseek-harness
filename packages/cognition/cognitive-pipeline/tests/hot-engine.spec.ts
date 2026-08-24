@@ -4,7 +4,7 @@ import { EmbeddingScorer } from '../src/embedding.ts'
 import { HashSemanticScorer, HotEngine } from '../src/hot-engine.ts'
 import type { SemanticScorer } from '../src/hot-engine.ts'
 import type { Experience } from '../src/types.ts'
-import { actionVector, outcomeVector } from '../src/vectorizer.ts'
+import { actionVector, outcomeVector, situationVector } from '../src/vectorizer.ts'
 
 const POSITIVE_UTILITY = {
   situation: '清晨天气晴朗',
@@ -201,7 +201,7 @@ describe('hot loop (predict_outcome)', () => {
           sampleCount: 1,
           cumPredictionError: 0,
           polarity: 'success',
-          situationCentroid: actionVector('清晨天气晴朗', []),
+          situationCentroid: situationVector('清晨天气晴朗'),
         }],
         {
           version: 1,

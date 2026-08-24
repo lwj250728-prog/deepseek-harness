@@ -16,6 +16,25 @@ export const OUTCOME_VECTOR_DIM = 512
 /** Number of utility slots at the head of the outcome vector. */
 export const UTILITY_SLOTS = 3
 
+/** Situation tokens are hashed with this prefix so the situation axis lives in
+ * a numerically independent space from the action axis (constraint 6): the
+ * same text hashes to different slots depending on whether it is read as an
+ * action or a situation, so situation similarity never conflates with action
+ * similarity. */
+const SITUATION_TOKEN_PREFIX = 'situation:'
+
+/**
+ * Build the situation vector: an independent 384-dim hashed bag for situation
+ * text (constraint 6 — the situation gets its own representation instead of
+ * being stuffed into the action vector). Same dimension as the action vector,
+ * distinct hash space.
+ * @param text - the situation text.
+ * @returns a normalized SITUATION-dimension vector.
+ */
+export function situationVector(text: string): number[] {
+  return bagVector(tokenize(text).map(token => `${SITUATION_TOKEN_PREFIX}${token}`), ACTION_VECTOR_DIM)
+}
+
 /** Default z-score threshold of the disequilibrium gate (μ±2σ, a ~5% tail
  * event under the normal approximation). */
 export const DEFAULT_DISEQUILIBRIUM_Z = 2
