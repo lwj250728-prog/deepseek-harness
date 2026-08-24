@@ -734,6 +734,68 @@ describe('cognitive pipeline integration', () => {
     }
   })
 
+  it('folds citation counts and prunes zero-citation stale experiences', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      // An experience referenced by a pending injection.
+      ctx.cognitivePipeline.store.addExperience({
+        expId: 'exp_cited',
+        sar: {
+          situation: '引用测试',
+          action: '沉淀经验',
+          outcome: '完成',
+          actionKeywords: ['沉淀'],
+          outcomeUtility: { materialGain: 7, emotionalValence: 6, energyCost: 5 },
+        },
+        actionVector: actionVector('沉淀经验', ['沉淀']),
+        outcomeVector: outcomeVector({ materialGain: 7, emotionalValence: 6, energyCost: 5 }, '完成'),
+        clusterId: null,
+        strategyLabel: null,
+        timestamp: Date.now(),
+        predictionError: null,
+        cumulativeError: 0,
+        hitCount: 0,
+        positiveCount: 0,
+        simulated: false,
+        verification: 'verified',
+        evidenceScore: 0,
+      })
+      // A stale zero-citation experience (older than the 30-day retention).
+      const base = ctx.cognitivePipeline.store.experiencesSnapshot().find(exp => exp.expId === 'exp_cited')!
+      ctx.cognitivePipeline.store.addExperience({
+        ...base,
+        expId: 'exp_stale',
+        timestamp: Date.now() - 40 * 24 * 60 * 60 * 1000,
+      })
+      ctx.cognitivePipeline.store.recordInjection({
+        injectionId: 'inject_cite',
+        createdAt: Date.now(),
+        expIds: ['exp_cited'],
+        triggerSource: 'static:引用',
+        jumpWords: [],
+        chainId: null,
+        strategyId: null,
+        sessionId: 'session-cite',
+        cited: null,
+      })
+      // The turn's text references exp_cited → cited=true folds the ledger.
+      await ctx.cognitivePipeline.settleInjectionCitations('session-cite', '引用 exp_cited 的经验')
+      expect(ctx.cognitivePipeline.store.getExperience('exp_cited')?.citationCount).toBe(1)
+      expect(ctx.cognitivePipeline.store.getExperience('exp_stale')?.citationCount ?? 0).toBe(0)
+
+      // Pruning removes only the zero-citation stale experience.
+      const removed = await ctx.cognitivePipeline.pruneExperiences(30 * 24 * 60 * 60 * 1000)
+      expect(removed).toEqual(['exp_stale'])
+      expect(ctx.cognitivePipeline.store.getExperience('exp_cited')).toBeDefined()
+      expect(ctx.cognitivePipeline.store.getExperience('exp_stale')).toBeUndefined()
+
+      const inspect = ctx.cognitivePipeline.inspect()
+      expect(inspect.citation.citedExperienceCount).toBeGreaterThan(0)
+    } finally {
+      await teardown()
+    }
+  })
+
   it('settles only the best-matching variant from a reported action', async () => {
     // Same-family variants share their base text; one real execution must
     // settle only the candidate it actually matches best, not every sibling

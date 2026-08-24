@@ -583,4 +583,26 @@ describe('CognitiveStore', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('removes an experience and folds its citation stats (lifecycle prune)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cognition-store-'))
+    try {
+      const store = new CognitiveStore(dir)
+      await store.load()
+      store.addExperience({ ...experience('exp_1', 8), timestamp: Date.now() - 40 * 24 * 60 * 60 * 1000 })
+      store.addExperience({ ...experience('exp_2', 8), citationCount: 2 })
+      expect(store.removeExperience('exp_1')).toBe(true)
+      expect(store.removeExperience('exp_1')).toBe(false)
+      await store.flush()
+      const stats = store.stats()
+      expect(stats.citation.citedExperienceCount).toBe(1)
+      expect(stats.citation.zeroCitationExperienceCount).toBe(0)
+      // Persistence round-trip reflects the removal.
+      const reloaded = new CognitiveStore(dir)
+      await reloaded.load()
+      expect(reloaded.experiencesSnapshot().map(exp => exp.expId)).toEqual(['exp_2'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

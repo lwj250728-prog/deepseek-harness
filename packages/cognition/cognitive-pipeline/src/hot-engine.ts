@@ -61,6 +61,10 @@ export interface HotEngineConfig {
   /** Minimum prior settlement samples before the disequilibrium gate judges a
    * deviation (default 3; a thinner prior carries no variance signal). */
   readonly disequilibriumMinSamples: number
+  /** Per-citation retrieval bonus (constraint 4's strengthen): an experience
+   * a decision actually adopted ranks above an equally similar unused one.
+   * Small so similarity channels keep dominating (default 0.05). */
+  readonly citationRetrievalWeight: number
 }
 
 /** The semantic retrieval channel's scoring seam. The default implementation
@@ -224,11 +228,16 @@ export class HotEngine {
       .map((exp) => {
         const raws = this.channelScores(exp, action, situationVector, queryText, queryEmbedding)
         const channels = raws.map((raw, index) => raw * weights[keys[index] ?? 'semantic'])
+        // Citation reinforcement (constraint 4's strengthen): an experience a
+        // decision actually adopted ranks above an equally similar unused one.
+        // The bonus scales with the citation count but never dominates the
+        // similarity channels (weight ≪ 1).
+        const citationBonus = (exp.citationCount ?? 0) * this.config.citationRetrievalWeight
         return {
           exp,
           similarity: raws[0] ?? 0,
           channelMax: Math.max(...raws),
-          fused: channels.reduce((sum, value) => sum + value, 0),
+          fused: channels.reduce((sum, value) => sum + value, 0) + citationBonus,
           channels,
         }
       })

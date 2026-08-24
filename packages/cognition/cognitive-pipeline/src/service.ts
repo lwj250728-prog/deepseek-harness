@@ -142,6 +142,10 @@ export interface CognitivePipelineConfig {
   /** Minimum prior settlement samples before the disequilibrium gate judges a
    * deviation; a thinner prior carries no variance signal (default 3). */
   disequilibriumMinSamples?: number
+  /** Per-citation retrieval bonus: an experience a decision actually adopted
+   * ranks above an equally similar unused one (default 0.05, small so
+   * similarity channels keep dominating). */
+  citationRetrievalWeight?: number
   /** Layer-2 shrinkage alpha (default 50). */
   shrinkageAlpha?: number
   /** Minimum 80%-interval width (default 0.2). */
@@ -323,6 +327,7 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   exploreValidationErrorThreshold: z.number().min(0).max(1).default(0.3),
   disequilibriumZThreshold: z.number().min(0).default(2),
   disequilibriumMinSamples: z.number().step(1).min(2).default(3),
+  citationRetrievalWeight: z.number().min(0).max(1).default(0.05),
   shrinkageAlpha: z.number().min(0).default(50),
   minConfidenceIntervalWidth: z.number().min(0).max(1).default(0.2),
   successReferenceThreshold: z.number().min(0).max(1).default(0.4),
@@ -401,6 +406,7 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
       exploreValidationErrorThreshold: config.exploreValidationErrorThreshold ?? 0.3,
       disequilibriumZThreshold: config.disequilibriumZThreshold ?? 2,
       disequilibriumMinSamples: config.disequilibriumMinSamples ?? 3,
+      citationRetrievalWeight: config.citationRetrievalWeight ?? 0.05,
       tempStrategyTtlMs: config.tempStrategyTtlMs ?? 24 * 60 * 60 * 1000,
       tempStrategyMatchThreshold: config.tempStrategyMatchThreshold ?? 0.5,
     }),
@@ -1156,6 +1162,7 @@ export class CognitivePipelineService extends Service {
       predictionCount: stats.predictionCount,
       resolvedPredictionCount: stats.resolvedPredictionCount,
       settlement: stats.settlement,
+      citation: stats.citation,
       variants: {
         proposed: variants.filter(variant => variant.status === 'proposed').length,
         testing: variants.filter(variant => variant.status === 'testing').length,
@@ -2008,7 +2015,18 @@ export class CognitivePipelineService extends Service {
         }
       }
       settled += 1
-      if (mentioned) cited += 1
+      if (mentioned) {
+        cited += 1
+        // The citation ledger (constraint 2): a decision actually adopted this
+        // experience, so its machine-checkable value signal grows — the
+        // self-reported utility is a hypothesis, the citation count is fact.
+        for (const expId of record.expIds) {
+          const exp = this.store.getExperience(expId)
+          if (exp !== undefined) {
+            this.store.updateExperience(expId, { citationCount: (exp.citationCount ?? 0) + 1 })
+          }
+        }
+      }
     }
     await this.store.flush()
     return { settled, cited }
@@ -2230,6 +2248,29 @@ export class CognitivePipelineService extends Service {
    */
   variantCandidates(): readonly VariantCandidate[] {
     return this.store.variantsSnapshot()
+  }
+
+  /**
+   * Forget experiences the evidence gate deems worthless: zero citations and
+   * older than the retention age. The machine-checkable value signal
+   * (constraint 2) gates retention (constraint 4's pruning) — an experience
+   * never adopted by any decision and past its age is forgotten, not kept
+   * forever. Conservative: anything with a citation, or younger than the
+   * retention window, is never pruned.
+   * @param zeroCitationRetentionMs - age beyond which a zero-citation
+   * experience is prunable (default 30 days).
+   * @returns the removed experience ids.
+   */
+  async pruneExperiences(zeroCitationRetentionMs: number = 30 * 24 * 60 * 60 * 1000): Promise<string[]> {
+    const now = Date.now()
+    const removed: string[] = []
+    for (const exp of this.store.experiencesSnapshot()) {
+      if ((exp.citationCount ?? 0) > 0) continue
+      if (now - exp.timestamp < zeroCitationRetentionMs) continue
+      if (this.store.removeExperience(exp.expId)) removed.push(exp.expId)
+    }
+    if (removed.length > 0) await this.store.flush()
+    return removed
   }
 
   /**

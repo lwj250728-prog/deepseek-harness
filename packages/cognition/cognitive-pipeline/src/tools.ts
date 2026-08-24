@@ -509,6 +509,15 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
               disequilibrated_experience_count: { type: 'number', required: true },
             },
           },
+          citation: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            properties: {
+              cited_experience_count: { type: 'number', required: true },
+              zero_citation_experience_count: { type: 'number', required: true },
+            },
+          },
           variants: {
             type: 'object',
             additionalProperties: false,
@@ -660,6 +669,10 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           sampled_experience_count: result.settlement.sampledExperienceCount,
           multi_sample_experience_count: result.settlement.multiSampleExperienceCount,
           disequilibrated_experience_count: result.settlement.disequilibratedExperienceCount,
+        },
+        citation: {
+          cited_experience_count: result.citation.citedExperienceCount,
+          zero_citation_experience_count: result.citation.zeroCitationExperienceCount,
         },
         variants: {
           proposed: result.variants.proposed,

@@ -486,6 +486,17 @@ export class CognitiveStore {
     return [...this.experiences.values()]
   }
 
+  /** Remove one experience (lifecycle pruning: an experience with zero
+   * citations past its retention age is forgotten, not kept forever).
+   * @param expId - the experience to remove.
+   * @returns true when it existed and was removed.
+   */
+  removeExperience(expId: string): boolean {
+    const existed = this.experiences.delete(expId)
+    if (existed) this.enqueueLines('experiences.jsonl', [...this.experiences.values()])
+    return existed
+  }
+
   /**
    * Apply a partial patch to one experience and enqueue its persistence.
    * @param expId - the experience id.
@@ -1458,6 +1469,10 @@ export class CognitiveStore {
       multiSampleExperienceCount: number
       disequilibratedExperienceCount: number
     }
+    citation: {
+      citedExperienceCount: number
+      zeroCitationExperienceCount: number
+    }
   } {
     let resolved = 0
     for (const prediction of this.predictions.values()) {
@@ -1467,19 +1482,25 @@ export class CognitiveStore {
     let sampledExperienceCount = 0
     let multiSampleExperienceCount = 0
     let disequilibratedExperienceCount = 0
+    let citedExperienceCount = 0
+    let zeroCitationExperienceCount = 0
     for (const exp of this.experiences.values()) {
       const samples = exp.settlements ?? []
-      if (samples.length === 0) continue
-      sampleCount += samples.length
-      sampledExperienceCount += 1
-      if (samples.length >= 2) multiSampleExperienceCount += 1
+      if (samples.length > 0) {
+        sampleCount += samples.length
+        sampledExperienceCount += 1
+        if (samples.length >= 2) multiSampleExperienceCount += 1
+      }
       if (exp.disequilibrium !== undefined) disequilibratedExperienceCount += 1
+      if ((exp.citationCount ?? 0) > 0) citedExperienceCount += 1
+      else zeroCitationExperienceCount += 1
     }
     return {
       experienceCount: this.experiences.size,
       predictionCount: this.predictions.size,
       resolvedPredictionCount: resolved,
       settlement: { sampleCount, sampledExperienceCount, multiSampleExperienceCount, disequilibratedExperienceCount },
+      citation: { citedExperienceCount, zeroCitationExperienceCount },
     }
   }
 
