@@ -509,6 +509,17 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
               disequilibrated_experience_count: { type: 'number', required: true },
             },
           },
+          variants: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            properties: {
+              proposed: { type: 'number', required: true },
+              testing: { type: 'number', required: true },
+              adopted: { type: 'number', required: true },
+              rejected: { type: 'number', required: true },
+            },
+          },
           cluster_count: { type: 'number', required: true },
           active_temp_strategy_count: { type: 'number', required: true },
           channel_weights: {
@@ -649,6 +660,12 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           sampled_experience_count: result.settlement.sampledExperienceCount,
           multi_sample_experience_count: result.settlement.multiSampleExperienceCount,
           disequilibrated_experience_count: result.settlement.disequilibratedExperienceCount,
+        },
+        variants: {
+          proposed: result.variants.proposed,
+          testing: result.variants.testing,
+          adopted: result.variants.adopted,
+          rejected: result.variants.rejected,
         },
         cluster_count: result.clusterCount,
         active_temp_strategy_count: result.activeTempStrategyCount,

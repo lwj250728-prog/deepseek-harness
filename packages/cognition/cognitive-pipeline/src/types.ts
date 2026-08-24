@@ -43,6 +43,42 @@ export interface DisequilibriumEvent {
   readonly zScore: number
 }
 
+/** Lifecycle state of one variant candidate: proposed after generation,
+ * testing while real uses settle it, then adopted or rejected. */
+export type VariantStatus = 'proposed' | 'testing' | 'adopted' | 'rejected'
+
+/** One structured improvement candidate for a solidified strategy whose
+ * deviation gate flagged rework (or a disequilibrated experience). The variant
+ * perturbs one step or parameter of the base action while keeping the
+ * verification anchor unchanged — the driver framework's accommodation: the
+ * anchor is the test, the variant is the revised procedure. */
+export interface VariantCandidate {
+  /** Stable id, e.g. `variant-1`. */
+  readonly variantId: string
+  /** The strategy this variant revises, or null when seeded from an experience. */
+  readonly sourceStrategyId: string | null
+  /** The experience this variant revises, or null when seeded from a strategy. */
+  readonly sourceExpId: string | null
+  /** The original action text being revised. */
+  readonly baseAction: string
+  /** The perturbed action text (the variant to test). */
+  readonly variantAction: string
+  /** The verification anchor inherited unchanged from the source — how to
+   * machine-check the variant succeeded. */
+  readonly verificationAnchor: string
+  /** Which step/parameter of the base action the perturbation touches. */
+  readonly perturbedAspect: string
+  /** One-sentence rationale for the perturbation. */
+  readonly rationale: string
+  /** Lifecycle state (proposed → testing → adopted | rejected). */
+  readonly status: VariantStatus
+  /** Settlement samples from real test uses (the iterative-convergence
+   * ledger: a variant graduates only when its result distribution converges). */
+  readonly settlements: readonly SettlementSample[]
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
 /** The retrieval channels fused by the hot loop, mirroring the parallel
  * recall channels of human memory (类比/情境/症状/因果). */
 export type ChannelKey = 'semantic' | 'situational' | 'symptom' | 'outcome'
@@ -902,6 +938,13 @@ export interface InspectResult {
     /** Experiences flagged by the disequilibrium gate (result distribution
      * shifted beyond threshold — accommodation candidates). */
     readonly disequilibratedExperienceCount: number
+  }
+  /** Variant-candidate lifecycle counts (the accommodation pipeline). */
+  readonly variants: {
+    readonly proposed: number
+    readonly testing: number
+    readonly adopted: number
+    readonly rejected: number
   }
   readonly clusterCount: number
   readonly activeTempStrategyCount: number

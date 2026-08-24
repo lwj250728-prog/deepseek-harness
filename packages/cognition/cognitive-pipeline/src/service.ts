@@ -23,6 +23,7 @@ import {
   deriveReference,
   evaluateAccumulation,
   extractSar,
+  generateVariants,
   hasExplicitRoute,
   proposeAcceptanceUpdates,
   proposeTriggerJumps,
@@ -62,6 +63,7 @@ import type {
   TempStrategy,
   TriggerJump,
   TurnEpisode,
+  VariantCandidate,
 } from './types.ts'
 import { actionVector, cosine, outcomeVector, signatureHash, tokenize, utilityScore } from './vectorizer.ts'
 import {
@@ -1101,11 +1103,18 @@ export class CognitivePipelineService extends Service {
     const loopExecutions = [...this.store.loopExecutionsSnapshot()]
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, 20)
+    const variants = this.store.variantsSnapshot()
     return {
       experienceCount: stats.experienceCount,
       predictionCount: stats.predictionCount,
       resolvedPredictionCount: stats.resolvedPredictionCount,
       settlement: stats.settlement,
+      variants: {
+        proposed: variants.filter(variant => variant.status === 'proposed').length,
+        testing: variants.filter(variant => variant.status === 'testing').length,
+        adopted: variants.filter(variant => variant.status === 'adopted').length,
+        rejected: variants.filter(variant => variant.status === 'rejected').length,
+      },
       clusterCount: this.store.clustersSnapshot().length,
       activeTempStrategyCount: this.store.tempStrategiesSnapshot()
         .filter(strategy => strategy.status === 'active').length,
@@ -1926,7 +1935,20 @@ export class CognitivePipelineService extends Service {
         // outcome — so the drift sensor accumulates evidence either way and
         // the deviation gate can flag rework when the strategy stops paying
         // off (P2-1: the lifecycle was previously dead code with no caller).
+        const before = this.store.getSolidifiedStrategy(record.strategyId)
         this.store.foldSolidifiedStrategyUsage(record.strategyId, mentioned)
+        // Rework newly triggered (was clean, now flagged): the strategy's
+        // deviation gate crossed, so accommodation starts — generate variant
+        // candidates that perturb one step while keeping the anchor unchanged.
+        // Generation is best-effort: no route degrades to zero candidates.
+        const after = this.store.getSolidifiedStrategy(record.strategyId)
+        if (after !== undefined && after.reworkNeeded && before?.reworkNeeded !== true) {
+          try {
+            await this.generateStrategyVariants(record.strategyId)
+          } catch (error) {
+            this.ctx.logger.warn(`cognitive-pipeline: variant generation for ${record.strategyId} failed: ${String(error)}`)
+          }
+        }
       }
       settled += 1
       if (mentioned) cited += 1
@@ -2101,6 +2123,56 @@ export class CognitivePipelineService extends Service {
    */
   chains(): readonly ChainExperience[] {
     return this.store.chainsSnapshot()
+  }
+
+  /**
+   * Generate variant candidates for a solidified strategy whose deviation gate
+   * flagged rework: the LLM route perturbs one step or parameter of the action
+   * while keeping the verification anchor unchanged, and each proposal becomes
+   * a `proposed` candidate in the variant table (the driver framework's
+   * accommodation: the anchor is the test, the variant is the revised
+   * procedure). Without an explicit route no candidates are generated — no
+   * model, no invented variants.
+   * @param strategyId - the strategy to revise.
+   * @returns the created candidates (empty when the route is absent or the
+   * generation degrades).
+   */
+  async generateStrategyVariants(strategyId: string): Promise<VariantCandidate[]> {
+    const strategy = this.store.getSolidifiedStrategy(strategyId)
+    if (strategy === undefined) return []
+    const proposals = await generateVariants(this.ctx, this.resolved.route, {
+      baseAction: strategy.action,
+      verificationAnchor: strategy.verificationAnchor,
+      preChecks: strategy.preChecks,
+      reason: `偏离门触发：策略已使用 ${strategy.hitCount} 次，其中 ${strategy.violatedCount} 次未通过验收锚点`,
+    }, { sessionId: undefined, signal: undefined })
+    const candidates = proposals.map((proposal) => {
+      const now = Date.now()
+      return {
+        variantId: this.store.nextVariantId(),
+        sourceStrategyId: strategy.strategyId,
+        sourceExpId: null,
+        baseAction: strategy.action,
+        variantAction: proposal.variantAction,
+        verificationAnchor: strategy.verificationAnchor,
+        perturbedAspect: proposal.perturbedAspect,
+        rationale: proposal.rationale,
+        status: 'proposed' as const,
+        settlements: [],
+        createdAt: now,
+        updatedAt: now,
+      }
+    })
+    for (const candidate of candidates) this.store.addVariantCandidate(candidate)
+    if (candidates.length > 0) await this.store.flush()
+    return candidates
+  }
+
+  /** All variant candidates (public for inspection and consumers).
+   * @returns the candidate list, insertion order.
+   */
+  variantCandidates(): readonly VariantCandidate[] {
+    return this.store.variantsSnapshot()
   }
 
   /**

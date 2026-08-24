@@ -46,9 +46,11 @@ import {
   frameReconstructInput,
   frameRefineRetrievalInput,
   frameSarInput,
+  frameVariantInput,
   OOD_REVIEW_SYSTEM_PROMPT,
   RECONSTRUCT_SYSTEM_PROMPT,
   SAR_SYSTEM_PROMPT,
+  VARIANT_SYSTEM_PROMPT,
 } from './prompts.ts'
 import { SYMPTOM_MARKERS, tokenize } from './vectorizer.ts'
 
@@ -778,6 +780,62 @@ export async function refineRetrieval(
   } catch (error) {
     ctx.logger.warn(`cognitive-pipeline: refine-retrieval degraded to fallback: ${String(error)}`)
     return refineRetrievalFallback()
+  }
+}
+
+/** One structured variant proposal from template 8. */
+export interface VariantProposal {
+  /** The perturbed action text (the variant to test). */
+  readonly variantAction: string
+  /** Which step/parameter of the base action the perturbation touches. */
+  readonly perturbedAspect: string
+  /** One-sentence rationale for the perturbation. */
+  readonly rationale: string
+}
+
+/**
+ * Template 8: structured variant generation for a strategy whose deviation
+ * gate flagged rework (or a disequilibrated experience). The variants perturb
+ * one step or parameter of the base action while keeping the verification
+ * anchor's semantics unchanged — the anchor is the test, the variant is the
+ * revised procedure. Without an explicit route it deterministically proposes
+ * nothing: no model, no invented variants.
+ * @param ctx - plugin context for the LLM call.
+ * @param route - explicit model route.
+ * @param input - base action, verification anchor, pre-checks, and the reason.
+ * @param options - call context (session/signal/maxTokens).
+ * @returns the proposed variants (ungated, ≤ 3, schema-filtered).
+ */
+export async function generateVariants(
+  ctx: Context,
+  route: CognitiveLlmRoute,
+  input: {
+    baseAction: string
+    verificationAnchor: string
+    preChecks: readonly string[]
+    reason: string
+  },
+  options: CallOptions,
+): Promise<VariantProposal[]> {
+  if (!hasExplicitRoute(route)) return []
+  try {
+    const parsed = asObject(await callJson(ctx, route, VARIANT_SYSTEM_PROMPT, frameVariantInput(input), {
+      ...options,
+      maxTokens: 600,
+    }), 'variant generation')
+    const variants = Array.isArray(parsed.variants) ? parsed.variants : []
+    return variants
+      .filter((variant): variant is Record<string, unknown> => typeof variant === 'object' && variant !== null)
+      .map(variant => ({
+        variantAction: typeof variant.variant_action === 'string' ? variant.variant_action : '',
+        perturbedAspect: typeof variant.perturbed_aspect === 'string' ? variant.perturbed_aspect : '',
+        rationale: typeof variant.rationale === 'string' ? variant.rationale : '',
+      }))
+      .filter(proposal => proposal.variantAction.length > 0 && proposal.perturbedAspect.length > 0)
+      .slice(0, 3)
+  } catch (error) {
+    ctx.logger.warn(`cognitive-pipeline: variant generation degraded to none: ${String(error)}`)
+    return []
   }
 }
 

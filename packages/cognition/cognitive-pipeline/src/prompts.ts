@@ -149,6 +149,45 @@ export function frameReconstructInput(samples: readonly Experience[]): string {
   }).join('\n')
 }
 
+/** Template 8: structured variant generation for a strategy whose deviation
+ * gate flagged rework (or a disequilibrated experience). The variant perturbs
+ * one step or parameter while keeping the verification anchor's semantics
+ * unchanged — the anchor is the test, the variant is the revised procedure. */
+export const VARIANT_SYSTEM_PROMPT = [
+  '你是认知架构的"策略改进工程师"。给定一个已失衡的固化策略（其结果分布偏移/偏离门触发），需要生成结构化变体候选。',
+  '【生成任务】：',
+  '1. 对原行动的**单一环节或参数**做扰动（如：调整超时值、增删一个前置校验、改变执行顺序、更换工具选择），生成 2-3 个变体。',
+  '2. **验收锚点语义必须保持不变**：变体执行后仍必须能用同一个锚点机器核验成功——锚点是测试判据，变体是修订后的流程。',
+  '3. 每个变体必须指明扰动了哪个环节/参数，以及一句话理由（针对给定的失衡原因）。',
+  '【宁缺毋滥】：',
+  '- 只生成有真实改进假设的变体；不要纯措辞改写，不要与原文案等价的不同说法。',
+  '- 如果原行动没有可安全扰动的环节，返回空数组。',
+  '【输出JSON格式】：',
+  '{',
+  '  "variants": [',
+  '    {',
+  '      "variant_action": "扰动后的完整行动文本",',
+  '      "perturbed_aspect": "被扰动的环节/参数名",',
+  '      "rationale": "一句话改进理由"',
+  '    }',
+  '  ]',
+  '}',
+].join('\n')
+
+/** Frame template-8 input with the base strategy and the failure signal.
+ * @param input - base action, verification anchor, pre-checks, and the reason.
+ * @returns the user message body.
+ */
+export function frameVariantInput(input: {
+  baseAction: string
+  verificationAnchor: string
+  preChecks: readonly string[]
+  reason: string
+}): string {
+  const preChecks = input.preChecks.length === 0 ? '（无）' : input.preChecks.map(check => `- ${check}`).join('\n')
+  return `【原策略行动】：${input.baseAction}\n\n【验收锚点】：${input.verificationAnchor}\n\n【前置校验】：\n${preChecks}\n\n【失衡原因】：${input.reason}`
+}
+
 /** Template 5: the accumulation gate — judge whether a completed turn is worth
  * becoming an experience, and extract the SAR triplet when it is. */
 export const ACCUMULATE_SYSTEM_PROMPT = [

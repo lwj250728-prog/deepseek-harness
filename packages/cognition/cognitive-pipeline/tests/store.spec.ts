@@ -10,8 +10,27 @@ import type {
   Prediction,
   TaxonomyState,
   TempStrategy,
+  VariantCandidate,
 } from '../src/types.ts'
 import { actionVector, outcomeVector } from '../src/vectorizer.ts'
+
+function variantCandidate(variantId: string, status: VariantCandidate['status'] = 'proposed'): VariantCandidate {
+  const now = Date.now()
+  return {
+    variantId,
+    sourceStrategyId: 'solidified-1',
+    sourceExpId: null,
+    baseAction: '原行动',
+    variantAction: '扰动后的行动',
+    verificationAnchor: 'logs/restart-result.json ok=true',
+    perturbedAspect: '前置校验',
+    rationale: '增加端口预检',
+    status,
+    settlements: [],
+    createdAt: now,
+    updatedAt: now,
+  }
+}
 
 function experience(expId: string, materialGain: number): Experience {
   return {
@@ -523,6 +542,43 @@ describe('CognitiveStore', () => {
       store.validateExploration('legacy', 0.2, 0.5, 0.3)
       expect(store.explorationSnapshot().entries[0]?.validatedError).toBe(0.2)
       expect(store.explorationSnapshot().entries[0]?.validated).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('persists variant candidates and their lifecycle transitions', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cognition-store-'))
+    try {
+      const store = new CognitiveStore(dir)
+      await store.load()
+      // Real flow: allocate the id first, then persist the candidate.
+      const first = { ...variantCandidate(store.nextVariantId()) }
+      store.addVariantCandidate(first)
+      const second = { ...variantCandidate(store.nextVariantId(), 'testing') }
+      store.addVariantCandidate(second)
+      // Lifecycle transition: proposed → adopted, with a settlement appended.
+      store.updateVariantCandidate({
+        ...first,
+        status: 'adopted',
+        settlements: [{ ts: Date.now(), quality: 8 }],
+        updatedAt: Date.now(),
+      })
+
+      // Sequence advances across allocations.
+      expect(store.nextVariantId()).toBe('variant-3')
+
+      // Persistence round-trip through the same files the service wrote.
+      await store.flush()
+      const reloaded = new CognitiveStore(dir)
+      await reloaded.load()
+      const all = reloaded.variantsSnapshot()
+      expect(all).toHaveLength(2)
+      const adopted = all.find(candidate => candidate.variantId === 'variant-1')
+      expect(adopted?.status).toBe('adopted')
+      expect(adopted?.settlements).toHaveLength(1)
+      expect(all.find(candidate => candidate.variantId === 'variant-2')?.status).toBe('testing')
+      expect(reloaded.nextVariantId()).toBe('variant-3')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

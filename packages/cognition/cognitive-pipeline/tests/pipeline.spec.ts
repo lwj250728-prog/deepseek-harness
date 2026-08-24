@@ -203,8 +203,54 @@ describe('cognitive pipeline integration', () => {
     }
   })
 
-  it('unregisters tools and the prompt section on dispose', async () => {
-    const harness = await pipelineHarness()
+  it('generates strategy variants with a route and degrades to none without one', async () => {
+    // No explicit route: deterministic degradation — no model, no invented
+    // variants, and the candidate table stays empty.
+    const bare = await pipelineHarness()
+    try {
+      await bare.ctx.cognitivePipeline.solidifyStrategy({
+        goalDomain: '重启',
+        action: '调用重启脚本',
+        verificationAnchor: 'logs/restart-result.json ok=true',
+        preChecks: ['端口 3080 存在监听'],
+      })
+      const none = await bare.ctx.cognitivePipeline.generateStrategyVariants('solidified-1')
+      expect(none).toEqual([])
+      expect(bare.ctx.cognitivePipeline.variantCandidates()).toEqual([])
+    } finally {
+      await bare.teardown()
+    }
+
+    // With a route: the model's proposals enter the candidate table as
+    // `proposed`, inheriting the verification anchor unchanged.
+    const script = [JSON.stringify({
+      variants: [
+        { variant_action: '重启前先验证 SSH 配置', perturbed_aspect: '前置校验', rationale: 'SSH 配置失效会导致重启后无法拉起' },
+        { variant_action: '重启后额外轮询端口 60 秒', perturbed_aspect: '验收轮询', rationale: '端口就绪延迟超过原轮询窗口' },
+      ],
+    })]
+    const { ctx, teardown } = await pipelineHarness({ provider: 'cognition-test', model: 'm' }, script)
+    try {
+      await ctx.cognitivePipeline.solidifyStrategy({
+        goalDomain: '重启',
+        action: '调用重启脚本',
+        verificationAnchor: 'logs/restart-result.json ok=true',
+        preChecks: ['端口 3080 存在监听'],
+      })
+      const candidates = await ctx.cognitivePipeline.generateStrategyVariants('solidified-1')
+      expect(candidates).toHaveLength(2)
+      expect(candidates[0]?.variantAction).toBe('重启前先验证 SSH 配置')
+      expect(candidates[0]?.verificationAnchor).toBe('logs/restart-result.json ok=true')
+      expect(candidates[0]?.status).toBe('proposed')
+      expect(candidates[0]?.sourceStrategyId).toBe('solidified-1')
+      const stats = ctx.cognitivePipeline.inspect().variants
+      expect(stats.proposed).toBe(2)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('unregisters tools and the prompt section on dispose', async () => {    const harness = await pipelineHarness()
     try {
       for (const name of ['remember_experience', 'simulate_experience', 'reference_experience', 'predict_outcome', 'report_outcome', 'rebuild_taxonomy', 'inspect_memory', 'define_acceptance_check', 'verify_claim', 'update_acceptance_check', 'propose_acceptance_update', 'learn_trigger_jumps', 'consolidate_chain', 'rebuild_cognition_object', 'explore_chain']) {
         expect(harness.ctx.tools.get(name)?.name).toBe(name)

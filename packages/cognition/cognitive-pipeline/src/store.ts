@@ -28,6 +28,7 @@ import type {
   TaxonomyState,
   TempStrategy,
   TriggerJump,
+  VariantCandidate,
 } from './types.ts'
 import { ACTION_VECTOR_DIM, DEFAULT_DISEQUILIBRIUM_MIN_SAMPLES, DEFAULT_DISEQUILIBRIUM_Z, actionVector, disequilibriumOf } from './vectorizer.ts'
 
@@ -121,6 +122,7 @@ export class CognitiveStore {
   private chains = new Map<string, ChainExperience>()
   private chainPatterns = new Map<string, ChainPattern>()
   private solidifiedStrategies = new Map<string, SolidifiedStrategy>()
+  private variants = new Map<string, VariantCandidate>()
   private taxonomyState: TaxonomyState | null = null
   private nextExpSeq = 1
   private nextPredictionSeq = 1
@@ -130,6 +132,7 @@ export class CognitiveStore {
   private nextAuditSeq = 1
   private nextStrategySeq = 1
   private nextInjectionSeq = 1
+  private nextVariantSeq = 1
 
   /**
    * @param root - directory that will hold the JSONL/JSON state files.
@@ -149,7 +152,7 @@ export class CognitiveStore {
       experiences, predictions, tempStrategies, clusters, calibration,
       channelWeights, exploration, tasks, loopExecutions, acceptance,
       claimAudits, triggerJumps, injections, chains, chainPatterns, taxonomy,
-      solidifiedStrategies,
+      solidifiedStrategies, variants,
     ] = await Promise.all([
       readFile(this.file('experiences.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('predictions.jsonl'), 'utf8').catch(() => ''),
@@ -168,6 +171,7 @@ export class CognitiveStore {
       readFile(this.file('chain_patterns.json'), 'utf8').catch(() => ''),
       readFile(this.file('taxonomy.json'), 'utf8').catch(() => ''),
       readFile(this.file('solidified_strategies.json'), 'utf8').catch(() => ''),
+      readFile(this.file('variants.json'), 'utf8').catch(() => ''),
     ])
     for (const record of parseLines(experiences)) {
       if (typeof record !== 'object' || record === null) continue
@@ -384,6 +388,19 @@ export class CognitiveStore {
           this.solidifiedStrategies.set(strategy.strategyId, strategy)
           const seq = Number(strategy.strategyId.replace('solidified-', ''))
           if (Number.isFinite(seq)) this.nextStrategySeq = Math.max(this.nextStrategySeq, seq + 1)
+        }
+      }
+    }
+    if (variants !== '') {
+      const parsed = JSON.parse(variants) as unknown
+      if (Array.isArray(parsed)) {
+        for (const record of parsed) {
+          if (typeof record !== 'object' || record === null) continue
+          const candidate = record as VariantCandidate
+          if (typeof candidate.variantId !== 'string' || candidate.variantId.length === 0) continue
+          this.variants.set(candidate.variantId, candidate)
+          const seq = Number(candidate.variantId.replace('variant-', ''))
+          if (Number.isFinite(seq)) this.nextVariantSeq = Math.max(this.nextVariantSeq, seq + 1)
         }
       }
     }
@@ -1339,8 +1356,39 @@ export class CognitiveStore {
     this.enqueue('solidified_strategies.json', [...this.solidifiedStrategies.values()])
   }
 
-  // ── clusters + taxonomy ──────────────────────────────────────────────────
+  /** Allocate the next variant id.
+   * @returns `variant-<n>`.
+   */
+  nextVariantId(): string {
+    const id = `variant-${this.nextVariantSeq}`
+    this.nextVariantSeq += 1
+    return id
+  }
 
+  /** Snapshot of every variant candidate, insertion order.
+   * @returns the candidate list.
+   */
+  variantsSnapshot(): readonly VariantCandidate[] {
+    return [...this.variants.values()]
+  }
+
+  /** Add one variant candidate.
+   * @param candidate - the candidate to persist.
+   */
+  addVariantCandidate(candidate: VariantCandidate): void {
+    this.variants.set(candidate.variantId, candidate)
+    this.enqueue('variants.json', [...this.variants.values()])
+  }
+
+  /** Replace one variant candidate (lifecycle transition or settlement append).
+   * @param candidate - the updated candidate.
+   */
+  updateVariantCandidate(candidate: VariantCandidate): void {
+    this.variants.set(candidate.variantId, candidate)
+    this.enqueue('variants.json', [...this.variants.values()])
+  }
+
+  // ── clusters + taxonomy ──────────────────────────────────────────────────
   /** Snapshot of the cluster table.
    * @returns clusters with detached fields.
    */

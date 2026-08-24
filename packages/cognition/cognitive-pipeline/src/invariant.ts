@@ -64,6 +64,23 @@ const install: InvariantInstaller = (ctx: Context, fail: (message: string) => ne
       }
     }
   }
+  for (const candidate of service.store.variantsSnapshot()) {
+    if (candidate.verificationAnchor.length === 0) {
+      fail(`variant ${candidate.variantId} has an empty verification anchor`)
+    }
+    const statuses = ['proposed', 'testing', 'adopted', 'rejected'] as const
+    if (!statuses.includes(candidate.status as (typeof statuses)[number])) {
+      fail(`variant ${candidate.variantId} has an unknown status "${candidate.status}"`)
+    }
+    for (const sample of candidate.settlements) {
+      if (!Number.isFinite(sample.ts) || sample.ts < 0) {
+        fail(`variant ${candidate.variantId} has a settlement with an invalid timestamp`)
+      }
+      if (!Number.isFinite(sample.quality) || sample.quality < 0 || sample.quality > 10) {
+        fail(`variant ${candidate.variantId} has a settlement quality outside [0,10]`)
+      }
+    }
+  }
   for (const cluster of service.store.clustersSnapshot()) {
     // polarity is normalized at the store load boundary, so the union is
     // trusted; the centroid dimension is still a live runtime contract.
