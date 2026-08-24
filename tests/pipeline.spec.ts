@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { executeTool, pipelineHarness, stubAgent } from './helpers.ts'
+import { frameCalibrationInput } from '../src/prompts.ts'
+import { reconstructTurn } from '../src/index.ts'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { CallId, createMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
 const SAR_A = JSON.stringify({
   situation: '清晨天气晴朗',
@@ -53,14 +58,19 @@ const RECON = JSON.stringify({
   taxonomy_summary_short: '重组为2簇：运动正向/熬夜负向',
 })
 
+const REFINE_KEEP = JSON.stringify({ should_keep: true, rejected_exp_id: null, reason: null })
+
 describe('cognitive pipeline integration', () => {
   it('runs the full remember → predict → report → rebuild loop with a scripted LLM', async () => {
     // LLM-extracted action vectors carry keyword tokens, so the retrieval is
-    // near-identical but not exact: the flat-top OOD signal fires, the review
-    // (response 6) confirms "known", then calibration and reconstruction run.
-    const script = [SAR_A, SAR_A, SAR_A, SAR_B, SAR_B, SAR_B, OOD_KNOWN, CALIB, RECON]
+    // near-identical but not exact: the flat-top OOD signal fires, the refine
+    // pass keeps the ranking, the review confirms "known", then calibration
+    // and reconstruction run.
+    const script = [SAR_A, SAR_A, SAR_A, SAR_B, SAR_B, SAR_B, REFINE_KEEP, OOD_KNOWN, CALIB, RECON]
     const { ctx, teardown } = await pipelineHarness(
-      { provider: 'cognition-test', model: 'm', predictionErrorThreshold: 0 },
+      // 6 experiences leave a 1-sample validation slice; lower the acceptance
+      // floor so this suite exercises the accept path rather than deferring.
+      { provider: 'cognition-test', model: 'm', predictionErrorThreshold: 0, minValidationCount: 1 },
       script,
     )
     try {
@@ -105,6 +115,12 @@ describe('cognitive pipeline integration', () => {
       const taxonomy = service.taxonomy()
       expect(taxonomy?.summaryShort).toContain('重组为2簇')
       expect(service.store.experiencesSnapshot().filter(exp => exp.clusterId === null)).toHaveLength(0)
+
+      // ── success reference: situation matches the accepted success cluster ─
+      const referenced = await service.predict({ situation: '清晨', action: '晨跑五公里' })
+      expect(referenced.successReference).not.toBeNull()
+      expect(referenced.successReference?.clusterName).toBe('正向运动簇')
+      expect(referenced.advice).toContain('参照成功策略')
 
       // ── the dynamic system-prompt section carries the summary ────────────
       const assembled = await ctx.systemPrompt.assemble()
@@ -156,20 +172,955 @@ describe('cognitive pipeline integration', () => {
     }
   })
 
-  it('unregisters tools and the prompt section on dispose', async () => {
-    const harness = await pipelineHarness()
+  it('exposes reference_experience as a model tool', async () => {
+    const derive = JSON.stringify({
+      should_derive: true,
+      situation: '清晨天气好时',
+      action: '坚持晨跑',
+      outcome: '精力充沛',
+      material_gain: 7,
+      emotional_valence: 6,
+      energy_cost: 4,
+    })
+    const { ctx, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm' },
+      [SAR_A, derive],
+    )
     try {
-      for (const name of ['remember_experience', 'predict_outcome', 'report_outcome', 'rebuild_taxonomy', 'inspect_memory']) {
+      const { agent } = stubAgent('ref-tool-agent')
+      ctx.agents.register(agent)
+      await ctx.cognitivePipeline.remember({ rawText: '清晨天气晴朗。晨跑五公里。精力充沛一整天。' })
+      const derived = await executeTool(ctx, 'reference_experience', {
+        situation: '清晨',
+        action: '晨跑五公里',
+      }, agent) as Record<string, unknown>
+      expect(derived.exp_id).toBe('exp_2')
+      expect(derived.simulated).toBe(true)
+      expect(derived.situation).toBe('清晨天气好时')
+      expect(derived.action).toBe('坚持晨跑')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('generates strategy variants with a route and degrades to none without one', async () => {
+    // No explicit route: deterministic degradation — no model, no invented
+    // variants, and the candidate table stays empty.
+    const bare = await pipelineHarness()
+    try {
+      bare.ctx.cognitivePipeline.solidifyStrategy({
+        goalDomain: '重启',
+        action: '调用重启脚本',
+        verificationAnchor: 'logs/restart-result.json ok=true',
+        preChecks: ['端口 3080 存在监听'],
+      })
+      const none = await bare.ctx.cognitivePipeline.generateStrategyVariants('solidified-1')
+      expect(none).toEqual([])
+      expect(bare.ctx.cognitivePipeline.variantCandidates()).toEqual([])
+    } finally {
+      await bare.teardown()
+    }
+
+    // With a route: the model's proposals enter the candidate table as
+    // `proposed`, inheriting the verification anchor unchanged.
+    const script = [JSON.stringify({
+      variants: [
+        { variant_action: '重启前先验证 SSH 配置', perturbed_aspect: '前置校验', rationale: 'SSH 配置失效会导致重启后无法拉起' },
+        { variant_action: '重启后额外轮询端口 60 秒', perturbed_aspect: '验收轮询', rationale: '端口就绪延迟超过原轮询窗口' },
+      ],
+    })]
+    const { ctx, teardown } = await pipelineHarness({ provider: 'cognition-test', model: 'm' }, script)
+    try {
+      ctx.cognitivePipeline.solidifyStrategy({
+        goalDomain: '重启',
+        action: '调用重启脚本',
+        verificationAnchor: 'logs/restart-result.json ok=true',
+        preChecks: ['端口 3080 存在监听'],
+      })
+      const candidates = await ctx.cognitivePipeline.generateStrategyVariants('solidified-1')
+      expect(candidates).toHaveLength(2)
+      expect(candidates[0]?.variantAction).toBe('重启前先验证 SSH 配置')
+      expect(candidates[0]?.verificationAnchor).toBe('logs/restart-result.json ok=true')
+      expect(candidates[0]?.status).toBe('proposed')
+      expect(candidates[0]?.sourceStrategyId).toBe('solidified-1')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('converges a variant candidate through matched reports (mechanism 4)', async () => {
+    const script = [JSON.stringify({
+      variants: [
+        { variant_action: '重启前先验证 SSH 配置', perturbed_aspect: '前置校验', rationale: 'SSH 失效导致拉起失败' },
+      ],
+    })]
+    const { ctx, teardown } = await pipelineHarness({ provider: 'cognition-test', model: 'm' }, script)
+    try {
+      ctx.cognitivePipeline.solidifyStrategy({
+        goalDomain: '重启',
+        action: '调用重启脚本',
+        verificationAnchor: 'logs/restart-result.json ok=true',
+        preChecks: [],
+      })
+      const candidates = await ctx.cognitivePipeline.generateStrategyVariants('solidified-1')
+      expect(candidates).toHaveLength(1)
+      expect(ctx.cognitivePipeline.variantCandidates()[0]?.status).toBe('proposed')
+
+      // A report whose action matches the variant's action settles it.
+      let seq = 0
+      const reportMatchingUse = async (quality: number): Promise<void> => {
+        const predictionId = `pred_v${++seq}`
+        ctx.cognitivePipeline.store.addPrediction({
+          predictionId,
+          expId: null,
+          situation: '重启 DSH Web',
+          action: '重启前先验证 SSH 配置',
+          predictedOutcome: 'x',
+          rawProbability: 0.5,
+          calibratedProbability: 0.5,
+          confidenceLow: 0.25,
+          confidenceHigh: 0.75,
+          isNovel: true,
+          usedTempStrategy: false,
+          clusterId: null,
+          exploredActionHash: null,
+          timestamp: Date.now(),
+          actualOutcome: null,
+          predictionError: null,
+          resolvedAt: null,
+          fusion: null,
+        })
+        await ctx.cognitivePipeline.report({
+          predictionId,
+          actualOutcome: 'SSH 配置验证通过，重启成功',
+          outcomeQuality: quality,
+        })
+      }
+
+      // First real use: proposed → testing with one sample.
+      await reportMatchingUse(8)
+      let settled = ctx.cognitivePipeline.variantCandidates()[0]
+      expect(settled?.status).toBe('testing')
+      expect(settled?.settlements).toHaveLength(1)
+      expect(settled?.settlements?.[0]?.quality).toBe(8)
+
+      // Two more high-quality uses: the distribution converges to adopted.
+      await reportMatchingUse(8)
+      await reportMatchingUse(7)
+      settled = ctx.cognitivePipeline.variantCandidates()[0]
+      expect(settled?.status).toBe('adopted')
+      expect(settled?.settlements).toHaveLength(3)
+
+      // Terminal candidates are immutable: further matches are ignored.
+      await reportMatchingUse(2)
+      settled = ctx.cognitivePipeline.variantCandidates()[0]
+      expect(settled?.status).toBe('adopted')
+      expect(settled?.settlements).toHaveLength(3)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('unregisters tools and the prompt section on dispose', async () => {    const harness = await pipelineHarness()
+    try {
+      for (const name of ['remember_experience', 'simulate_experience', 'reference_experience', 'predict_outcome', 'report_outcome', 'rebuild_taxonomy', 'inspect_memory', 'define_acceptance_check', 'verify_claim', 'update_acceptance_check', 'propose_acceptance_update', 'learn_trigger_jumps', 'consolidate_chain', 'rebuild_cognition_object', 'explore_chain']) {
         expect(harness.ctx.tools.get(name)?.name).toBe(name)
       }
       await harness.fiber.dispose()
-      for (const name of ['remember_experience', 'predict_outcome', 'report_outcome', 'rebuild_taxonomy', 'inspect_memory']) {
+      for (const name of ['remember_experience', 'simulate_experience', 'reference_experience', 'predict_outcome', 'report_outcome', 'rebuild_taxonomy', 'inspect_memory', 'define_acceptance_check', 'verify_claim', 'update_acceptance_check', 'propose_acceptance_update', 'learn_trigger_jumps', 'consolidate_chain', 'rebuild_cognition_object', 'explore_chain']) {
         expect(harness.ctx.tools.get(name)).toBeUndefined()
       }
       const assembled = await harness.ctx.systemPrompt.assemble()
       expect(assembled.sections.some(item => item.name === 'cognition:taxonomy')).toBe(false)
     } finally {
       await harness.teardown()
+    }
+  })
+
+  it('degrades SAR extraction when the model omits utility fields', async () => {
+    // The model returns a triplet without outcome_utility_score; the pipeline
+    // must fall back to the deterministic neutral split rather than invent a
+    // partial 5/5/5 from missing fields.
+    const script = [JSON.stringify({
+      situation: '清晨',
+      action: '晨跑',
+      outcome: '精力充沛',
+      action_keywords: ['晨跑'],
+    })]
+    const { ctx, teardown } = await pipelineHarness({ provider: 'cognition-test', model: 'm' }, script)
+    try {
+      const remembered = await ctx.cognitivePipeline.remember({ rawText: '清晨。晨跑。精力充沛。' })
+      expect(remembered.sar.outcomeUtility).toEqual({ materialGain: 5, emotionalValence: 5, energyCost: 5 })
+      // The stored experience still carries a valid outcome vector (no crash).
+      expect(ctx.cognitivePipeline.store.getExperience(remembered.expId)?.outcomeVector.length).toBeGreaterThan(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('fuses failure symptoms into the situation in the deterministic fallback', async () => {
+    // No LLM route: the fallback must put the observable symptom ("挂起") into
+    // the situation so a later "测试挂起" task can retrieve this experience.
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const remembered = await ctx.cognitivePipeline.remember({
+        rawText: '实现插件时测试突然无限挂起。改成无循环算术算法。测试全部恢复。',
+      })
+      expect(remembered.sar.situation).toContain('挂起')
+      // The stored experience's situation vector now carries the symptom, so
+      // the dual-axis retrieval of a symptom task should hit it.
+      const vector = ctx.cognitivePipeline.store.getExperience(remembered.expId)?.actionVector
+      expect(vector?.length).toBeGreaterThan(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('generates a simulated experience and verifies it through report feedback', async () => {
+    const script = [SAR_A, REFINE_KEEP, OOD_KNOWN, CALIB]
+    const { ctx, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm', simulationFastTrackThreshold: 0.5, simulationPermanentThreshold: 2 },
+      script,
+    )
+    try {
+      const simulated = await ctx.cognitivePipeline.simulate({ situation: '清晨', action: '晨跑五公里' })
+      const stored = ctx.cognitivePipeline.store.getExperience(simulated.expId)
+      expect(stored?.simulated).toBe(true)
+      expect(stored?.verification).toBe('unverified')
+      expect(stored?.evidenceScore).toBe(0)
+
+      // Predict the simulated action, then report decisive high-quality feedback.
+      const prediction = await ctx.cognitivePipeline.predict({ situation: '清晨', action: '晨跑五公里' })
+      await ctx.cognitivePipeline.report({
+        predictionId: prediction.predictionId,
+        actualOutcome: '跑完神清气爽',
+        outcomeQuality: 9,
+      })
+      const after = ctx.cognitivePipeline.store.getExperience(simulated.expId)
+      // q=9 → decisiveness 0.8 ≥ fast-track 0.5 → provisional.
+      expect(after?.verification).toBe('provisional')
+      expect(after?.evidenceScore).toBeGreaterThan(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('derives a reference experience from similar history as a retrieval-only simulated candidate', async () => {
+    const derive = JSON.stringify({
+      should_derive: true,
+      situation: '清晨天气好时',
+      action: '坚持晨跑作为固定习惯',
+      outcome: '一整天精力充沛',
+      material_gain: 8,
+      emotional_valence: 7,
+      energy_cost: 3,
+    })
+    const { ctx, adapter, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm' },
+      [SAR_A, SAR_A, SAR_A, derive],
+    )
+    try {
+      for (let index = 0; index < 3; index += 1) {
+        await ctx.cognitivePipeline.remember({ rawText: '清晨天气晴朗。晨跑五公里。精力充沛一整天。' })
+      }
+      const result = await ctx.cognitivePipeline.deriveReference({ situation: '清晨', action: '晨跑五公里' })
+      expect(result).not.toBeNull()
+      const stored = ctx.cognitivePipeline.store.getExperience(result!.expId)
+      expect(stored?.simulated).toBe(true)
+      expect(stored?.verification).toBe('unverified')
+      expect(stored?.evidenceScore).toBe(0)
+      expect(stored?.sar.situation).toBe('清晨天气好时')
+      expect(stored?.sar.outcomeUtility).toEqual({ materialGain: 8, emotionalValence: 7, energyCost: 3 })
+      // The derivation input carries the retrieved similar anchors (the LLM
+      // route only sees similar history, not the raw query).
+      const framed = JSON.stringify(adapter?.lastOptions?.messages)
+      expect(framed).toContain('相似度 0.85')
+      expect(framed).toContain('晨跑五公里')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('rejects a reference derivation when no similar anchor survives the filters', async () => {
+    // A night experience is dissimilar (cosine 0) and simulated experiences are
+    // never anchors, so the deterministic guard rejects without an LLM call.
+    const { ctx, adapter, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm' },
+      [SAR_B, SAR_A],
+    )
+    try {
+      await ctx.cognitivePipeline.remember({ rawText: '深夜疲惫。熬夜刷剧。次日状态极差。' })
+      await ctx.cognitivePipeline.simulate({ situation: '清晨', action: '晨跑五公里' })
+      const before = ctx.cognitivePipeline.store.experiencesSnapshot().length
+      const result = await ctx.cognitivePipeline.deriveReference({ situation: '清晨', action: '晨跑五公里' })
+      expect(result).toBeNull()
+      expect(ctx.cognitivePipeline.store.experiencesSnapshot().length).toBe(before)
+      expect(adapter?.consumed).toBe(2)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('derives nothing when the LLM route declines (should_derive false)', async () => {
+    const { ctx, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm' },
+      [SAR_A, JSON.stringify({ should_derive: false })],
+    )
+    try {
+      await ctx.cognitivePipeline.remember({ rawText: '清晨天气晴朗。晨跑五公里。精力充沛一整天。' })
+      const before = ctx.cognitivePipeline.store.experiencesSnapshot().length
+      const result = await ctx.cognitivePipeline.deriveReference({ situation: '清晨', action: '晨跑五公里' })
+      expect(result).toBeNull()
+      expect(ctx.cognitivePipeline.store.experiencesSnapshot().length).toBe(before)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('falls back to a deterministic rejection without an LLM route', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      await ctx.cognitivePipeline.remember({ rawText: '清晨天气晴朗。晨跑五公里。精力充沛一整天。' })
+      const result = await ctx.cognitivePipeline.deriveReference({ situation: '清晨', action: '晨跑五公里' })
+      expect(result).toBeNull()
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('records a pipeline-own meta experience directly and retrieves it by action', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const expId = ctx.cognitivePipeline.rememberMeta({
+        situation: '检索路由歧义：情境「X」与簇「Y」的余弦余量仅 0.050，确定性路由置信低',
+        action: '打包并推送插件到GitHub',
+        outcome: '路由余量低于 0.1，确定性路由不可靠，应改用 LLM 路由',
+        utility: { materialGain: 3, emotionalValence: 4, energyCost: 5 },
+      })
+      const stored = ctx.cognitivePipeline.store.getExperience(expId)
+      expect(stored?.meta).toBe(true)
+      expect(stored?.simulated).toBe(false)
+      expect(stored?.verification).toBe('verified')
+      // The meta experience is retrievable by its action, so the calibration
+      // layer can see the recorded failure pattern for similar queries.
+      const hits = ctx.cognitivePipeline.hot.retrieveTopK('打包并推送插件到GitHub', 3)
+      expect(hits[0]?.exp.expId).toBe(expId)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('marks pipeline-own meta experiences in the calibration prompt', () => {
+    const text = frameCalibrationInput(
+      'situation',
+      'action',
+      undefined,
+      1,
+      0,
+      [
+        { expId: 'exp_1', actionKeywords: 'k', utility: '3/4/5', meta: true },
+        { expId: 'exp_2', actionKeywords: 'k', utility: '8/7/3' },
+      ],
+    )
+    expect(text).toContain('【元经验-管道自身】')
+    // A regular sample is not marked.
+    expect(text).not.toContain('【元经验-管道自身】exp_2')
+  })
+
+  it('skips pure chat in automatic accumulation (pre-filter, no LLM call)', async () => {
+    const { ctx, teardown } = await pipelineHarness({ autoAccumulate: true })
+    try {
+      const before = ctx.cognitivePipeline.store.experiencesSnapshot().length
+      const result = await ctx.cognitivePipeline.accumulateTurn({
+        situation: '你好',
+        action: '回复问候',
+        outcome: '轮次结束',
+        toolCallCount: 0,
+        failed: false,
+        turnId: 1,
+        selfReflexive: false,
+      })
+      expect(result).toBeNull()
+      expect(ctx.cognitivePipeline.store.experiencesSnapshot().length).toBe(before)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('accumulates a substantial turn when the LLM gate accepts', async () => {
+    const gate = JSON.stringify({
+      should_accumulate: true,
+      situation: '构建失败需要恢复依赖基线',
+      action: '定位依赖损坏并重装 node_modules',
+      outcome: '构建恢复，环境基线重建',
+      material_gain: 8,
+      emotional_valence: 7,
+      energy_cost: 5,
+    })
+    const { ctx, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm', autoAccumulate: true },
+      [gate],
+    )
+    try {
+      const expId = await ctx.cognitivePipeline.accumulateTurn({
+        situation: '构建失败',
+        action: '排查依赖链接并重装 node_modules 后构建恢复',
+        outcome: '构建通过',
+        toolCallCount: 3,
+        failed: true,
+        turnId: 2,
+        selfReflexive: false,
+      })
+      expect(expId).not.toBeNull()
+      const stored = ctx.cognitivePipeline.store.getExperience(expId as string)
+      expect(stored?.sar.situation).toBe('构建失败需要恢复依赖基线')
+      expect(stored?.sar.outcomeUtility.materialGain).toBe(8)
+      // An automatically accumulated experience is an ordinary verified record, not meta.
+      expect(stored?.meta).not.toBe(true)
+      expect(stored?.simulated).toBe(false)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('does not accumulate when the LLM gate rejects', async () => {
+    const { ctx, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm', autoAccumulate: true },
+      [JSON.stringify({ should_accumulate: false })],
+    )
+    try {
+      const before = ctx.cognitivePipeline.store.experiencesSnapshot().length
+      const result = await ctx.cognitivePipeline.accumulateTurn({
+        situation: '完成了一个小任务',
+        action: '修改配置文件并重启服务，输出较长的一段操作记录',
+        outcome: '服务恢复正常',
+        toolCallCount: 2,
+        failed: false,
+        turnId: 3,
+        selfReflexive: false,
+      })
+      expect(result).toBeNull()
+      expect(ctx.cognitivePipeline.store.experiencesSnapshot().length).toBe(before)
+    } finally {      await teardown()
+    }
+  })
+
+  it('reconstructs a turn from the session ledger (user request, tool calls, failure, end reason)', () => {
+    const session = Session.create(SessionId('reconstruct-test'))
+    session.append('turn/start', { turn: 1 })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: '把最新的认知流水线同步到 SAR 仓库并推送' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    // An injected reference block (plugin source) must NOT pollute the situation.
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: '【认知经验参考】相关历史经验…' }],
+      source: { kind: 'plugin', plugin: 'cognitive-inject' },
+    }), { surfaceOp: 'append' })
+    session.append('tool/call', { turn: 1, step: 1, callId: CallId('call-1'), name: 'pwsh', arguments: '{}' })
+    session.append('tool/result', {
+      turn: 1,
+      step: 1,
+      message: createToolResultMessage({ callId: CallId('call-1'), content: [{ type: 'text', text: 'ok' }], isError: false }),
+    }, { surfaceOp: 'append' })
+    session.append('tool/call', { turn: 1, step: 2, callId: CallId('call-2'), name: 'git', arguments: '{}' })
+    session.append('tool/result', {
+      turn: 1,
+      step: 2,
+      message: createToolResultMessage({ callId: CallId('call-2'), content: [{ type: 'text', text: 'failed' }], isError: true }),
+    }, { surfaceOp: 'append' })
+    session.append('assistant/message', {
+      turn: 1,
+      step: 2,
+      message: createMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: '推送成功，SAR 仓库已更新' }],
+        source: { kind: 'model', provider: 'mock', model: 'mock' },
+      }),
+    }, { surfaceOp: 'append' })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+    const endEvent = session.events.findLast(event => event.type === 'turn/end') as SessionEvent<'turn/end'>
+    const episode = reconstructTurn(session, endEvent)
+    expect(episode.turnId).toBe(1)
+    expect(episode.situation).toContain('同步到 SAR 仓库')
+    expect(episode.situation).not.toContain('认知经验参考')
+    expect(episode.action).toContain('调用 pwsh')
+    expect(episode.action).toContain('调用 git')
+    expect(episode.toolCallCount).toBe(2)
+    expect(episode.failed).toBe(true)
+    expect(episode.outcome).toContain('推送成功')
+    expect(episode.outcome).toContain('轮次结束')
+  })
+
+  it('reconstructs an empty situation for a turn without a user request', () => {
+    const session = Session.create(SessionId('reconstruct-empty'))
+    session.append('turn/start', { turn: 1 })
+    session.append('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: createMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: '回复' }],
+        source: { kind: 'model', provider: 'mock', model: 'mock' },
+      }),
+    }, { surfaceOp: 'append' })
+    session.append('turn/end', { turn: 1, reason: { kind: 'error', error: { message: 'boom', code: 'X' } } })
+    const endEvent = session.events.findLast(event => event.type === 'turn/end') as SessionEvent<'turn/end'>
+    const episode = reconstructTurn(session, endEvent)
+    expect(episode.situation.trim()).toBe('')
+    expect(episode.failed).toBe(false)
+    expect(episode.toolCallCount).toBe(0)
+    expect(episode.outcome).toContain('轮次结束（error）')
+  })
+
+  it('flags self-reflexive turns: a pwsh Stop-Process call marks the episode', () => {
+    const session = Session.create(SessionId('reconstruct-selfref'))
+    session.append('turn/start', { turn: 1 })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: '重启 DSH Web 服务并验证' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    // The self-reflexive call: pwsh arguments carry a process-kill signature.
+    session.append('tool/call', { turn: 1, step: 1, callId: CallId('call-1'), name: 'pwsh', arguments: JSON.stringify({ command: 'Stop-Process -Id 3928 -Force' }) })
+    session.append('tool/result', {
+      turn: 1,
+      step: 1,
+      message: createToolResultMessage({ callId: CallId('call-1'), content: [{ type: 'text', text: 'ok' }], isError: false }),
+    }, { surfaceOp: 'append' })
+    session.append('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: createMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: '服务已恢复' }],
+        source: { kind: 'model', provider: 'mock', model: 'mock' },
+      }),
+    }, { surfaceOp: 'append' })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+    const endEvent = session.events.findLast(event => event.type === 'turn/end') as SessionEvent<'turn/end'>
+    const episode = reconstructTurn(session, endEvent)
+    expect(episode.selfReflexive).toBe(true)
+    expect(episode.toolCallCount).toBe(1)
+  })
+
+  it('does not flag benign pwsh calls (no kill signature) as self-reflexive', () => {
+    const session = Session.create(SessionId('reconstruct-benign'))
+    session.append('turn/start', { turn: 1 })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: '查一下磁盘占用' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    session.append('tool/call', { turn: 1, step: 1, callId: CallId('call-1'), name: 'pwsh', arguments: JSON.stringify({ command: 'Get-PSDrive' }) })
+    session.append('tool/result', {
+      turn: 1,
+      step: 1,
+      message: createToolResultMessage({ callId: CallId('call-1'), content: [{ type: 'text', text: 'C: 120GB' }], isError: false }),
+    }, { surfaceOp: 'append' })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+    const endEvent = session.events.findLast(event => event.type === 'turn/end') as SessionEvent<'turn/end'>
+    const episode = reconstructTurn(session, endEvent)
+    expect(episode.selfReflexive).toBe(false)
+  })
+
+  it('annotates self-reflexive turns before the accumulation gate so the LLM cannot hallucinate the action', async () => {
+    // The LLM gate returns a fabricated action (as it did for exp_155); the
+    // annotation must make it to the gate's input so a compliant gate rejects
+    // or hedges instead of asserting it as fact.
+    const gate = JSON.stringify({
+      should_accumulate: true,
+      situation: '重启 DSH Web 服务并验证',
+      action: '执行重启任务，包括停止进程、重启服务、验证端口',
+      outcome: '服务已恢复',
+      material_gain: 8,
+      emotional_valence: 7,
+      energy_cost: 5,
+    })
+    const { ctx, adapter, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm', autoAccumulate: true },
+      [gate],
+    )
+    try {
+      const expId = await ctx.cognitivePipeline.accumulateTurn({
+        situation: '重启 DSH Web 服务并验证',
+        action: '调用 pwsh；调用 pwsh',
+        outcome: '服务已恢复',
+        toolCallCount: 2,
+        failed: false,
+        turnId: 4,
+        selfReflexive: true,
+      })
+      // The annotation reaches the gate's framed input.
+      const framed = adapter!.lastOptions?.messages?.at(-1)
+      const text = typeof framed === 'string' ? framed : JSON.stringify(framed)
+      expect(text).toContain('自反操作')
+      expect(text).toContain('推测性行动')
+      expect(text).toContain('外部执行')
+      // The experience is still accumulated (hedged, not dropped).
+      expect(expId).not.toBeNull()
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('queues and inspects an autonomous exploration task through the explore() API', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const task = await ctx.cognitivePipeline.explore('验证新的检索重排策略是否稳定')
+      expect(task.taskId).toBe('task_1')
+      expect(task.status).toBe('pending')
+      expect(task.result).toBeNull()
+      expect(ctx.cognitivePipeline.explorationTasks().length).toBe(1)
+
+      const insp = ctx.cognitivePipeline.inspect()
+      expect(insp.exploration.tasks.pending).toBe(1)
+
+      // A scheduler updates the task; the snapshot reflects the transition.
+      ctx.cognitivePipeline.store.updateExplorationTask(task.taskId, {
+        status: 'completed',
+        pickedUpAt: Date.now(),
+        result: '探索完成：策略稳定',
+      })
+      const settled = ctx.cognitivePipeline.store.explorationTasksSnapshot()[0]
+      expect(settled?.status).toBe('completed')
+      expect(settled?.result).toContain('策略稳定')
+      expect(ctx.cognitivePipeline.inspect().exploration.tasks.completed).toBe(1)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('rejects an empty exploration goal', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      await expect(ctx.cognitivePipeline.explore('   ')).rejects.toThrow(/must not be empty/)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('registers a meta-cognition loop and aggregates its calibrated decisions in inspect', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      ctx.cognitivePipeline.registerLoop({ name: 'when-to-compact', description: '是否值得压缩上下文' })
+      expect(ctx.cognitivePipeline.loopList().map(loop => loop.name)).toEqual(['when-to-compact'])
+
+      // A decision flows through the same predict/report calibration path.
+      const decision = await ctx.cognitivePipeline.decideLoop('when-to-compact', '压缩会话上下文', '上下文接近上限')
+      expect(decision.predictionId).toBeTruthy()
+      const stored = ctx.cognitivePipeline.store.getPrediction(decision.predictionId)
+      expect(stored?.situation).toContain('loop:when-to-compact')
+
+      await ctx.cognitivePipeline.feedbackLoop('when-to-compact', decision.predictionId, '压缩后依然完整', 8)
+
+      const insp = ctx.cognitivePipeline.inspect()
+      const loop = insp.loops.find(item => item.name === 'when-to-compact')
+      expect(loop?.predictionCount).toBe(1)
+      expect(loop?.resolvedCount).toBe(1)
+      expect(loop?.avgPredictionError).not.toBeNull()
+      // The loop layer does not leak into ordinary experience counts.
+      expect(insp.experienceCount).toBeGreaterThanOrEqual(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('rejects decisions and feedback for an unregistered loop', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      await expect(ctx.cognitivePipeline.decideLoop('missing', '试探', '情境'))
+        .rejects.toThrow(/not registered/)
+      await expect(ctx.cognitivePipeline.feedbackLoop('missing', 'p1', '完成', 8))
+        .rejects.toThrow(/not registered/)
+      expect(ctx.cognitivePipeline.loopList()).toHaveLength(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('rejects malformed loop names and registers multiple loops independently', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      expect(() => ctx.cognitivePipeline.registerLoop({ name: 'Bad Name', description: 'x' }))
+        .toThrow(/lowercase/)
+      expect(() => ctx.cognitivePipeline.registerLoop({ name: '', description: 'x' }))
+        .toThrow(/must not be empty/)
+      ctx.cognitivePipeline.registerLoop({ name: 'loop-a', description: 'a' })
+      ctx.cognitivePipeline.registerLoop({ name: 'loop-b', description: 'b' })
+      expect(ctx.cognitivePipeline.loopList().map(loop => loop.name)).toEqual(['loop-a', 'loop-b'])
+      // Re-registering replaces the description, not the position.
+      ctx.cognitivePipeline.registerLoop({ name: 'loop-a', description: 'a2' })
+      expect(ctx.cognitivePipeline.loopList().map(loop => loop.description)).toEqual(['a2', 'b'])
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('submits an approved loop decision as an execution request, honoring the sink discipline', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const accepted: string[] = []
+      const refused: string[] = []
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-archive',
+        description: '是否归档该会话',
+        execution: [{
+          target: 'test.archive-sink',
+          // The sink enforces its own discipline: it refuses when the decision
+          // text mentions a protected keyword, regardless of the loop's approval.
+          apply(request) {
+            if (request.decision.includes('保留')) {
+              refused.push(request.decision)
+              return 'protected: 该会话需保留'
+            }
+            accepted.push(request.decision)
+            return null
+          },
+        }],
+      })
+
+      // First decision approves and reaches the sink (accepted).
+      const first = await ctx.cognitivePipeline.decideAndExecute('when-to-archive', '归档会话', '会话已空闲', 0.5)
+      expect(first.approved).toBe(true)
+      expect(first.executions).toHaveLength(1)
+      expect(first.executions[0]).toMatchObject({
+        loopName: 'when-to-archive',
+        target: 'test.archive-sink',
+        rejected: false,
+        reason: null,
+        status: null,
+        settledAt: null,
+      })
+      // Every attempt yields a durable receipt linking decision to execution.
+      expect(first.executions[0]?.receiptId).toBe(`${first.decision.predictionId}@test.archive-sink`)
+      expect(ctx.cognitivePipeline.store.loopExecutionsSnapshot()).toHaveLength(1)
+      expect(accepted).toEqual(['归档会话'])
+
+      // Second decision approves but the sink refuses under its discipline.
+      const second = await ctx.cognitivePipeline.decideAndExecute('when-to-archive', '归档并保留会话', '会话已空闲', 0.5)
+      expect(second.approved).toBe(true)
+      expect(second.executions[0]).toMatchObject({
+        target: 'test.archive-sink',
+        rejected: true,
+        reason: 'protected: 该会话需保留',
+        status: null,
+      })
+      expect(refused).toEqual(['归档并保留会话'])
+      // The loop only requested; the sink decided — no execution happened.
+      expect(accepted).toEqual(['归档会话'])
+      expect(ctx.cognitivePipeline.store.loopExecutionsSnapshot()).toHaveLength(2)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('does not submit execution requests for a declined decision', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const seen: string[] = []
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-clear',
+        description: '是否清空缓存',
+        execution: [{
+          target: 'test.clear-sink',
+          apply(request) {
+            seen.push(request.decision)
+            return null
+          },
+        }],
+      })
+      // Without an LLM route the calibrated probability shrinks to 0.5; a high
+      // threshold makes the decision decline, so no request reaches the sink.
+      const result = await ctx.cognitivePipeline.decideAndExecute('when-to-clear', '清空缓存', '缓存膨胀', 0.99)
+      expect(result.approved).toBe(false)
+      expect(result.executions).toEqual([])
+      expect(seen).toEqual([])
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('drives real exploration execution through a loop-attached exploration sink', async () => {
+    const { ctx, teardown } = await pipelineHarness({
+      exploreDailyBudget: 2,
+      exploreAutoDispatch: true,
+    })
+    try {
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-explore',
+        description: '该不该主动探索这个未知行动',
+        execution: [ctx.cognitivePipeline.createExplorationSink()],
+      })
+
+      // An approved decision reaches the exploration sink. The predict call
+      // itself already created the entry via its novel branch, so the sink
+      // treats it as handled (no double-record); the exploration exists once.
+      const result = await ctx.cognitivePipeline.decideAndExecute('when-to-explore', '尝试新的检索策略', '未知领域', 0.5)
+      expect(result.approved).toBe(true)
+      expect(result.executions[0]).toMatchObject({
+        target: 'hot-engine.explore-create',
+        rejected: false,
+        reason: null,
+      })
+      expect(ctx.cognitivePipeline.store.explorationSnapshot().entries).toHaveLength(1)
+      expect(ctx.cognitivePipeline.store.tempStrategiesSnapshot()).toHaveLength(1)
+      expect(ctx.cognitivePipeline.store.explorationTasksSnapshot()).toHaveLength(1)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('refuses exploration execution under the sink discipline (safety gate + budget)', async () => {
+    const { ctx, teardown } = await pipelineHarness({
+      exploreDailyBudget: 1,
+      exploreRiskWords: ['删除'],
+    })
+    try {
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-explore',
+        description: '该不该主动探索',
+        execution: [ctx.cognitivePipeline.createExplorationSink()],
+      })
+
+      // Irreversible action: the loop approves but the sink refuses (safety
+      // gate) BEFORE any exploration is recorded.
+      const unsafe = await ctx.cognitivePipeline.decideAndExecute('when-to-explore', '删除全部记录', '未知领域', 0.5)
+      expect(unsafe.approved).toBe(true)
+      expect(unsafe.executions[0]?.rejected).toBe(true)
+      expect(unsafe.executions[0]?.reason).toContain('不可逆')
+      expect(ctx.cognitivePipeline.store.explorationSnapshot().entries).toHaveLength(0)
+
+      // A reversible action: predict's own novel branch consumes the budget and
+      // creates the entry; the sink sees it exists and treats it as handled.
+      const first = await ctx.cognitivePipeline.decideAndExecute('when-to-explore', '尝试新的检索策略', '未知领域', 0.5)
+      expect(first.executions[0]?.rejected).toBe(false)
+      expect(ctx.cognitivePipeline.store.explorationSnapshot().entries).toHaveLength(1)
+
+      // A second reversible action: predict's novel branch skips it (budget
+      // exhausted), so the sink's own budget discipline refuses it.
+      const second = await ctx.cognitivePipeline.decideAndExecute('when-to-explore', '尝试另一种策略', '另一个未知领域', 0.5)
+      expect(second.approved).toBe(true)
+      expect(second.executions[0]?.rejected).toBe(true)
+      expect(second.executions[0]?.reason).toContain('预算已耗尽')
+      expect(ctx.cognitivePipeline.store.explorationSnapshot().entries).toHaveLength(1)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('settles an accepted receipt and flows the execution outcome back into the loop calibration', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-delegate',
+        description: '该不该委派给子代理',
+        execution: [{
+          target: 'test.delegate-sink',
+          apply() {
+            return null
+          },
+        }],
+      })
+      const result = await ctx.cognitivePipeline.decideAndExecute('when-to-delegate', '委派任务A', '任务复杂', 0.5)
+      expect(result.approved).toBe(true)
+      const receiptId = result.executions[0]?.receiptId
+      expect(receiptId).toBeTruthy()
+
+      // The receipt is durable and starts unsettled.
+      expect(ctx.cognitivePipeline.store.getLoopExecution(receiptId!)?.status).toBeNull()
+
+      // Settlement marks the terminal outcome AND resolves the decision
+      // prediction through the same report path (执行结果回流).
+      const settled = await ctx.cognitivePipeline.settleExecution(receiptId!, '子代理完成，输出可用', 8)
+      expect(settled.receipt.status).toBe('executed')
+      expect(settled.receipt.settledAt).not.toBeNull()
+      expect(settled.receipt.outcomeText).toBe('子代理完成，输出可用')
+      const resolved = ctx.cognitivePipeline.store.getPrediction(result.decision.predictionId)
+      expect(resolved?.resolvedAt).not.toBeNull()
+      expect(resolved?.actualOutcome).toBe('子代理完成，输出可用')
+
+      // The loop's stats now carry the execution ledger.
+      const loop = ctx.cognitivePipeline.inspect().loops.find(item => item.name === 'when-to-delegate')
+      expect(loop?.executedCount).toBe(1)
+      expect(loop?.refusedCount).toBe(0)
+      expect(loop?.failedCount).toBe(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('settles a failed execution as feedback, and refuses to double-settle or settle a refused receipt', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      const seen: string[] = []
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-delegate',
+        description: '该不该委派给子代理',
+        execution: [{
+          target: 'test.delegate-sink',
+          apply(request) {
+            // The sink's discipline: refuse dangerous delegations.
+            if (request.decision.includes('危险')) {
+              seen.push('refused')
+              return '危险操作不委派'
+            }
+            seen.push('accepted')
+            return null
+          },
+        }],
+      })
+
+      // A refused receipt is terminal by construction — settling it is an error.
+      const refused = await ctx.cognitivePipeline.decideAndExecute('when-to-delegate', '委派危险操作', '任务复杂', 0.5)
+      expect(refused.executions[0]?.rejected).toBe(true)
+      await expect(ctx.cognitivePipeline.settleExecution(refused.executions[0]!.receiptId, '未执行', 1))
+        .rejects.toThrow(/refused/)
+
+      // An accepted receipt can settle as failed; double-settlement is rejected.
+      const accepted = await ctx.cognitivePipeline.decideAndExecute('when-to-delegate', '委派任务B', '任务复杂', 0.5)
+      const receiptId = accepted.executions[0]!.receiptId
+      const failed = await ctx.cognitivePipeline.settleExecution(receiptId, '子代理崩溃', 2, 'failed')
+      expect(failed.receipt.status).toBe('failed')
+      await expect(ctx.cognitivePipeline.settleExecution(receiptId, '重复结算', 8))
+        .rejects.toThrow(/already settled/)
+      // Unknown receipts are loud errors, not silent no-ops.
+      await expect(ctx.cognitivePipeline.settleExecution('missing@test.delegate-sink', 'x', 5))
+        .rejects.toThrow(/not found/)
+
+      const loop = ctx.cognitivePipeline.inspect().loops.find(item => item.name === 'when-to-delegate')
+      expect(loop?.refusedCount).toBe(1)
+      expect(loop?.failedCount).toBe(1)
+      expect(loop?.executedCount).toBe(0)
+      expect(seen).toEqual(['refused', 'accepted'])
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('exposes the loop-execution audit chain through inspect', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      ctx.cognitivePipeline.registerLoop({
+        name: 'when-to-explore',
+        description: '该不该主动探索',
+        execution: [ctx.cognitivePipeline.createExplorationSink()],
+      })
+      // One accepted + one refused (irreversible) execution.
+      await ctx.cognitivePipeline.decideAndExecute('when-to-explore', '删除全部记录', '未知领域', 0.5)
+      const accepted = await ctx.cognitivePipeline.decideAndExecute('when-to-explore', '尝试新的检索策略', '未知领域', 0.5)
+      await ctx.cognitivePipeline.settleExecution(accepted.executions[0]!.receiptId, '探索完成', 7)
+
+      const insp = ctx.cognitivePipeline.inspect()
+      expect(insp.loopExecutions).toHaveLength(2)
+      // Newest first.
+      expect(insp.loopExecutions[0]?.status).toBe('executed')
+      expect(insp.loopExecutions[1]?.rejected).toBe(true)
+      // Every receipt links decision → execution with a stable id.
+      expect(insp.loopExecutions[0]?.receiptId).toBe(`${accepted.decision.predictionId}@hot-engine.explore-create`)
+    } finally {
+      await teardown()
     }
   })
 })

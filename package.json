@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-cognitive-pipeline",
-  "version": "0.1.0-rc.5",
+  "version": "0.1.0-rc.6",
   "description": "Prediction-error-driven dynamic cognition (DCA-PED) for DeepSeek Harness: SAR experience memory with hot/cold dual-loop learning, OOD detection, five-layer confidence calibration, a temp-strategy scratchpad, and utility-space taxonomy rebuilds",
   "type": "module",
   "main": "lib/index.js",
@@ -52,6 +52,7 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.1",
     "@deepseek-ai/dsh-agent": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-credentials": ">=0.0.1-rc.1",
     "@deepseek-ai/dsh-home-paths": ">=0.0.1-rc.3",
     "@deepseek-ai/dsh-invariants": ">=0.0.1-rc.1",
     "@deepseek-ai/dsh-llm": ">=0.0.1-rc.1",
@@ -62,6 +63,7 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-credentials": "^0.0.1-rc.1",
     "@deepseek-ai/dsh-home-paths": "^0.0.1-rc.3",
     "@deepseek-ai/dsh-invariants": "^0.0.1-rc.1",
     "@deepseek-ai/dsh-llm": "^0.0.1-rc.1",

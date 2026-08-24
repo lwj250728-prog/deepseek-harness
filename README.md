@@ -12,6 +12,19 @@ This package is a self-contained, npm-publishable form of the plugin, shipped to
 - **Feedback loop** — `report_outcome`: prediction error, calibration stats, scratchpad graduation, emergency local repair.
 - Every model-assisted step degrades to deterministic math when no LLM route is configured.
 
+## The driving-force mechanisms (v0.1.0-rc.6)
+
+Beyond the original predict/rebuild loops, the pipeline now ships the four-mechanism driver framework that grew out of the [SAR principle review](docs/sar-principle-review.md): the pipeline perceives result variance, detects when a recorded strategy's result distribution shifts, generates structured revisions, and graduates a revision only from converging real-use evidence.
+
+| Mechanism | What it does | Entry point |
+| --- | --- | --- |
+| 1. Settlement variance ledger | Each quality-carrying `report_outcome` appends a raw sample to the bound experience; the distribution over samples is the variance measure | `Experience.settlements` |
+| 2. Disequilibrium gate | A sample deviating ≥ `disequilibriumZThreshold` σ from a ≥ `disequilibriumMinSamples`-sample prior flags the experience as an accommodation candidate | `disequilibriumOf` |
+| 3. Variant candidates | A strategy whose deviation gate newly crosses `reworkNeeded` gets LLM-generated single-step perturbations that keep the verification anchor unchanged | `generateStrategyVariants` |
+| 4. Iterative convergence | A candidate graduates to `adopted` only when ≥3 real-use samples show a high mean with no low outlier; clearly poor means reject | `variantConvergence` / `settleVariant` |
+
+Goal-anchored chains (`remember_experience` with `chain_id`, `consolidate_chain`, `explore_chain`, `rebuild_cognition_object`) record causal skeletons across executions; acceptance criteria and claim audits (`define_acceptance_check`, `verify_claim`) gate claims with machine-checkable evidence; the trigger-jump lexicon (`learn_trigger_jumps`) learns which words open the injection gate. Design rationale lives in [`docs/`](docs/README.md).
+
 ## Install
 
 ### As a DeepSeek Harness plugin (npm)

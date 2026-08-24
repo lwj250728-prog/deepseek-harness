@@ -7,7 +7,7 @@
  * @module @deepseek-ai/dsh-cognitive-pipeline/vectorizer
  */
 
-import type { OutcomeUtility } from './types.ts'
+import type { OutcomeUtility, SettlementSample } from './types.ts'
 
 /** Action-vector dimension (the design's `all-MiniLM-L6-v2` stand-in). */
 export const ACTION_VECTOR_DIM = 384
@@ -15,6 +15,14 @@ export const ACTION_VECTOR_DIM = 384
 export const OUTCOME_VECTOR_DIM = 512
 /** Number of utility slots at the head of the outcome vector. */
 export const UTILITY_SLOTS = 3
+
+/** Default z-score threshold of the disequilibrium gate (μ±2σ, a ~5% tail
+ * event under the normal approximation). */
+export const DEFAULT_DISEQUILIBRIUM_Z = 2
+/** Default minimum prior samples before a distribution is trustworthy enough
+ * to judge a deviation (a one- or two-sample "distribution" has no variance
+ * signal, so no disequilibrium can fire below this). */
+export const DEFAULT_DISEQUILIBRIUM_MIN_SAMPLES = 3
 
 /** Utility feature slots scale to [-1, 1]. */
 const UTILITY_SCALE = 5
@@ -41,6 +49,112 @@ export function utilityScore(utility: OutcomeUtility): number {
  */
 export function isPositiveOutcome(utility: OutcomeUtility): boolean {
   return utilityScore(utility) > 0
+}
+
+/** Tri-state polarity of an outcome on the composite utility axis. */
+export type OutcomePolarity = 'positive' | 'neutral' | 'negative'
+
+/**
+ * The disequilibrium gate: judge one new settlement sample against the prior
+ * sample distribution. The prior must hold at least {@link minSamples} samples
+ * or no judgment is made (a too-thin distribution carries no variance signal).
+ * Deviation is the sample's z-score against the prior mean/stddev; when it
+ * reaches {@link zThreshold} the result distribution has shifted, which is the
+ * driver framework's accommodation trigger — the recorded strategy may need
+ * re-evaluation instead of being assimilated as noise.
+ * @param prior - the settlement samples before this one.
+ * @param quality - the new sample's raw quality (0–10).
+ * @param zThreshold - the z-score threshold (default 2).
+ * @param minSamples - minimum prior sample count (default 3).
+ * @returns the deviation judgment, or null when the prior is too thin.
+ */
+export function disequilibriumOf(
+  prior: readonly SettlementSample[],
+  quality: number,
+  zThreshold: number = DEFAULT_DISEQUILIBRIUM_Z,
+  minSamples: number = DEFAULT_DISEQUILIBRIUM_MIN_SAMPLES,
+): { zScore: number; disequilibrated: boolean } | null {
+  if (prior.length < minSamples) return null
+  const mean = prior.reduce((sum, sample) => sum + sample.quality, 0) / prior.length
+  const variance = prior.reduce((sum, sample) => sum + (sample.quality - mean) ** 2, 0) / prior.length
+  const stddev = Math.sqrt(variance)
+  // A degenerate prior (all samples identical, σ = 0) has no dispersion to
+  // deviate from; any departure would be infinite, so no judgment either.
+  if (stddev < 1e-9) return null
+  const zScore = Math.abs(quality - mean) / stddev
+  return { zScore, disequilibrated: zScore >= zThreshold }
+}
+
+/** Convergence verdict of a variant candidate's settlement distribution. */
+export type VariantConvergenceVerdict = 'insufficient' | 'adopt' | 'reject' | 'keep-testing'
+
+/**
+ * The iterative-convergence gate for a variant candidate (driver framework,
+ * mechanism 4): the candidate graduates only when its real-use result
+ * distribution converges. Conservative by default: adopt requires a high mean
+ * with no low outlier (all samples ≥ adoptMinQuality − 1 and mean ≥
+ * adoptMinQuality), reject requires a clearly poor mean (≤ rejectMaxMean),
+ * anything between keeps testing, and fewer than minSamples never judges.
+ * @param settlements - the real-use samples accumulated so far.
+ * @param adoptMinQuality - adoption mean floor (default 7).
+ * @param rejectMaxMean - rejection mean ceiling (default 4).
+ * @param minSamples - minimum samples before any verdict (default 3).
+ * @returns the convergence verdict.
+ */
+export function variantConvergence(
+  settlements: readonly SettlementSample[],
+  adoptMinQuality: number = 7,
+  rejectMaxMean: number = 4,
+  minSamples: number = 3,
+): VariantConvergenceVerdict {
+  if (settlements.length < minSamples) return 'insufficient'
+  const mean = settlements.reduce((sum, sample) => sum + sample.quality, 0) / settlements.length
+  if (settlements.every(sample => sample.quality >= adoptMinQuality - 1) && mean >= adoptMinQuality) return 'adopt'
+  if (mean <= rejectMaxMean) return 'reject'
+  return 'keep-testing'
+}
+
+/** Failure-symptom markers that make an experience recallable by its signature. */
+export const SYMPTOM_MARKERS = [
+  '挂起', '死循环', '失败', '报错', '错误', '超时', '异常', '崩溃', '拒绝',
+  '无法', '不能', '编译', '断言', '溢出', '泄漏', '锁死', '卡住', '闪退',
+  'eperm', 'exit', 'timeout', 'error', 'fail', 'crash', 'hang',
+]
+
+/**
+ * Fraction of the query's symptom markers that appear in one text. The
+ * hashed bag-of-words vectors dilute short symptom queries against long
+ * situations, so this exact-substring overlap is the complementary recall
+ * channel: "测试挂起" hits an experience whose situation literally contains
+ * 挂起 even when the vector cosine is low.
+ * @param query - the query text (task summary, situation, etc.).
+ * @param text - the candidate experience text.
+ * @returns the matched-marker ratio in [0, 1].
+ */
+export function symptomOverlap(query: string, text: string): number {
+  const lower = text.toLowerCase()
+  let matched = 0
+  let present = 0
+  for (const marker of SYMPTOM_MARKERS) {
+    if (!query.toLowerCase().includes(marker)) continue
+    present += 1
+    if (lower.includes(marker)) matched += 1
+  }
+  return present === 0 ? 0 : matched / present
+}
+
+/**
+ * Classify an outcome by composite score sign. A zero composite score (for
+ * example the neutral 5/5/5 extraction, or a gain that exactly cancels its
+ * cost) carries no net signal and must not be counted as a failure.
+ * @param utility - the outcome utility.
+ * @returns the polarity.
+ */
+export function outcomePolarity(utility: OutcomeUtility): OutcomePolarity {
+  const score = utilityScore(utility)
+  if (score > 0) return 'positive'
+  if (score < 0) return 'negative'
+  return 'neutral'
 }
 
 /** FNV-1a 32-bit hash, a stable deterministic token hash.
