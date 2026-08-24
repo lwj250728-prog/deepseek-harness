@@ -69,7 +69,7 @@ const install: InvariantInstaller = (ctx: Context, fail: (message: string) => ne
       fail(`variant ${candidate.variantId} has an empty verification anchor`)
     }
     const statuses = ['proposed', 'testing', 'adopted', 'rejected'] as const
-    if (!statuses.includes(candidate.status as (typeof statuses)[number])) {
+    if (!statuses.includes(candidate.status)) {
       fail(`variant ${candidate.variantId} has an unknown status "${candidate.status}"`)
     }
     for (const sample of candidate.settlements) {

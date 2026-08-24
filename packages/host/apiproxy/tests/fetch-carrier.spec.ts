@@ -284,7 +284,10 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
     },
     cognition: {
       async list(request) {
-        return { rpcId: request.rpcId, result: { ok: true, value: { tasks: [], counts: { pending: 0, running: 0, completed: 0, failed: 0 } } } }
+        return {
+          rpcId: request.rpcId,
+          result: { ok: true, value: { tasks: [], counts: { pending: 0, running: 0, completed: 0, failed: 0 } } },
+        }
       },
     },
     events: {

@@ -208,7 +208,7 @@ describe('cognitive pipeline integration', () => {
     // variants, and the candidate table stays empty.
     const bare = await pipelineHarness()
     try {
-      await bare.ctx.cognitivePipeline.solidifyStrategy({
+      bare.ctx.cognitivePipeline.solidifyStrategy({
         goalDomain: '重启',
         action: '调用重启脚本',
         verificationAnchor: 'logs/restart-result.json ok=true',
@@ -231,7 +231,7 @@ describe('cognitive pipeline integration', () => {
     })]
     const { ctx, teardown } = await pipelineHarness({ provider: 'cognition-test', model: 'm' }, script)
     try {
-      await ctx.cognitivePipeline.solidifyStrategy({
+      ctx.cognitivePipeline.solidifyStrategy({
         goalDomain: '重启',
         action: '调用重启脚本',
         verificationAnchor: 'logs/restart-result.json ok=true',
@@ -256,7 +256,7 @@ describe('cognitive pipeline integration', () => {
     })]
     const { ctx, teardown } = await pipelineHarness({ provider: 'cognition-test', model: 'm' }, script)
     try {
-      await ctx.cognitivePipeline.solidifyStrategy({
+      ctx.cognitivePipeline.solidifyStrategy({
         goalDomain: '重启',
         action: '调用重启脚本',
         verificationAnchor: 'logs/restart-result.json ok=true',
