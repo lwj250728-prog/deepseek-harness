@@ -162,16 +162,21 @@ export async function apply(ctx: Context, config: CognitivePipelineConfig = {}):
     registerPipelineTools(ctx, service)
   }
 
-  if (service.resolved.autoAccumulate) {
-    ctx.on('session/event', (session: Session, event: SessionEvent) => {
-      if (event.type !== 'turn/end') return
-      const reason = (event.data as { reason?: { kind?: string } }).reason?.kind
-      if (reason !== 'completed' && reason !== 'error') return
-      const episode = reconstructTurn(session, event)
-      if (episode.situation.trim().length === 0) return
-      void service.accumulateTurn(episode).catch((error: unknown) => {
-        ctx.logger.warn(`cognitive-pipeline: automatic accumulation failed: ${String(error)}`)
-      })
+  // Completed-turn cognition activity: settle the turn's injection citations
+  // (unconditionally — the jump-weight reinforcement loop depends on it),
+  // accumulate the episode when autoAccumulate is on, and surface the summary
+  // to the GUI as a cognition/turn-summary event when the turn produced
+  // activity (a quiet turn appends nothing).
+  ctx.on('session/event', (session: Session, event: SessionEvent) => {
+    if (event.type !== 'turn/end') return
+    const reason = (event.data as { reason?: { kind?: string } }).reason?.kind
+    if (reason !== 'completed' && reason !== 'error') return
+    const episode = reconstructTurn(session, event)
+    if (episode.situation.trim().length === 0) return
+    void service.summarizeTurn(session.id, episode).then((summary) => {
+      if (summary !== null) session.append('cognition/turn-summary', summary)
+    }).catch((error: unknown) => {
+      ctx.logger.warn(`cognitive-pipeline: turn summary failed: ${String(error)}`)
     })
-  }
+  })
 }

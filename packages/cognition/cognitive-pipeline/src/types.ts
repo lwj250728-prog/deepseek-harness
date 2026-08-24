@@ -1029,3 +1029,29 @@ export interface FeedbackInput {
    */
   readonly outcomeQuality: number
 }
+
+/** The cognition activity of one completed turn, surfaced to the GUI as a
+ * per-turn bubble. Pure UI/observability data: it never enters a model request
+ * (non-surface event) and only fires when the turn actually produced cognition
+ * activity, so quiet turns show nothing. */
+export interface TurnCognitionSummary {
+  /** The turn this summary describes. */
+  readonly turn: number
+  /** Experiences newly accumulated by this turn (empty when autoAccumulate is
+   * off or the LLM gate rejected the episode). */
+  readonly newExperiences: readonly { expId: string; topic: string }[]
+  /** Injection citation settlement for this turn. */
+  readonly citationSettlement: {
+    readonly settled: number
+    readonly cited: number
+  }
+  /** Predictions resolved during this turn. */
+  readonly resolvedPredictions: number
+}
+
+declare module '@deepseek-ai/dsh-session/types' {
+  interface SessionEventMap {
+    /** Completed-turn cognition summary (UI-only; see TurnCognitionSummary). */
+    'cognition/turn-summary': TurnCognitionSummary
+  }
+}

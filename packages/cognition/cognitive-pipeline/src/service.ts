@@ -63,6 +63,7 @@ import type {
   TempStrategy,
   TriggerJump,
   TurnEpisode,
+  TurnCognitionSummary,
   VariantCandidate,
 } from './types.ts'
 import { actionVector, cosine, outcomeVector, signatureHash, tokenize, utilityScore, variantConvergence } from './vectorizer.ts'
@@ -613,6 +614,10 @@ export class CognitivePipelineService extends Service {
   /** Derived cognition objects (the special-experience layer registry). */
   private readonly objectKinds = new Map<string, CognitionObjectKind<unknown>>()
 
+  /** Per-session count of resolved predictions at the last summarizeTurn call,
+   * so a turn's resolvedPredictions delta is accurate across sessions. */
+  private readonly resolvedAtSummarize = new Map<string, number>()
+
   private readonly readinessPromise: Promise<void>
 
   constructor(ctx: Context, config: CognitivePipelineConfig = {}) {
@@ -974,6 +979,43 @@ export class CognitivePipelineService extends Service {
       ...episode.selfReflexive ? { selfReflexive: true } : {},
     })
     return expId
+  }
+
+  /**
+   * Aggregate one completed turn's cognition activity into a summary for the
+   * GUI bubble: settle the turn's injection citations, accumulate the episode
+   * when autoAccumulate is on, and count predictions resolved since the last
+   * summarize call for this session. Returns null when the turn produced no
+   * activity, so a quiet turn shows no bubble.
+   * @param sessionId - the session owning the turn.
+   * @param episode - the reconstructed turn material.
+   * @returns the summary, or null when nothing happened.
+   */
+  async summarizeTurn(sessionId: string, episode: TurnEpisode): Promise<TurnCognitionSummary | null> {
+    const citation = await this.settleInjectionCitations(sessionId, episode.outcome)
+    let newExperiences: TurnCognitionSummary['newExperiences'] = []
+    if (this.resolved.autoAccumulate) {
+      const expId = await this.accumulateTurn(episode)
+      if (expId !== null) {
+        const exp = this.store.getExperience(expId)
+        if (exp !== undefined) {
+          newExperiences = [{ expId, topic: exp.sar.situation.slice(0, 48) }]
+        }
+      }
+    }
+    const totalResolved = this.store.predictionsSnapshot()
+      .filter(prediction => prediction.resolvedAt !== null).length
+    const before = this.resolvedAtSummarize.get(sessionId) ?? totalResolved
+    const resolvedPredictions = Math.max(0, totalResolved - before)
+    this.resolvedAtSummarize.set(sessionId, totalResolved)
+    const summary: TurnCognitionSummary = {
+      turn: episode.turnId,
+      newExperiences,
+      citationSettlement: citation,
+      resolvedPredictions,
+    }
+    const active = newExperiences.length > 0 || citation.settled > 0 || resolvedPredictions > 0
+    return active ? summary : null
   }
 
   /** Feedback loop: resolve a prediction, update calibration and scratchpad.

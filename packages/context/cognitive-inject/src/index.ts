@@ -23,7 +23,6 @@ import {
   cosine,
   isTaskRestatement,
   outcomePolarity,
-  reconstructTurn,
   refineRetrieval,
   symptomOverlap,
   tokenize,
@@ -429,23 +428,17 @@ export function apply(ctx: Context, config: Config = {}): void {
     lastFailed.set(exec.agent, result.isError)
   })
 
-  // Citation settlement: at turn end, the assistant text of the closed turn
-  // decides whether the injection was actually used (an injected expId
-  // referenced = cited). The outcome folds into the jump words that opened
-  // the gate, feeding the jump-weight reinforcement loop.
+  // Prewarm context maintenance: keep a rolling summary of what this session
+  // is actually DOING (recent tool calls, recent assistant output), so a
+  // short message that triggers a literal-overlap false positive (the exp_67
+  // case: "重启" matching exp_1 by surface words) can be judged by the LLM
+  // veto route against the REAL ongoing context, not the isolated message.
+  // Citation settlement at turn end moved to the pipeline's summarizeTurn
+  // (unconditionally registered), so one owner aggregates the turn's activity
+  // for the GUI bubble without a cross-plugin race; the deferred settlement
+  // below still covers self-reflexive interruptions.
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
-    // Prewarm context maintenance: keep a rolling summary of what this session
-    // is actually DOING (recent tool calls, recent assistant output), so a
-    // short message that triggers a literal-overlap false positive (the exp_67
-    // case: "重启" matching exp_1 by surface words) can be judged by the LLM
-    // veto route against the REAL ongoing context, not the isolated message.
     updatePrewarm(prewarmContext, session, event)
-    if (event.type !== 'turn/end') return
-    const episode = reconstructTurn(session, event)
-    void ctx.cognitivePipeline.settleInjectionCitations(session.id, episode.outcome)
-      .catch((error: unknown) => {
-        ctx.logger.warn(`cognitive-inject: citation settlement failed: ${String(error)}`)
-      })
   })
 
   ctx.on('agent/pre-step', async (

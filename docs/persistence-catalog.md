@@ -235,6 +235,19 @@ Types: [TokenUsage](subsystems/llm-streaming.md)
 
 Source: [`packages/core/session/src/types.ts:273`](../packages/core/session/src/types.ts)
 
+### `cognition/*`
+
+<a id="cognitionturn-summary--log-only"></a>
+
+#### `cognition/turn-summary` — log-only
+
+```ts persistence-catalog
+/** Completed-turn cognition summary (UI-only; see TurnCognitionSummary). */
+'cognition/turn-summary': TurnCognitionSummary
+```
+
+Source: [`packages/cognition/cognitive-pipeline/src/types.ts:1055`](../packages/cognition/cognitive-pipeline/src/types.ts)
+
 ### `command/*`
 
 <a id="commanddone--log-only"></a>

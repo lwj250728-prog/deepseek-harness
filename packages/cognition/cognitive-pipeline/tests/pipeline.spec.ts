@@ -5,6 +5,7 @@ import { reconstructTurn } from '../src/index.ts'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { CallId, createMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { actionVector, outcomeVector } from '../src/vectorizer.ts'
 
 const SAR_A = JSON.stringify({
   situation: '清晨天气晴朗',
@@ -583,26 +584,108 @@ describe('cognitive pipeline integration', () => {
     }
   })
 
-  it('does not accumulate when the LLM gate rejects', async () => {
+  it('summarizes a completed turn into its cognition activity bubble data', async () => {
+    const gate = JSON.stringify({
+      should_accumulate: true,
+      situation: '测试快照并发超时',
+      action: '注入 processTimeoutMs 修复',
+      outcome: '并发下稳定',
+      material_gain: 8,
+      emotional_valence: 7,
+      energy_cost: 5,
+    })
     const { ctx, teardown } = await pipelineHarness(
       { provider: 'cognition-test', model: 'm', autoAccumulate: true },
-      [JSON.stringify({ should_accumulate: false })],
+      [gate],
     )
     try {
-      const before = ctx.cognitivePipeline.store.experiencesSnapshot().length
-      const result = await ctx.cognitivePipeline.accumulateTurn({
-        situation: '完成了一个小任务',
-        action: '修改配置文件并重启服务，输出较长的一段操作记录',
-        outcome: '服务恢复正常',
+      // A pending injection referencing exp_test, and the experience it cites.
+      ctx.cognitivePipeline.store.addExperience({
+        expId: 'exp_test',
+        sar: {
+          situation: '测试快照并发超时',
+          action: '注入 processTimeoutMs 修复',
+          outcome: '并发下稳定',
+          actionKeywords: ['注入'],
+          outcomeUtility: { materialGain: 8, emotionalValence: 7, energyCost: 5 },
+        },
+        actionVector: actionVector('注入 processTimeoutMs 修复', ['注入']),
+        outcomeVector: outcomeVector({ materialGain: 8, emotionalValence: 7, energyCost: 5 }, '并发下稳定'),
+        clusterId: null,
+        strategyLabel: null,
+        timestamp: Date.now(),
+        predictionError: null,
+        cumulativeError: 0,
+        hitCount: 0,
+        positiveCount: 0,
+        simulated: false,
+        verification: 'verified',
+        evidenceScore: 0,
+      })
+      ctx.cognitivePipeline.store.recordInjection({
+        injectionId: 'inject_test_1',
+        createdAt: Date.now(),
+        expIds: ['exp_test'],
+        triggerSource: 'static:测试',
+        jumpWords: [],
+        chainId: null,
+        strategyId: null,
+        sessionId: 'session-summary',
+        cited: null,
+      })
+
+      // The turn's outcome references exp_test → cited; the gate accumulated a
+      // new experience; one resolved prediction exists from the earlier suite.
+      const summary = await ctx.cognitivePipeline.summarizeTurn('session-summary', {
+        situation: '测试快照并发超时',
+        action: '注入 processTimeoutMs 修复',
+        outcome: '并发下稳定，exp_test 已引用',
         toolCallCount: 2,
         failed: false,
         turnId: 3,
         selfReflexive: false,
       })
-      expect(result).toBeNull()
-      expect(ctx.cognitivePipeline.store.experiencesSnapshot().length).toBe(before)
-    } finally {      await teardown()
+      expect(summary).not.toBeNull()
+      expect(summary?.newExperiences).toHaveLength(1)
+      expect(summary?.citationSettlement.settled).toBe(1)
+      expect(summary?.citationSettlement.cited).toBe(1)
+      // The settle is idempotent: a second summarize call on the same turn
+      // reports no further activity (citation already settled, no new
+      // accumulation — the gate script was consumed once), so it returns null.
+      const again = await ctx.cognitivePipeline.summarizeTurn('session-summary', {
+        situation: '测试快照并发超时',
+        action: '注入 processTimeoutMs 修复',
+        outcome: '并发下稳定，exp_test 已引用',
+        toolCallCount: 2,
+        failed: false,
+        turnId: 3,
+        selfReflexive: false,
+      })
+      expect(again).toBeNull()
+    } finally {
+      await teardown()
     }
+  })
+
+  it('does not accumulate when the LLM gate rejects', async () => {    const { ctx, teardown } = await pipelineHarness(
+    { provider: 'cognition-test', model: 'm', autoAccumulate: true },
+    [JSON.stringify({ should_accumulate: false })],
+  )
+  try {
+    const before = ctx.cognitivePipeline.store.experiencesSnapshot().length
+    const result = await ctx.cognitivePipeline.accumulateTurn({
+      situation: '完成了一个小任务',
+      action: '修改配置文件并重启服务，输出较长的一段操作记录',
+      outcome: '服务恢复正常',
+      toolCallCount: 2,
+      failed: false,
+      turnId: 3,
+      selfReflexive: false,
+    })
+    expect(result).toBeNull()
+    expect(ctx.cognitivePipeline.store.experiencesSnapshot().length).toBe(before)
+  } finally {      await teardown()
+  }
   })
 
   it('reconstructs a turn from the session ledger (user request, tool calls, failure, end reason)', () => {
