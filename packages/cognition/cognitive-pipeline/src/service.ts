@@ -66,7 +66,7 @@ import type {
   TurnCognitionSummary,
   VariantCandidate,
 } from './types.ts'
-import { actionVector, cosine, outcomeVector, signatureHash, tokenize, utilityScore, variantConvergence } from './vectorizer.ts'
+import { actionVector, cosine, outcomePolarity, outcomeVector, signatureHash, tokenize, utilityScore, variantConvergence } from './vectorizer.ts'
 import {
   STATIC_TRIGGERS,
   STOP_WORDS,
@@ -942,10 +942,20 @@ export class CognitivePipelineService extends Service {
         expId: exp.expId,
         text: `${exp.sar.situation}。${exp.sar.action}。${exp.sar.outcome}`,
         similarity: Math.max(cosine(queryVector, exp.actionVector), cosine(queryVector, actionVector(exp.sar.situation, []))),
+        polarity: outcomePolarity(exp.sar.outcomeUtility),
       }))
       .sort((a, b) => b.similarity - a.similarity)
       .slice(0, 3)
       .filter(hit => hit.similarity >= 0.3)
+    // The prediction-gap gate (constraint 1): before the LLM judgment, a
+    // deterministic gate asks how far this event sits from what prior
+    // experience predicts. A turn that matches a positive experience and also
+    // succeeded is ASSIMILATED — the old schema absorbed it, nothing new to
+    // encode, no LLM call spent. Novel turns, counter-examples (positive prior
+    // that failed) and improvements (negative prior that succeeded) pass to
+    // the LLM for extraction.
+    const top = similar[0]
+    if (top !== undefined && !episode.failed && top.polarity === 'positive') return null
     const decision = await evaluateAccumulation(this.ctx, this.resolved.route, material, similar, {
       sessionId: call?.sessionId,
       signal: call?.signal,

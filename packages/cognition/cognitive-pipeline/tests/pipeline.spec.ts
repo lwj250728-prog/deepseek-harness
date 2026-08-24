@@ -621,6 +621,17 @@ describe('cognitive pipeline integration', () => {
         simulated: false,
         verification: 'verified',
         evidenceScore: 0,
+        // Negative polarity: the turn is an IMPROVEMENT over this prior (which
+        // failed at the same action), so the prediction-gap gate (constraint 1)
+        // lets it through instead of assimilating a success+success repeat.
+        citationCount: 0,
+      })
+      // Make the prior a NEGATIVE outcome so the successful turn is an
+      // improvement, not a repeat (the gate assimilates success+success).
+      const cited = ctx.cognitivePipeline.store.getExperience('exp_test')!
+      ctx.cognitivePipeline.store.updateExperience('exp_test', {
+        sar: { ...cited.sar, outcomeUtility: { materialGain: 2, emotionalValence: 3, energyCost: 7 } },
+        outcomeVector: outcomeVector({ materialGain: 2, emotionalValence: 3, energyCost: 7 }, '并发下稳定'),
       })
       ctx.cognitivePipeline.store.recordInjection({
         injectionId: 'inject_test_1',
@@ -847,6 +858,67 @@ describe('cognitive pipeline integration', () => {
         .filter(candidate => candidate.settlements.length > 0)
       expect(settled).toHaveLength(1)
       expect(settled[0]?.variantAction).toBe('重启前清理遗留结果文件')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('assimilates a success+success repeat through the prediction-gap gate', async () => {
+    // Constraint 1: a turn matching a positive prior that ALSO succeeded is
+    // assimilated deterministically — no LLM gate call, no new experience.
+    // The harness script would fail loudly if the gate consumed it (script
+    // exhaustion surfaces as a fallback rejection, but the count proves the
+    // gate short-circuited before any LLM call).
+    const script = [JSON.stringify({
+      should_accumulate: true,
+      situation: '重复成功',
+      action: '重复执行已验证步骤',
+      outcome: '再次成功',
+      material_gain: 8,
+      emotional_valence: 7,
+      energy_cost: 5,
+    })]
+    const { ctx, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm', autoAccumulate: true },
+      script,
+    )
+    try {
+      // A positive prior with the SAME action as the coming episode.
+      ctx.cognitivePipeline.store.addExperience({
+        expId: 'exp_prior',
+        sar: {
+          situation: '首次成功',
+          action: '重复执行已验证步骤',
+          outcome: '成功',
+          actionKeywords: ['重复'],
+          outcomeUtility: { materialGain: 8, emotionalValence: 7, energyCost: 5 },
+        },
+        actionVector: actionVector('重复执行已验证步骤', ['重复']),
+        outcomeVector: outcomeVector({ materialGain: 8, emotionalValence: 7, energyCost: 5 }, '成功'),
+        clusterId: null,
+        strategyLabel: null,
+        timestamp: Date.now(),
+        predictionError: null,
+        cumulativeError: 0,
+        hitCount: 0,
+        positiveCount: 0,
+        simulated: false,
+        verification: 'verified',
+        evidenceScore: 0,
+      })
+      const before = ctx.cognitivePipeline.store.experiencesSnapshot().length
+      const result = await ctx.cognitivePipeline.accumulateTurn({
+        situation: '重复成功',
+        action: '重复执行已验证步骤',
+        outcome: '再次成功',
+        toolCallCount: 2,
+        failed: false,
+        turnId: 1,
+        selfReflexive: false,
+      })
+      expect(result).toBeNull()
+      // No new experience was written (the gate assimilated the repeat).
+      expect(ctx.cognitivePipeline.store.experiencesSnapshot().length).toBe(before)
     } finally {
       await teardown()
     }
