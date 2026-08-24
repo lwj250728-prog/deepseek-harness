@@ -134,6 +134,12 @@
    * shifted beyond the gate threshold: the recorded strategy may need
    * re-evaluation. Absent on legacy rows and on experiences never flagged. */
   readonly disequilibrium?: DisequilibriumEvent
+  /** When the disequilibrium resolved: a later settlement returned toward the
+   * distribution mean (closer to it than the deviating sample), so the shift
+   * was transient and the memory is restored (constraint 3's rollback — the
+   * anomaly revised the schema, and the schema came back). Absent while the
+   * disequilibrium is still active. */
+  readonly disequilibriumRecoveredAt?: number
   /** Times this experience's cluster matched a hot-loop prediction. */
   readonly hitCount: number
   /** Times a settled injection cited this experience (the machine-checkable
@@ -863,6 +869,9 @@ interface LoopExecutionReceipt {
     /** Experiences flagged by the disequilibrium gate (result distribution
      * shifted beyond threshold — accommodation candidates). */
     readonly disequilibratedExperienceCount: number
+    /** Flagged experiences whose shift resolved (a later settlement returned
+     * toward the mean — constraint 3's rollback). */
+    readonly recoveredDisequilibriumCount: number
   }
   /** Citation-ledger aggregate (constraint 2): how many experiences a decision
    * actually adopted, and how many were never cited (island candidates). */

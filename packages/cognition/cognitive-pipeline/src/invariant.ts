@@ -63,6 +63,16 @@ const install: InvariantInstaller = (ctx: Context, fail: (message: string) => ne
         fail(`experience ${exp.expId} has a disequilibrium with an invalid z-score`)
       }
     }
+    if (exp.disequilibriumRecoveredAt !== undefined) {
+      // Recovery without an event is incoherent: the marker only exists to
+      // resolve a flagged shift.
+      if (exp.disequilibrium === undefined) {
+        fail(`experience ${exp.expId} has a recovery timestamp without a disequilibrium event`)
+      }
+      if (!Number.isFinite(exp.disequilibriumRecoveredAt) || exp.disequilibriumRecoveredAt < 0) {
+        fail(`experience ${exp.expId} has an invalid disequilibrium recovery timestamp`)
+      }
+    }
   }
   for (const candidate of service.store.variantsSnapshot()) {
     if (candidate.verificationAnchor.length === 0) {

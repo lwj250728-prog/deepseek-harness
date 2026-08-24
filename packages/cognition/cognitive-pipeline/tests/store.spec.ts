@@ -263,6 +263,52 @@ describe('CognitiveStore', () => {
     }
   })
 
+  it('resolves a flagged disequilibrium when a later settlement returns toward the mean', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cognition-store-'))
+    try {
+      const store = new CognitiveStore(dir)
+      await store.load()
+      // Stable prior (7,7,7,8); a far sample (2) flags disequilibrium.
+      store.addExperience({ ...experience('exp_1', 5), settlements: [
+        { ts: 1, quality: 7 }, { ts: 2, quality: 7 },
+        { ts: 3, quality: 7 }, { ts: 4, quality: 8 },
+      ] })
+      store.addPrediction(prediction('pred_1', 0.5, 'exp_1'))
+      store.resolvePrediction('pred_1', '结果崩溃', 0.4, 2)
+      const flagged = store.getExperience('exp_1')
+      expect(flagged?.disequilibrium).toBeDefined()
+      expect(flagged?.disequilibriumRecoveredAt).toBeUndefined()
+
+      // A later settlement closer to the mean (6, vs the deviating 2) resolves
+      // the flag — the shift was transient, the memory comes back.
+      store.addPrediction(prediction('pred_2', 0.5, 'exp_1'))
+      store.resolvePrediction('pred_2', '结果回归', 0.1, 6)
+      const recovered = store.getExperience('exp_1')
+      expect(recovered?.disequilibriumRecoveredAt).toBeGreaterThan(0)
+      // The event stays as audit history; only the resolution marker is added.
+      expect(recovered?.disequilibrium?.sampleQuality).toBe(2)
+
+      // A still-deviating sample (farther from the mean than the deviant one)
+      // does NOT resolve an active flag.
+      store.addExperience({ ...experience('exp_2', 5), settlements: [
+        { ts: 1, quality: 7 }, { ts: 2, quality: 7 },
+        { ts: 3, quality: 7 }, { ts: 4, quality: 8 },
+      ] })
+      store.addPrediction(prediction('pred_3', 0.5, 'exp_2'))
+      store.resolvePrediction('pred_3', '结果崩溃', 0.4, 2)
+      store.addPrediction(prediction('pred_4', 0.5, 'exp_2'))
+      store.resolvePrediction('pred_4', '继续崩溃', 0.4, 1)
+      expect(store.getExperience('exp_2')?.disequilibriumRecoveredAt).toBeUndefined()
+
+      // Stats split active vs recovered.
+      const stats = store.stats()
+      expect(stats.settlement.disequilibratedExperienceCount).toBe(1)
+      expect(stats.settlement.recoveredDisequilibriumCount).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('applies a new taxonomy atomically and reassigns members', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cognition-store-'))
     try {

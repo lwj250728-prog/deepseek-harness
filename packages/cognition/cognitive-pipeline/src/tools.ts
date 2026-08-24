@@ -507,6 +507,7 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
               sampled_experience_count: { type: 'number', required: true },
               multi_sample_experience_count: { type: 'number', required: true },
               disequilibrated_experience_count: { type: 'number', required: true },
+              recovered_disequilibrium_count: { type: 'number', required: true },
             },
           },
           citation: {
@@ -669,6 +670,7 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           sampled_experience_count: result.settlement.sampledExperienceCount,
           multi_sample_experience_count: result.settlement.multiSampleExperienceCount,
           disequilibrated_experience_count: result.settlement.disequilibratedExperienceCount,
+          recovered_disequilibrium_count: result.settlement.recoveredDisequilibriumCount,
         },
         citation: {
           cited_experience_count: result.citation.citedExperienceCount,

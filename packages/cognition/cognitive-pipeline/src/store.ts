@@ -679,11 +679,23 @@ export class CognitiveStore {
               minSamples: DEFAULT_DISEQUILIBRIUM_MIN_SAMPLES,
             }
             const judgment = disequilibriumOf(prior, outcomeQuality, gate.zThreshold, gate.minSamples)
+            // Disequilibrium recovery (constraint 3's rollback): a flagged
+            // experience whose later settlement returns TOWARD the mean —
+            // closer to it than the deviating sample was — resolves the flag.
+            // The shift was transient; the memory comes back. Only the first
+            // regression settles it; the event stays as audit history.
+            const active = exp.disequilibrium !== undefined && exp.disequilibriumRecoveredAt === undefined
+            const mean = prior.length === 0
+              ? outcomeQuality
+              : prior.reduce((sum, sample) => sum + sample.quality, 0) / prior.length
+            const recovered = active && exp.disequilibrium !== undefined
+              && Math.abs(outcomeQuality - mean) < Math.abs(exp.disequilibrium.sampleQuality - mean)
             return {
               settlements: [...prior, { ts: now, quality: outcomeQuality }],
               ...judgment !== null && judgment.disequilibrated ? {
                 disequilibrium: { atTs: now, sampleQuality: outcomeQuality, zScore: judgment.zScore },
               } : {},
+              ...recovered ? { disequilibriumRecoveredAt: now } : {},
             }
           })(),
         }
@@ -1468,6 +1480,7 @@ export class CognitiveStore {
       sampledExperienceCount: number
       multiSampleExperienceCount: number
       disequilibratedExperienceCount: number
+      recoveredDisequilibriumCount: number
     }
     citation: {
       citedExperienceCount: number
@@ -1482,6 +1495,7 @@ export class CognitiveStore {
     let sampledExperienceCount = 0
     let multiSampleExperienceCount = 0
     let disequilibratedExperienceCount = 0
+    let recoveredDisequilibriumCount = 0
     let citedExperienceCount = 0
     let zeroCitationExperienceCount = 0
     for (const exp of this.experiences.values()) {
@@ -1491,7 +1505,10 @@ export class CognitiveStore {
         sampledExperienceCount += 1
         if (samples.length >= 2) multiSampleExperienceCount += 1
       }
-      if (exp.disequilibrium !== undefined) disequilibratedExperienceCount += 1
+      if (exp.disequilibrium !== undefined) {
+        if (exp.disequilibriumRecoveredAt === undefined) disequilibratedExperienceCount += 1
+        else recoveredDisequilibriumCount += 1
+      }
       if ((exp.citationCount ?? 0) > 0) citedExperienceCount += 1
       else zeroCitationExperienceCount += 1
     }
@@ -1499,7 +1516,13 @@ export class CognitiveStore {
       experienceCount: this.experiences.size,
       predictionCount: this.predictions.size,
       resolvedPredictionCount: resolved,
-      settlement: { sampleCount, sampledExperienceCount, multiSampleExperienceCount, disequilibratedExperienceCount },
+      settlement: {
+        sampleCount,
+        sampledExperienceCount,
+        multiSampleExperienceCount,
+        disequilibratedExperienceCount,
+        recoveredDisequilibriumCount,
+      },
       citation: { citedExperienceCount, zeroCitationExperienceCount },
     }
   }
