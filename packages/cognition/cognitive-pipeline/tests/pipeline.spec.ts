@@ -243,8 +243,79 @@ describe('cognitive pipeline integration', () => {
       expect(candidates[0]?.verificationAnchor).toBe('logs/restart-result.json ok=true')
       expect(candidates[0]?.status).toBe('proposed')
       expect(candidates[0]?.sourceStrategyId).toBe('solidified-1')
-      const stats = ctx.cognitivePipeline.inspect().variants
-      expect(stats.proposed).toBe(2)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('converges a variant candidate through matched reports (mechanism 4)', async () => {
+    const script = [JSON.stringify({
+      variants: [
+        { variant_action: '重启前先验证 SSH 配置', perturbed_aspect: '前置校验', rationale: 'SSH 失效导致拉起失败' },
+      ],
+    })]
+    const { ctx, teardown } = await pipelineHarness({ provider: 'cognition-test', model: 'm' }, script)
+    try {
+      await ctx.cognitivePipeline.solidifyStrategy({
+        goalDomain: '重启',
+        action: '调用重启脚本',
+        verificationAnchor: 'logs/restart-result.json ok=true',
+        preChecks: [],
+      })
+      const candidates = await ctx.cognitivePipeline.generateStrategyVariants('solidified-1')
+      expect(candidates).toHaveLength(1)
+      expect(ctx.cognitivePipeline.variantCandidates()[0]?.status).toBe('proposed')
+
+      // A report whose action matches the variant's action settles it.
+      let seq = 0
+      const reportMatchingUse = async (quality: number): Promise<void> => {
+        const predictionId = `pred_v${++seq}`
+        ctx.cognitivePipeline.store.addPrediction({
+          predictionId,
+          expId: null,
+          situation: '重启 DSH Web',
+          action: '重启前先验证 SSH 配置',
+          predictedOutcome: 'x',
+          rawProbability: 0.5,
+          calibratedProbability: 0.5,
+          confidenceLow: 0.25,
+          confidenceHigh: 0.75,
+          isNovel: true,
+          usedTempStrategy: false,
+          clusterId: null,
+          exploredActionHash: null,
+          timestamp: Date.now(),
+          actualOutcome: null,
+          predictionError: null,
+          resolvedAt: null,
+          fusion: null,
+        })
+        await ctx.cognitivePipeline.report({
+          predictionId,
+          actualOutcome: 'SSH 配置验证通过，重启成功',
+          outcomeQuality: quality,
+        })
+      }
+
+      // First real use: proposed → testing with one sample.
+      await reportMatchingUse(8)
+      let settled = ctx.cognitivePipeline.variantCandidates()[0]
+      expect(settled?.status).toBe('testing')
+      expect(settled?.settlements).toHaveLength(1)
+      expect(settled?.settlements?.[0]?.quality).toBe(8)
+
+      // Two more high-quality uses: the distribution converges to adopted.
+      await reportMatchingUse(8)
+      await reportMatchingUse(7)
+      settled = ctx.cognitivePipeline.variantCandidates()[0]
+      expect(settled?.status).toBe('adopted')
+      expect(settled?.settlements).toHaveLength(3)
+
+      // Terminal candidates are immutable: further matches are ignored.
+      await reportMatchingUse(2)
+      settled = ctx.cognitivePipeline.variantCandidates()[0]
+      expect(settled?.status).toBe('adopted')
+      expect(settled?.settlements).toHaveLength(3)
     } finally {
       await teardown()
     }

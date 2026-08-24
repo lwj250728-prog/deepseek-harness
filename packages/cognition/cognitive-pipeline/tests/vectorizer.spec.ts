@@ -4,13 +4,20 @@ import {
   OUTCOME_VECTOR_DIM,
   actionVector,
   cosine,
+  disequilibriumOf,
   isPositiveOutcome,
   outcomePolarity,
   outcomeVector,
   signatureHash,
   symptomOverlap,
   tokenize,
+  variantConvergence,
 } from '../src/vectorizer.ts'
+import type { SettlementSample } from '../src/types.ts'
+
+function samples(...qualities: number[]): SettlementSample[] {
+  return qualities.map((quality, index) => ({ ts: index + 1, quality }))
+}
 
 describe('vectorizer', () => {
   it('produces deterministic vectors with the declared dimensions', () => {
@@ -72,5 +79,35 @@ describe('vectorizer', () => {
     expect(symptomOverlap('处理编译错误', '编译失败，报错')).toBe(0.5)
     // A query with no symptom markers scores 0, never a false hit.
     expect(symptomOverlap('实现新功能', '挂起')).toBe(0)
+  })
+
+  it('judges disequilibrium against a stable prior distribution', () => {
+    const prior = samples(7, 7, 7, 8)
+    // A far sample (2) deviates by many standard deviations → disequilibrated.
+    const far = disequilibriumOf(prior, 2)
+    expect(far?.disequilibrated).toBe(true)
+    expect(far?.zScore).toBeGreaterThan(2)
+    // A sample inside the spread stays assimilated.
+    expect(disequilibriumOf(prior, 7)?.disequilibrated).toBe(false)
+    // A too-thin prior carries no variance signal: no judgment.
+    expect(disequilibriumOf(samples(7, 8), 1)).toBeNull()
+    // A degenerate prior (σ = 0) never judges either.
+    expect(disequilibriumOf(samples(7, 7, 7), 1)).toBeNull()
+  })
+
+  it('converges a variant candidate conservatively (mechanism 4 gate)', () => {
+    // Fewer than three samples never judge.
+    expect(variantConvergence(samples(8, 8))).toBe('insufficient')
+    // High mean with no low outlier adopts.
+    expect(variantConvergence(samples(8, 8, 7))).toBe('adopt')
+    expect(variantConvergence(samples(9, 7, 8, 8))).toBe('adopt')
+    // A low outlier (below adoptMinQuality − 1) blocks adoption despite a
+    // decent mean; the boundary value 6 still passes.
+    expect(variantConvergence(samples(8, 8, 5))).toBe('keep-testing')
+    expect(variantConvergence(samples(8, 8, 6))).toBe('adopt')
+    // Clearly poor mean rejects.
+    expect(variantConvergence(samples(4, 3, 4))).toBe('reject')
+    // In-between keeps testing.
+    expect(variantConvergence(samples(6, 5, 6))).toBe('keep-testing')
   })
 })

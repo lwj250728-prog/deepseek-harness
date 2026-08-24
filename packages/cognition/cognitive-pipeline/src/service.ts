@@ -65,7 +65,7 @@ import type {
   TurnEpisode,
   VariantCandidate,
 } from './types.ts'
-import { actionVector, cosine, outcomeVector, signatureHash, tokenize, utilityScore } from './vectorizer.ts'
+import { actionVector, cosine, outcomeVector, signatureHash, tokenize, utilityScore, variantConvergence } from './vectorizer.ts'
 import {
   STATIC_TRIGGERS,
   STOP_WORDS,
@@ -1068,6 +1068,11 @@ export class CognitivePipelineService extends Service {
         this.store.foldAcceptanceError(checkId, error)
       }
     }
+
+    // Variant feedback fold (机制4 迭代收敛): when the reported action matches
+    // a non-terminal variant candidate's action, the real-use quality settles
+    // that candidate — a variant is tested by being actually executed.
+    await this.foldVariantFeedback(prediction.action, input.outcomeQuality)
 
     let triggerRebuild = false
     if (error >= this.resolved.emergencyErrorThreshold) {
@@ -2173,6 +2178,56 @@ export class CognitivePipelineService extends Service {
    */
   variantCandidates(): readonly VariantCandidate[] {
     return this.store.variantsSnapshot()
+  }
+
+  /**
+   * Settle one real-use result of a variant candidate (driver framework,
+   * mechanism 4 — iterative convergence): append the quality sample, move the
+   * candidate into `testing`, and run the convergence gate. A terminal
+   * candidate (adopted/rejected) is immutable and ignores further settles.
+   * @param variantId - the candidate to settle.
+   * @param outcomeQuality - the real-use result quality 0–10.
+   * @returns the updated candidate, or null when unknown.
+   */
+  async settleVariant(variantId: string, outcomeQuality: number): Promise<VariantCandidate | null> {
+    const candidate = this.store.variantsSnapshot().find(item => item.variantId === variantId)
+    if (candidate === undefined) return null
+    if (candidate.status === 'adopted' || candidate.status === 'rejected') return candidate
+    const settlements = [...candidate.settlements, { ts: Date.now(), quality: outcomeQuality }]
+    const verdict = variantConvergence(settlements)
+    const status: VariantCandidate['status'] = verdict === 'adopt'
+      ? 'adopted'
+      : verdict === 'reject'
+        ? 'rejected'
+        : 'testing'
+    const next: VariantCandidate = {
+      ...candidate,
+      settlements,
+      status,
+      updatedAt: Date.now(),
+    }
+    this.store.updateVariantCandidate(next)
+    await this.store.flush()
+    return next
+  }
+
+  /**
+   * Best-effort automatic variant feedback: when a reported action matches a
+   * non-terminal variant candidate's action (hash-bag cosine at/above the
+   * temp-strategy match threshold), the report's quality settles that
+   * candidate — a variant is tested by being actually executed, not by fiat.
+   * @param action - the reported action text.
+   * @param outcomeQuality - the report's result quality.
+   */
+  private async foldVariantFeedback(action: string, outcomeQuality: number): Promise<void> {
+    const vector = actionVector(action, [])
+    const threshold = this.resolved.hot.tempStrategyMatchThreshold
+    for (const candidate of this.store.variantsSnapshot()) {
+      if (candidate.status !== 'proposed' && candidate.status !== 'testing') continue
+      if (cosine(vector, actionVector(candidate.variantAction, [])) >= threshold) {
+        await this.settleVariant(candidate.variantId, outcomeQuality)
+      }
+    }
   }
 
   /**

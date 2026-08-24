@@ -85,6 +85,35 @@ export function disequilibriumOf(
   return { zScore, disequilibrated: zScore >= zThreshold }
 }
 
+/** Convergence verdict of a variant candidate's settlement distribution. */
+export type VariantConvergenceVerdict = 'insufficient' | 'adopt' | 'reject' | 'keep-testing'
+
+/**
+ * The iterative-convergence gate for a variant candidate (driver framework,
+ * mechanism 4): the candidate graduates only when its real-use result
+ * distribution converges. Conservative by default: adopt requires a high mean
+ * with no low outlier (all samples ≥ adoptMinQuality − 1 and mean ≥
+ * adoptMinQuality), reject requires a clearly poor mean (≤ rejectMaxMean),
+ * anything between keeps testing, and fewer than minSamples never judges.
+ * @param settlements - the real-use samples accumulated so far.
+ * @param adoptMinQuality - adoption mean floor (default 7).
+ * @param rejectMaxMean - rejection mean ceiling (default 4).
+ * @param minSamples - minimum samples before any verdict (default 3).
+ * @returns the convergence verdict.
+ */
+export function variantConvergence(
+  settlements: readonly SettlementSample[],
+  adoptMinQuality: number = 7,
+  rejectMaxMean: number = 4,
+  minSamples: number = 3,
+): VariantConvergenceVerdict {
+  if (settlements.length < minSamples) return 'insufficient'
+  const mean = settlements.reduce((sum, sample) => sum + sample.quality, 0) / settlements.length
+  if (settlements.every(sample => sample.quality >= adoptMinQuality - 1) && mean >= adoptMinQuality) return 'adopt'
+  if (mean <= rejectMaxMean) return 'reject'
+  return 'keep-testing'
+}
+
 /** Failure-symptom markers that make an experience recallable by its signature. */
 export const SYMPTOM_MARKERS = [
   '挂起', '死循环', '失败', '报错', '错误', '超时', '异常', '崩溃', '拒绝',
