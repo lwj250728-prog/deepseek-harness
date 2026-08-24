@@ -1751,6 +1751,12 @@ importers:
 
   packages/client/ui-cognition:
     dependencies:
+      '@deepseek-ai/dsh-client-ui-conversation':
+        specifier: workspace:^
+        version: link:../ui-conversation
+      '@deepseek-ai/dsh-session':
+        specifier: workspace:^
+        version: link:../../core/session
       clsx:
         specifier: ^2.0.0
         version: 2.1.1
