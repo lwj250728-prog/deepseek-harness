@@ -16,7 +16,8 @@ keyless 快照套件（`vitest.snapshot.config.ts`）在三种特定条件下不
 
 三处精准修复，各落在所属层：
 
-- **逐调用进程期限。** 装配式 headless 与 CLI 快照向 `runLoaderSmoke`（已支持）传 `processTimeoutMs`，按启动重量定尺寸，始终低于 vitest 期限以保持失败诊断来自子进程：one-shot headless 场景 40s，完整 `--profile headless` CLI 启动 70s（其墙钟时间在 60s 附近波动）。每个文件在启动旁命名自己的常量，预算局部可检。
+- **逐调用进程期限。** 装配式 headless 与 CLI 快照向 `runLoaderSmoke`（已支持）传 `processTimeoutMs`，按启动重量定尺寸，始终低于 vitest 期限以保持失败诊断来自子进程：one-shot headless 场景 40s，完整 `--profile headless` CLI 启动 80s（其墙钟时间在空闲 ~60s 与并发下 ~70s 之间波动）。headless 套件的每个 `runLoaderSmoke` 调用都带覆盖——包括兄弟场景文件（`subagent-*`、`semantic-checkpoint`、`session-format-guard`、`workspace-context-resume`），它们最初因只修补了主文件而被漏掉。
+- **按模式感知的默认并发。** `vitest.snapshot.config.ts` 现在按示例模式默认 `DSH_SNAPSHOT_MAX_CONCURRENCY`：`lib` 保持 5 路文件并行（CI，构建后的包秒级启动），`src` 默认 1（完全串行回放）。即使两个并发 tsx 启动也会不可预测地争入逐启动期限（观察到 80s+），所以源模式用速度换确定性；环境旋钮仍可覆盖。
 - **JSON 转义水合 cwd。** `hydrateReplayFixtures` 用 `cwd.replaceAll('\\', '\\\\')` 替换 `{{cwd}}`，让水合后的 JSONL 在所有平台合法。POSIX cwd 原样通过。
 - **依赖 bash 场景的平台跳过。** `sdk.snapshot.ts` 的场景表新增 `skipOn` 字段，`headless.snapshot.ts` 用 `it.skipIf(process.platform === 'win32')` 跳过驱动 bash 的场景。Windows 重放无需 bash 的场景、跳过其余而不失败；CI（Linux）全跑。
 
@@ -26,7 +27,7 @@ keyless 快照套件（`vitest.snapshot.config.ts`）在三种特定条件下不
 
 **把 cwd 令牌换成正斜杠。** 否决：Windows API 接受 `/`，但比较端（`tokenizeSessionFixtureCwd`）需匹配拼写变化，扩大爆炸半径；JSON 转义现有拼写是一行修复，让两端保持逐字节一致。
 
-**整个快照套件串行。** 否决：它治症状（竞争）却放弃 config 刻意启用的并行回放；真正的修复是匹配启动重量的逐启动预算。
+**整个快照套件串行。** 否决作为全局默认：它会拖慢 `lib` 模式 CI，那里 5 路并行是安全的。按模式感知的默认（仅 `src` 下串行）在不付 CI 成本的前提下获得确定性。
 
 ## 后果
 

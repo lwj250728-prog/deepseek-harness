@@ -10,6 +10,11 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
+
+// src/tsx boot under the snapshot suite outgrows the shared 30s subprocess
+// deadline; the vitest deadline (LOADER_SMOKE_TEST_TIMEOUT_MS = 45s) keeps
+// 5s of margin over this 40s process budget.
+const HEADLESS_PROCESS_TIMEOUT_MS = 40_000
 import SessionStore, {
   SESSION_FORMAT_VERSION,
   SessionId,
@@ -59,6 +64,7 @@ describe('session format guard through the assembled app', () => {
       tempDirPrefix: 'dsh-format-guard-version-',
       binScript,
       libBinScript: binScript,
+      processTimeoutMs: HEADLESS_PROCESS_TIMEOUT_MS,
       configPath,
       binArgs: [configPath, 'Try to resume.'],
       tsconfigPath,
@@ -84,6 +90,7 @@ describe('session format guard through the assembled app', () => {
       tempDirPrefix: 'dsh-format-guard-event-',
       binScript,
       libBinScript: binScript,
+      processTimeoutMs: HEADLESS_PROCESS_TIMEOUT_MS,
       configPath,
       binArgs: [configPath, 'Try to resume.'],
       tsconfigPath,

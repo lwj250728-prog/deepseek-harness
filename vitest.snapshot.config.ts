@@ -3,7 +3,15 @@ import tsconfigPaths from 'vite-tsconfig-paths'
 import { defineConfig } from 'vitest/config'
 import { standardDecoratorPlugin, vitestExecArgv } from './vitest.shared.ts'
 
+// CI runs `lib` mode: built bundles boot in seconds, so five-way file
+// parallelism is safe and keeps the suite short. Local dev runs `src` mode:
+// every scenario boots the real app under tsx (tens of seconds each), and
+// even two concurrent boots contend into the per-launch subprocess deadlines
+// unpredictably (observed up to 80s+). Source mode therefore defaults to
+// fully serial replay — slow but deterministic — and the env knob still
+// overrides both.
 const DEFAULT_SNAPSHOT_MAX_CONCURRENCY = 5
+const DEFAULT_SRC_MAX_CONCURRENCY = 1
 
 function positiveIntFromEnv(name: string, fallback: number): number {
   const raw = process.env[name]
@@ -16,9 +24,13 @@ function positiveIntFromEnv(name: string, fallback: number): number {
   return value
 }
 
+const srcMode = process.env.DSH_EXAMPLE_MODE !== 'lib'
 const snapshotMaxConcurrency = positiveIntFromEnv(
   'DSH_SNAPSHOT_MAX_CONCURRENCY',
-  Math.min(DEFAULT_SNAPSHOT_MAX_CONCURRENCY, availableParallelism()),
+  Math.min(
+    srcMode ? DEFAULT_SRC_MAX_CONCURRENCY : DEFAULT_SNAPSHOT_MAX_CONCURRENCY,
+    availableParallelism(),
+  ),
 )
 
 // Replay is the keyless default: boot real subprocess paths from recorded model responses and diff

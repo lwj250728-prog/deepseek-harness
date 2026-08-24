@@ -26,9 +26,10 @@ import { describe, expect, it } from 'vitest'
 const HEADLESS_PROCESS_TIMEOUT_MS = 40_000
 // The full CLI (`--profile headless --patch`) boot under tsx is the heaviest
 // launch in this file and outgrows even the 40s subprocess deadline; its wall
-// time fluctuates near 60s, so the budget leaves real headroom.
-const HEADLESS_PROFILE_PROCESS_TIMEOUT_MS = 70_000
-const HEADLESS_PROFILE_TEST_TIMEOUT_MS = 85_000
+// time fluctuates between ~60s (idle) and ~70s (under two-way concurrency),
+// so the budget leaves real headroom.
+const HEADLESS_PROFILE_PROCESS_TIMEOUT_MS = 80_000
+const HEADLESS_PROFILE_TEST_TIMEOUT_MS = 95_000
 
 const snapshotsDir = join(dirname(fileURLToPath(import.meta.url)), 'snapshots')
 const advancedScenarioDir = join(snapshotsDir, 'advanced-toolchain')

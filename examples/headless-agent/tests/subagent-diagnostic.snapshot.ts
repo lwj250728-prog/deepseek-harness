@@ -10,6 +10,11 @@ import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { normalizeSessionLog, scrubRequestHeaders, type NormalizeContext } from '@deepseek-ai/dsh-acp-snapshot'
 import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
+
+// src/tsx boot under the snapshot suite outgrows the shared 30s subprocess
+// deadline; the vitest deadline (LOADER_SMOKE_TEST_TIMEOUT_MS = 45s) keeps
+// 5s of margin over this 40s process budget.
+const HEADLESS_PROCESS_TIMEOUT_MS = 40_000
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SESSION_FORMAT_VERSION, SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
@@ -78,6 +83,7 @@ describe('descriptor-less cold child diagnostic snapshot', () => {
       tempDirPrefix: 'dsh-subagent-diag-',
       binScript,
       libBinScript: binScript,
+      processTimeoutMs: HEADLESS_PROCESS_TIMEOUT_MS,
       configPath,
       binArgs: [configPath, task],
       tsconfigPath,

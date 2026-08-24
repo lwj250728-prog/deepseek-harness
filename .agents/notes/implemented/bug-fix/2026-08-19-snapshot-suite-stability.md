@@ -16,7 +16,8 @@ The keyless snapshot suite (`vitest.snapshot.config.ts`) is unstable in three di
 
 Three targeted fixes, each at the owning layer:
 
-- **Per-call process deadlines.** The assembled-headless and CLI snapshots pass `processTimeoutMs` to `runLoaderSmoke` (already supported), sized to the launch weight and always below the vitest deadline so the failure diagnostic stays the subprocess's: 40s for the one-shot headless scenarios, 70s for the full `--profile headless` CLI boot (whose wall time fluctuates near 60s). Each file names its own constant next to the launch so the budget is locally inspectable.
+- **Per-call process deadlines.** The assembled-headless and CLI snapshots pass `processTimeoutMs` to `runLoaderSmoke` (already supported), sized to the launch weight and always below the vitest deadline so the failure diagnostic stays the subprocess's: 40s for the one-shot headless scenarios, 80s for the full `--profile headless` CLI boot (whose wall time fluctuates between ~60s idle and ~70s under concurrency). Every `runLoaderSmoke` call in the headless suite carries the override — including the sibling scenario files (`subagent-*`, `semantic-checkpoint`, `session-format-guard`, `workspace-context-resume`), which were initially missed because only the primary file was patched.
+- **Mode-aware default concurrency.** `vitest.snapshot.config.ts` now defaults `DSH_SNAPSHOT_MAX_CONCURRENCY` by example mode: `lib` keeps 5-way file parallelism (CI, built bundles boot in seconds), `src` defaults to 1 (fully serial replay). Even two concurrent tsx boots contended unpredictably into the per-launch deadlines (observed 80s+), so source mode trades speed for determinism; the env knob still overrides.
 - **JSON-escape the hydrated cwd.** `hydrateReplayFixtures` replaces `{{cwd}}` with `cwd.replaceAll('\\', '\\\\')`, keeping the hydrated JSONL valid on every platform. POSIX cwds pass through unchanged.
 - **Platform skips for bash-dependent scenarios.** `sdk.snapshot.ts` gains a `skipOn` field on its scenario table and `headless.snapshot.ts` skips the bash-driving scenarios with `it.skipIf(process.platform === 'win32')`. Windows replays the scenarios that do not need bash and skips the rest instead of failing; CI (Linux) runs everything.
 
@@ -26,7 +27,7 @@ Three targeted fixes, each at the owning layer:
 
 **Replace the cwd token with forward slashes.** Rejected: Windows APIs accept `/`, but the comparison side (`tokenizeSessionFixtureCwd`) would need to match the spelling change, widening the blast radius; JSON-escaping the existing spelling is a one-line fix that keeps both sides byte-identical.
 
-**Make the whole snapshot suite serial.** Rejected: it treats the symptom (contention) and trades away the parallel replay the config deliberately enables; the real fix is a per-launch budget that matches the launch's weight.
+**Make the whole snapshot suite serial.** Rejected as the global default: it would slow `lib`-mode CI, where five-way parallelism is safe. The mode-aware default (serial only under `src`) gets the determinism without the CI cost.
 
 ## Consequences
 
