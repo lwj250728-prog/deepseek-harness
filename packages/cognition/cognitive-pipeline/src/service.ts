@@ -2268,17 +2268,28 @@ export class CognitivePipelineService extends Service {
    * non-terminal variant candidate's action (hash-bag cosine at/above the
    * temp-strategy match threshold), the report's quality settles that
    * candidate — a variant is tested by being actually executed, not by fiat.
+   * Only the BEST-matching candidate is settled: same-family variants share
+   * their base action text, so settling every candidate above the threshold
+   * would stamp one real execution's quality onto siblings that were never
+   * run (real-data lesson from the restart-domain candidates).
    * @param action - the reported action text.
    * @param outcomeQuality - the report's result quality.
    */
   private async foldVariantFeedback(action: string, outcomeQuality: number): Promise<void> {
     const vector = actionVector(action, [])
     const threshold = this.resolved.hot.tempStrategyMatchThreshold
+    let best: VariantCandidate | undefined
+    let bestScore = threshold
     for (const candidate of this.store.variantsSnapshot()) {
       if (candidate.status !== 'proposed' && candidate.status !== 'testing') continue
-      if (cosine(vector, actionVector(candidate.variantAction, [])) >= threshold) {
-        await this.settleVariant(candidate.variantId, outcomeQuality)
+      const score = cosine(vector, actionVector(candidate.variantAction, []))
+      if (score >= bestScore) {
+        best = candidate
+        bestScore = score
       }
+    }
+    if (best !== undefined) {
+      await this.settleVariant(best.variantId, outcomeQuality)
     }
   }
 

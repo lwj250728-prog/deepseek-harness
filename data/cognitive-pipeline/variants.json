@@ -1,1 +1,61 @@
-[{"variantId":"variant-1","sourceStrategyId":"solidified-1","sourceExpId":null,"baseAction":"调用 scripts/dsh-web-autorestart.ps1（独立进程）重启 DSH Web","variantAction":"调用 scripts/dsh-web-autorestart.ps1（独立进程）重启 DSH Web，但在调用前增加一项前置校验：检查 logs/restart-result.json 是否存在且 ok=true。若存在，则先删除该文件再执行重启脚本。","verificationAnchor":"logs/restart-result.json ok=true AND selfPerformed=true","perturbedAspect":"前置校验","rationale":"3 次未通过锚点可能是由于遗留的 ok=true 结果文件未清理，导致锚点读取到旧数据；删除后再执行可确保锚点反映本次重启的真实结果。","status":"proposed","settlements":[],"createdAt":1787594285772,"updatedAt":1787594285772},{"variantId":"variant-2","sourceStrategyId":"solidified-1","sourceExpId":null,"baseAction":"调用 scripts/dsh-web-autorestart.ps1（独立进程）重启 DSH Web","variantAction":"调用 scripts/dsh-web-autorestart.ps1（独立进程）重启 DSH Web，但将脚本执行方式改为等待该进程结束（非后台异步），并在脚本退出码非 0 时立即重试一次。","verificationAnchor":"logs/restart-result.json ok=true AND selfPerformed=true","perturbedAspect":"执行方式","rationale":"独立进程可能因未同步等待而提前返回，导致锚点检查时重启尚未完成；改为同步等待并增加重试可提升稳定性。","status":"proposed","settlements":[],"createdAt":1787594285772,"updatedAt":1787594285772},{"variantId":"variant-3","sourceStrategyId":"solidified-1","sourceExpId":null,"baseAction":"调用 scripts/dsh-web-autorestart.ps1（独立进程）重启 DSH Web","variantAction":"调用 scripts/dsh-web-autorestart.ps1（独立进程）重启 DSH Web，但在执行脚本前先检查端口 3080 的监听状态，若已监听则强制终止对应进程，再执行重启脚本。","verificationAnchor":"logs/restart-result.json ok=true AND selfPerformed=true","perturbedAspect":"前置校验逻辑","rationale":"现有前置只确认端口存在监听，但可能监听进程已僵死；强制终止旧进程可避免重启脚本因端口被占用而失败，提高锚点通过率。","status":"proposed","settlements":[],"createdAt":1787594285772,"updatedAt":1787594285772}]
+﻿[
+    {
+        "variantId":  "variant-1",
+        "sourceStrategyId":  "solidified-1",
+        "sourceExpId":  null,
+        "baseAction":  "调用 scripts/dsh-web-autorestart.ps1（独立进程）重启 DSH Web",
+        "variantAction":  "调用 scripts/dsh-web-autorestart.ps1（独立进程）重启 DSH Web，但在调用前增加一项前置校验：检查 logs/restart-result.json 是否存在且 ok=true。若存在，则先删除该文件再执行重启脚本。",
+        "verificationAnchor":  "logs/restart-result.json ok=true AND selfPerformed=true",
+        "perturbedAspect":  "前置校验",
+        "rationale":  "3 次未通过锚点可能是由于遗留的 ok=true 结果文件未清理，导致锚点读取到旧数据；删除后再执行可确保锚点反映本次重启的真实结果。",
+        "status":  "adopted",
+        "settlements":  [
+                            {
+                                "ts":  1787595028860,
+                                "quality":  8
+                            },
+                            {
+                                "ts":  1787595120945,
+                                "quality":  8
+                            },
+                            {
+                                "ts":  1787595132101,
+                                "quality":  8
+                            }
+                        ],
+        "createdAt":  1787594285772,
+        "updatedAt":  1787595132101
+    },
+    {
+        "variantId":  "variant-2",
+        "sourceStrategyId":  "solidified-1",
+        "sourceExpId":  null,
+        "baseAction":  "调用 scripts/dsh-web-autorestart.ps1（独立进程）重启 DSH Web",
+        "variantAction":  "调用 scripts/dsh-web-autorestart.ps1（独立进程）重启 DSH Web，但将脚本执行方式改为等待该进程结束（非后台异步），并在脚本退出码非 0 时立即重试一次。",
+        "verificationAnchor":  "logs/restart-result.json ok=true AND selfPerformed=true",
+        "perturbedAspect":  "执行方式",
+        "rationale":  "独立进程可能因未同步等待而提前返回，导致锚点检查时重启尚未完成；改为同步等待并增加重试可提升稳定性。",
+        "status":  "proposed",
+        "settlements":  [
+
+                        ],
+        "createdAt":  1787594285772,
+        "updatedAt":  1787595164171
+    },
+    {
+        "variantId":  "variant-3",
+        "sourceStrategyId":  "solidified-1",
+        "sourceExpId":  null,
+        "baseAction":  "调用 scripts/dsh-web-autorestart.ps1（独立进程）重启 DSH Web",
+        "variantAction":  "调用 scripts/dsh-web-autorestart.ps1（独立进程）重启 DSH Web，但在执行脚本前先检查端口 3080 的监听状态，若已监听则强制终止对应进程，再执行重启脚本。",
+        "verificationAnchor":  "logs/restart-result.json ok=true AND selfPerformed=true",
+        "perturbedAspect":  "前置校验逻辑",
+        "rationale":  "现有前置只确认端口存在监听，但可能监听进程已僵死；强制终止旧进程可避免重启脚本因端口被占用而失败，提高锚点通过率。",
+        "status":  "proposed",
+        "settlements":  [
+
+                        ],
+        "createdAt":  1787594285772,
+        "updatedAt":  1787595164175
+    }
+]

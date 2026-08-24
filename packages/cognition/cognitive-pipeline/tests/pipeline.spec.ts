@@ -734,6 +734,62 @@ describe('cognitive pipeline integration', () => {
     }
   })
 
+  it('settles only the best-matching variant from a reported action', async () => {
+    // Same-family variants share their base text; one real execution must
+    // settle only the candidate it actually matches best, not every sibling
+    // above the cosine threshold (the real-data pollution lesson).
+    const script = [JSON.stringify({
+      variants: [
+        { variant_action: '重启前清理遗留结果文件', perturbed_aspect: '前置校验', rationale: '避免锚点误判' },
+        { variant_action: '重启前强制终止僵死进程', perturbed_aspect: '前置校验', rationale: '避免端口占用' },
+      ],
+    })]
+    const { ctx, teardown } = await pipelineHarness({ provider: 'cognition-test', model: 'm' }, script)
+    try {
+      ctx.cognitivePipeline.solidifyStrategy({
+        goalDomain: '重启',
+        action: '调用重启脚本',
+        verificationAnchor: 'logs/restart-result.json ok=true',
+        preChecks: [],
+      })
+      await ctx.cognitivePipeline.generateStrategyVariants('solidified-1')
+      expect(ctx.cognitivePipeline.variantCandidates()).toHaveLength(2)
+
+      // Report an action matching the FIRST candidate verbatim.
+      ctx.cognitivePipeline.store.addPrediction({
+        predictionId: 'pred_best',
+        expId: null,
+        situation: '重启',
+        action: '重启前清理遗留结果文件',
+        predictedOutcome: 'x',
+        rawProbability: 0.5,
+        calibratedProbability: 0.5,
+        confidenceLow: 0.25,
+        confidenceHigh: 0.75,
+        isNovel: true,
+        usedTempStrategy: false,
+        clusterId: null,
+        exploredActionHash: null,
+        timestamp: Date.now(),
+        actualOutcome: null,
+        predictionError: null,
+        resolvedAt: null,
+        fusion: null,
+      })
+      await ctx.cognitivePipeline.report({
+        predictionId: 'pred_best',
+        actualOutcome: '清理完成',
+        outcomeQuality: 8,
+      })
+      const settled = ctx.cognitivePipeline.variantCandidates()
+        .filter(candidate => candidate.settlements.length > 0)
+      expect(settled).toHaveLength(1)
+      expect(settled[0]?.variantAction).toBe('重启前清理遗留结果文件')
+    } finally {
+      await teardown()
+    }
+  })
+
   it('does not accumulate when the LLM gate rejects', async () => {    const { ctx, teardown } = await pipelineHarness(
     { provider: 'cognition-test', model: 'm', autoAccumulate: true },
     [JSON.stringify({ should_accumulate: false })],
