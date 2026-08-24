@@ -33,4 +33,5 @@ keyless 快照套件（`vitest.snapshot.config.ts`）在三种特定条件下不
 - 快照套件现在在默认并发下可靠通过，Windows 上平台可运行的场景也通过；驱动 bash 的场景跳过而不失败，CI 保持完整覆盖。
 - `{{cwd}}` JSONL 损坏——被 POSIX 安全路径掩盖的 Windows 专属潜在 bug——在源头修复，未来任何 fixture 水合在所有平台安全。
 - 成本：两个测试文件改动（期限常量 + 跳过）、一行 JSON 转义、`skipOn` 场景字段。无运行时代码改动。
+- `{{cwd}}` 损坏为何三周未被发现（2026-07-29 引入，2026-08-24 修复）：三层掩盖。CI 跑 Linux/macOS，cwd 是 `/`——JSON 安全，水合后的 JSONL 总能解析；只有 `sdk.snapshot` 把 `{{cwd}}` 嵌在 JSON 字符串值里（session header、工具参数），反斜杠在那里是非法转义；且极少有人在 Windows 跑 `test:snapshot`。值得注意的是读取端一直是对的——`tokenizeSessionFixtureCwd` 用 `JSON.stringify` 重新序列化（自动转义反斜杠）——只有写入端（`hydrateReplayFixtures`）漏了转义。单平台 CI 结构性看不见这类 bug；它之所以在此暴露，是因为套件在 Windows 上被重复运行，并发超时信号把注意力引到了该文件。
 - 已知遗留：`apps/cli/tests/dsh-badge.snapshot.ts` 在 Windows 上挂起超 90 秒——父进程被杀后子进程树仍持有 stdout，`execa` 永不结算；这是独立的进程树/stdio 问题，不是期限问题，本 Note 未处理。
