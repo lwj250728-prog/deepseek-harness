@@ -667,6 +667,73 @@ describe('cognitive pipeline integration', () => {
     }
   })
 
+  it('triggers variant generation for a stranded rework-flagged strategy', async () => {
+    // A strategy whose deviation gate crossed before any candidate existed
+    // (freshlyCrossed already consumed, or flagged pre-mechanism) must still
+    // get accommodation when a later use settles: the trigger covers the
+    // "already reworkNeeded with no active candidate" shape, not just the
+    // was-clean→now-flagged transition.
+    const script = [JSON.stringify({
+      variants: [
+        { variant_action: '重启前先验证 SSH 配置', perturbed_aspect: '前置校验', rationale: 'SSH 失效导致拉起失败' },
+      ],
+    })]
+    const { ctx, teardown } = await pipelineHarness({ provider: 'cognition-test', model: 'm' }, script)
+    try {
+      ctx.cognitivePipeline.solidifyStrategy({
+        goalDomain: '重启',
+        action: '调用重启脚本',
+        verificationAnchor: 'logs/restart-result.json ok=true',
+        preChecks: [],
+      })
+      // Drive the deviation gate to reworkNeeded without any variant trigger:
+      // 4 uses, 2 failures (2/4 = 50% ≥ threshold) — folded directly, so the
+      // settlement below is the FIRST accommodation opportunity.
+      for (let index = 0; index < 4; index += 1) {
+        ctx.cognitivePipeline.store.foldSolidifiedStrategyUsage('solidified-1', index % 2 === 0)
+      }
+      expect(ctx.cognitivePipeline.solidifiedStrategyFor('重启')?.reworkNeeded).toBe(true)
+      expect(ctx.cognitivePipeline.variantCandidates()).toHaveLength(0)
+
+      // A pending injection settles at turn end: even though this positive use
+      // pulls the violated ratio under the threshold (2/4 → 2/5), the strategy
+      // WAS rework-flagged before the fold, so the stranded trigger generates.
+      ctx.cognitivePipeline.store.recordInjection({
+        injectionId: 'inject_stranded',
+        createdAt: Date.now(),
+        expIds: ['exp_test'],
+        triggerSource: 'static:重启',
+        jumpWords: [],
+        chainId: null,
+        strategyId: 'solidified-1',
+        sessionId: 'session-stranded',
+        cited: null,
+      })
+      await ctx.cognitivePipeline.settleInjectionCitations('session-stranded', '重启完成 exp_test')
+      const candidates = ctx.cognitivePipeline.variantCandidates()
+      expect(candidates.length).toBeGreaterThan(0)
+      expect(candidates[0]?.sourceStrategyId).toBe('solidified-1')
+      expect(candidates[0]?.status).toBe('proposed')
+
+      // A second settlement with active candidates does NOT duplicate them.
+      ctx.cognitivePipeline.store.recordInjection({
+        injectionId: 'inject_stranded_2',
+        createdAt: Date.now(),
+        expIds: ['exp_test'],
+        triggerSource: 'static:重启',
+        jumpWords: [],
+        chainId: null,
+        strategyId: 'solidified-1',
+        sessionId: 'session-stranded',
+        cited: null,
+      })
+      await ctx.cognitivePipeline.settleInjectionCitations('session-stranded', '重启完成 exp_test')
+      expect(ctx.cognitivePipeline.variantCandidates()).toHaveLength(1)
+    } finally {
+      await teardown()
+    }
+  })
+
   it('does not accumulate when the LLM gate rejects', async () => {    const { ctx, teardown } = await pipelineHarness(
     { provider: 'cognition-test', model: 'm', autoAccumulate: true },
     [JSON.stringify({ should_accumulate: false })],

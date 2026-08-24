@@ -1984,16 +1984,26 @@ export class CognitivePipelineService extends Service {
         // off (P2-1: the lifecycle was previously dead code with no caller).
         const before = this.store.getSolidifiedStrategy(record.strategyId)
         this.store.foldSolidifiedStrategyUsage(record.strategyId, mentioned)
-        // Rework newly triggered (was clean, now flagged): the strategy's
-        // deviation gate crossed, so accommodation starts — generate variant
-        // candidates that perturb one step while keeping the anchor unchanged.
-        // Generation is best-effort: no route degrades to zero candidates.
+        // Rework triggers accommodation: generate variant candidates that
+        // perturb one step while keeping the anchor unchanged. The trigger
+        // reads the PRE-fold gate state too: a positive use can pull the
+        // violated ratio under the threshold (e.g. 2/4 = 50% → 2/5 = 40%),
+        // which must not strand a strategy that already crossed. Two shapes
+        // fire — the strategy was or is rework-flagged with no active
+        // candidate (freshly crossed, crossed pre-mechanism, or every
+        // candidate consumed). Generation is best-effort: no route degrades
+        // to zero candidates.
         const after = this.store.getSolidifiedStrategy(record.strategyId)
-        if (after !== undefined && after.reworkNeeded && before?.reworkNeeded !== true) {
-          try {
-            await this.generateStrategyVariants(record.strategyId)
-          } catch (error) {
-            this.ctx.logger.warn(`cognitive-pipeline: variant generation for ${record.strategyId} failed: ${String(error)}`)
+        if (after !== undefined && (before?.reworkNeeded === true || after.reworkNeeded)) {
+          const stranded = this.store.variantsSnapshot().some(candidate =>
+            candidate.sourceStrategyId === record.strategyId
+            && (candidate.status === 'proposed' || candidate.status === 'testing'))
+          if (!stranded) {
+            try {
+              await this.generateStrategyVariants(record.strategyId)
+            } catch (error) {
+              this.ctx.logger.warn(`cognitive-pipeline: variant generation for ${record.strategyId} failed: ${String(error)}`)
+            }
           }
         }
       }
