@@ -7,7 +7,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
-import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
+import { ConversationEventRegistry, SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
 import { stubSettingsScope } from '@deepseek-ai/dsh-client-test-runtime'
 import { apply as applyLocale, inject as localeInject } from '@deepseek-ai/dsh-client-locale/client'
 import { apply, inject } from '../src/client/index.ts'
@@ -15,7 +15,8 @@ import { apply as applyNode } from '../src/index.ts'
 import * as CognitionInvariant from '../src/invariant.ts'
 import { en, NS, zh } from '../src/client/locales.ts'
 
-/** Boot the browser half over a real slot tree that declares the sidebar + learning hole. */
+/** Boot the browser half over a real slot tree that declares the sidebar +
+ * learning hole and the conversation event registry the bubble node binds. */
 async function bench(): Promise<{ ctx: Context; fiber: ReturnType<Context['plugin']> }> {
   const ctx = new Context()
   await ctx.plugin(SlotRegistry).await()
@@ -23,6 +24,7 @@ async function bench(): Promise<{ ctx: Context; fiber: ReturnType<Context['plugi
     name: 'root',
     children: {
       'sidebar': { kind: 'single', scope: 'root' },
+      'conversation.view': { kind: 'list', scope: 'session' },
     },
   } as never, () => null)
   ctx.slots.register({
@@ -31,12 +33,20 @@ async function bench(): Promise<{ ctx: Context; fiber: ReturnType<Context['plugi
       'sidebar.learning': { kind: 'single', scope: 'root' },
     },
   } as never, () => null)
+  ctx.slots.register({
+    name: 'conversation.view',
+    id: 'chat',
+    children: {
+      'conversation.chat.node': { kind: 'keyed', scope: 'session' },
+    },
+  } as never, () => null)
   ctx.provide('sessions', {})
   // The locale plugin binds a settings scope, which reads the connection handle
   // and the forwarded-event port.
   ctx.provide('connection', { api: { settings: {} }, isLoopback: false } as never)
   ctx.provide('remote', { $on: () => () => {} } as never)
   ctx.provide('settingsScope', { bind: () => stubSettingsScope().scope } as never)
+  await ctx.plugin(ConversationEventRegistry).await()
   await ctx.plugin({ inject: localeInject, apply: applyLocale }).await()
   const fiber = ctx.plugin({ inject: [...inject], apply })
   await fiber.await()
@@ -45,7 +55,7 @@ async function bench(): Promise<{ ctx: Context; fiber: ReturnType<Context['plugi
 
 describe('ui-cognition browser half', () => {
   it('declares the services it binds', () => {
-    expect(inject).toEqual(['slots', 'locale', 'connection'])
+    expect(inject).toEqual(['slots', 'locale', 'connection', 'conversationEvents'])
   })
 
   it('registers the learning-area occupant, and fiber teardown removes it (HMR safety)', async () => {

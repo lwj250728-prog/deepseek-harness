@@ -27,6 +27,14 @@ export const zh = {
   'list.aria': '学习任务列表',
   'refresh.aria': '刷新学习任务',
   'error.load': '加载学习任务失败',
+  'bubble.title': '本回合认知沉淀',
+  'bubble.experiences': '新经验 {count} 条',
+  'bubble.citations': '引用 {cited}/{settled} 条注入',
+  'bubble.resolved': '结算 {count} 次',
+  'bubble.expand.aria': '展开认知沉淀明细',
+  'bubble.collapse.aria': '收起认知沉淀明细',
+  'bubble.topic.prefix': '主题：',
+  'bubble.empty.detail': '无明细',
 } as const
 
 /** English dictionary, key-identical to the Chinese source of truth. */
@@ -53,6 +61,14 @@ export const en: Record<CognitionKey, string> = {
   'list.aria': 'Learning task list',
   'refresh.aria': 'Refresh learning tasks',
   'error.load': 'Failed to load learning tasks',
+  'bubble.title': 'This turn\'s cognition',
+  'bubble.experiences': '{count} new experience(s)',
+  'bubble.citations': '{cited}/{settled} injections cited',
+  'bubble.resolved': '{count} prediction(s) resolved',
+  'bubble.expand.aria': 'Expand cognition detail',
+  'bubble.collapse.aria': 'Collapse cognition detail',
+  'bubble.topic.prefix': 'Topic: ',
+  'bubble.empty.detail': 'No detail',
 }
 
 /** Key domain of the `cognition` namespace (zh is the source of truth). */

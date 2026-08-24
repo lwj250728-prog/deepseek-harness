@@ -12,6 +12,9 @@
       "path": "../../../vendor/cordis"
     },
     {
+      "path": "../../core/session"
+    },
+    {
       "path": "../locale"
     },
     {
@@ -22,6 +25,9 @@
     },
     {
       "path": "../ui-primitives"
+    },
+    {
+      "path": "../ui-conversation"
     },
     {
       "path": "../ui-sidebar"

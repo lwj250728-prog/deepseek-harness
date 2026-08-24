@@ -8,8 +8,13 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+// Type-only: pulls ui-conversation's SlotMap merge (the 'conversation.chat.node'
+// entry) into every program that sees this plugin's chat renderer registration.
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { LearningInjected } from './contract/slots.ts'
 import { LearningArea } from './LearningArea.tsx'
+import { CognitionSummaryNodeView } from './CognitionSummaryNodeView.tsx'
+import { registerCognitionSummaryNode } from './conversation-nodes/cognition-summary.ts'
 import { createLearningStore } from './store.ts'
 import { en, NS, zh, type CognitionKey } from './locales.ts'
 export { createLearningStore } from './store.ts'
@@ -18,6 +23,7 @@ export type {
   LearningFilter, LearningInjected, LearningState,
 } from './contract/slots.ts'
 export type { CognitionKey } from './locales.ts'
+export type { CognitionSummaryChatData, TurnCognitionSummaryWire } from './conversation-nodes/cognition-summary.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -26,17 +32,25 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
-/** Required services: the slot registry, the locale seat, and the carrier. */
-export const inject = ['slots', 'locale', 'connection']
+/** Required services: the slot registry, the locale seat, the carrier, and
+ * the conversation event registry (for the per-turn cognition bubble). */
+export const inject = ['slots', 'locale', 'connection', 'conversationEvents']
 
 /**
- * Client plugin body: register the `cognition` dictionaries and the learning
- * area into the sidebar hole, with a store for the fetched snapshot and an
- * inject face that owns the RPC.
+ * Client plugin body: register the `cognition` dictionaries, the learning
+ * area into the sidebar hole, and the per-turn cognition bubble into the chat
+ * stream (both with the store/inject faces they need).
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-cognition: dictionaries')
+
+  // The per-turn cognition bubble: engine node + keyed chat renderer.
+  registerCognitionSummaryNode(ctx)
+  ctx.slots.inject('conversation.chat.node', () => ctx.slots.register(
+    { name: 'conversation.chat.node', key: 'cognition-summary', locale: NS },
+    CognitionSummaryNodeView,
+  ))
 
   ctx.slots.inject('sidebar.learning', () => ctx.slots.register(
     {

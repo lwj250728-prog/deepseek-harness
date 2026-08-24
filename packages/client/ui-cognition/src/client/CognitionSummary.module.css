@@ -1,0 +1,92 @@
+/* Turn cognition bubble: a compact, expandable row in the chat stream that
+   summarizes the completed turn's cognition activity. Quiet turns never render
+   one (the host event only fires on activity). */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  width: fit-content;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: 2px 0 6px;
+  padding: 2px 4px;
+  border: 1px solid var(--dsw-alias-border-subtle, var(--dsw-color-border, rgba(128, 128, 128, 0.25)));
+  border-radius: 8px;
+  background: var(--dsw-alias-surface-soft, transparent);
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.toggle:hover,
+.toggle:focus-visible {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-surface-hover, rgba(128, 128, 128, 0.08));
+}
+
+.chevron {
+  flex: 0 0 auto;
+}
+
+.title {
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+
+.counts {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.separator {
+  margin: 0 5px;
+  opacity: 0.6;
+}
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 0;
+  padding: 4px 6px 2px 22px;
+  list-style: none;
+  border-top: 1px solid var(--dsw-alias-border-subtle, rgba(128, 128, 128, 0.15));
+}
+
+.detailRow {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.expId {
+  flex: 0 0 auto;
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.topic {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+}
