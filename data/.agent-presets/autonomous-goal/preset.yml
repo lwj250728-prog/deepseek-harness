@@ -1,0 +1,3 @@
+name: 自主目标
+description: 设定最终目标后，agentloop 自动持续执行直到完成；模型自动用 create_goal 设立目标，/goal 可查看与编辑。
+order: 5

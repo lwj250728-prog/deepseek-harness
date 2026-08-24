@@ -1,0 +1,97 @@
+# The `autonomous-goal` agent preset: 自主目标 — set a final goal, let the
+# agent loop run continuously.
+#
+# The goal domain (`goal`), the automatic same-session round driver
+# (`goal-round-driver`), and the `/goal` command are mounted at the HOST plane
+# (dsh-base bundle), so every session already carries them. This preset turns
+# goal-driven autonomy into the session's mode: a goal-loop persona plus the
+# model-facing goal tool, on the proven minimal tool base (persistent shell +
+# str_replace_editor + bare fs-local).
+#
+# Two deliberate changes from the copied `self-minimal` preset:
+# 1. Persona rewritten for goal-driven autonomous execution. It stays WITHOUT
+#    `complete: true` so the host's dynamic `cognition:taxonomy` section keeps
+#    appearing; `includeRuntimeContext: false` stays for the minimal token diet.
+# 2. `tool-goal` mounted explicitly: it publishes nothing (tools and the
+#    `tool:goal` prompt section register into scope layers, where this preset's
+#    instance shadows the host's), so it sits loose like `tool-bash`. The row
+#    keeps the mode's goal-tool policy per-preset configurable.
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      你是自主目标执行代理，运行在「自主目标」会话模式。面对需要多轮才能完成的长期目标请求时，
+      立即用 create_goal 设立最终目标——可以从请求中直接推断意图，不需要用户明说"建个目标"，
+      并按需设置轮次上限；不要为单轮琐事创建目标。目标建立后由系统自动持续驱动 agentloop：
+      每一轮会自动提示你继续推进，不需要用户反复催促或确认。
+      每一轮：把当前工作区、工具结果与会话状态当作权威事实，先检查再行动；做出具体进展并验证结果；
+      目标整体真正达成且有证据时，用 update_goal 标记 complete（系统会据此输出收尾总结）；
+      同一阻塞条件持续多轮仍无法推进时，用 update_goal 标记 blocked 并写明具体阻塞原因。
+      会话恢复或分支后目标处于未武装状态：用户以任何措辞要求继续时，先用 update_goal resume 重新武装。
+      用户的即时新指令优先于旧目标；目标需要调整时用 update_goal edit。
+
+# Model-facing goal tools. The goal SERVICE, its session round driver, and the
+# `/goal` command stay on the host plane; this row re-mounts only the tool.
+- id: tool-goal
+  name: '@deepseek-ai/dsh-tool-goal'
+  config:
+    blockedAfterConsecutiveRounds: 3
+
+# Persistent PTY + bash, entry-local realm — verbatim from self-minimal.
+- id: persistent-shell
+  name: cordis:group
+  group: true
+  isolate:
+    terminals: true
+  config:
+    - id: pty
+      name: '@deepseek-ai/dsh-terminal'
+
+    - id: terminal-bash
+      name: '@deepseek-ai/dsh-terminal-bash'
+      config:
+        timeoutMs: 300000
+
+    - id: persistent-bash
+      name: '@deepseek-ai/dsh-tool-bash-persistent'
+      config:
+        timeoutMs: 300000
+        description: |-
+          Run commands in a bash shell
+          * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
+          * You don't have access to the internet via this tool.
+          * You do have access to a mirror of common linux and python packages via apt and pip.
+          * State is persistent across command calls and discussions with the user.
+          * To inspect a particular line range of a file, e.g. lines 10-25, try 'sed -n 10,25p /path/to/the/file'.
+          * Please avoid commands that may produce a very large amount of output.
+          * Please run long lived commands in the background, e.g. 'sleep 10 &' or start a server in the background.
+
+# Bare local filesystem, entry-local realm — verbatim from self-minimal.
+# SECURITY NOTE: this shadows the host's sandboxed fs provider (sandboxMode
+# undefined = unsandboxed). For the sandboxed variant, delete this group and
+# let str_replace_editor resolve the host fs service instead.
+- id: filesystem
+  name: cordis:group
+  group: true
+  isolate:
+    fs: true
+  config:
+    - id: fs-local
+      name: '@deepseek-ai/dsh-fs-local'
+      config:
+        cwd: !!js process.env.DSH_CWD ?? process.cwd()
+
+    - id: str-replace-editor
+      name: '@deepseek-ai/dsh-tool-str-replace-editor'
+      config:
+        maxOutputChars: 16000
+
+# Model-facing web search tool. The `web` service and its search provider
+# (dsh-web-search-deepseek, DEEPSEEK_API_KEY) stay on the host plane; this row
+# re-mounts only the tool, matching the standard preset's choice (fetch disabled).
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: false
+    searchTimeoutMs: 60000
