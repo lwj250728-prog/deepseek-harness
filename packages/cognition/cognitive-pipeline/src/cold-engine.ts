@@ -90,6 +90,33 @@ function meanUtilityScore(utility: OutcomeUtility): number {
   return utilityScore(utility)
 }
 
+/** Clamp a number into [0, 10] (mirrors the store's feedback label clamp). */
+function clampLabel(value: number): number {
+  return Math.min(10, Math.max(0, Math.round(value)))
+}
+
+/**
+ * The experience's clustering vector with result evidence folded in
+ * (constraint 5): when real settlement samples exist, the material-gain slot
+ * is synthesized from the MEASURED mean quality (5 + (μ−5)·0.8, the same
+ * scaling resolvePrediction uses) instead of the self-reported utility — the
+ * cluster axis reflects what was actually verified, not what the record
+ * claimed. Experiences without samples keep their self-reported vector, so
+ * legacy and young records are unaffected.
+ * @param exp - the experience to vectorize for clustering.
+ * @returns the evidence-aware outcome vector.
+ */
+function clusterVectorOf(exp: Experience): readonly number[] {
+  const samples = exp.settlements ?? []
+  if (samples.length === 0) return exp.outcomeVector
+  const mean = samples.reduce((sum, sample) => sum + sample.quality, 0) / samples.length
+  const utility: OutcomeUtility = {
+    ...exp.sar.outcomeUtility,
+    materialGain: clampLabel(5 + (mean - 5) * 0.8),
+  }
+  return outcomeVector(utility, exp.sar.outcome)
+}
+
 /** Centroid of outcome vectors, re-normalized. */
 function centroidOf(vectors: readonly (readonly number[])[]): number[] {
   const dim = vectors[0]?.length ?? 0
@@ -176,7 +203,7 @@ function verifyEvidence(
   let maxDistanceSeen = 0
   for (let i = 0; i < evidence.length; i += 1) {
     for (let j = i + 1; j < evidence.length; j += 1) {
-      const distance = 1 - cosine((evidence[i] as Experience).outcomeVector, (evidence[j] as Experience).outcomeVector)
+      const distance = 1 - cosine(clusterVectorOf(evidence[i] as Experience), clusterVectorOf(evidence[j] as Experience))
       maxDistanceSeen = Math.max(maxDistanceSeen, distance)
     }
   }
@@ -253,7 +280,7 @@ export class ColdEngine {
 
     // ── utility-space clustering ──────────────────────────────────────────
     const groups = agglomerate(
-      train.map(exp => exp.outcomeVector),
+      train.map(exp => clusterVectorOf(exp)),
       this.config.clusterMergeCosine,
     ).filter(group => group.memberIndices.length >= this.config.evidenceMinCount)
 
@@ -299,7 +326,7 @@ export class ColdEngine {
           expectedUtilityRange: cluster.expectedUtilityRange,
           evidenceIds: cluster.supportingEvidenceIds,
           fallbackAction: cluster.fallbackAction,
-          centroid: centroidOf(evidence.map(exp => exp.outcomeVector)),
+          centroid: centroidOf(evidence.map(exp => clusterVectorOf(exp))),
           meanUtility: mean,
           polarity: meanUtilityScore(mean) > 0 ? 'success' : 'risk',
         }
@@ -611,7 +638,7 @@ export class ColdEngine {
       let best = -1
       let bestScore = this.config.clusterMatchCosine
       for (const view of taxonomy) {
-        const score = cosine(exp.outcomeVector, view.centroid)
+        const score = cosine(clusterVectorOf(exp), view.centroid)
         if (score >= bestScore) {
           bestScore = score
           best = view.meanUtility.materialGain / 10
@@ -661,7 +688,7 @@ export class ColdEngine {
 
     for (const candidate of candidates) {
       const clusterId = this.store.nextClusterId()
-      const members = all.filter(exp => cosine(exp.outcomeVector, candidate.centroid) >= this.config.clusterMatchCosine)
+      const members = all.filter(exp => cosine(clusterVectorOf(exp), candidate.centroid) >= this.config.clusterMatchCosine)
       if (members.length === 0) continue
       let cumError = 0
       for (const member of members) {
@@ -746,7 +773,7 @@ export class ColdEngine {
       const cluster = clusters[index] as Cluster
       const evidence = cluster.supportingEvidenceIds.map(id => byId.get(id)).filter((exp): exp is Experience => exp !== undefined)
       if (evidence.length === 0) continue
-      const centroid = centroidOf(evidence.map(exp => exp.outcomeVector))
+      const centroid = centroidOf(evidence.map(exp => clusterVectorOf(exp)))
       const score = cosine(strategyVector, centroid)
       if (score >= bestScore) {
         bestScore = score
