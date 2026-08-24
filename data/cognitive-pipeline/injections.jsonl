@@ -65,4 +65,4 @@
 {"injectionId":"inject_65","createdAt":1787568666957,"expIds":["exp_87"],"triggerSource":"static:经验","jumpWords":[],"chainId":null,"strategyId":null,"sessionId":"session-e36ad4e4-8ee7-47b5-82da-0e0dce12e704","cited":false}
 {"injectionId":"inject_66","createdAt":1787590785351,"expIds":["exp_1"],"triggerSource":"derived:重","jumpWords":[],"chainId":null,"strategyId":"solidified-1","sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":false}
 {"injectionId":"inject_67","createdAt":1787593197126,"expIds":["exp_4"],"triggerSource":"static:检查","jumpWords":[],"chainId":null,"strategyId":null,"sessionId":"session-467b7eb7-6dd6-44ca-8c7d-a24a8c3395e3","cited":false}
-{"injectionId":"inject_68","createdAt":1787594975817,"expIds":["exp_255"],"triggerSource":"derived:机","jumpWords":[],"chainId":null,"strategyId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":null}
+{"injectionId":"inject_68","createdAt":1787594975817,"expIds":["exp_255"],"triggerSource":"derived:机","jumpWords":[],"chainId":null,"strategyId":null,"sessionId":"session-a158869c-6ee4-4ffc-856e-e735c256f305","cited":false}
