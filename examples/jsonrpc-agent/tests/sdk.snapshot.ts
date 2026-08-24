@@ -79,6 +79,9 @@ interface SdkScenario {
   expectedToolDescriptions?: Readonly<Record<string, string>>
   /** Expected runtime-context state in the real assembled request. */
   runtimeContext?: false | { includes: readonly string[]; excludes: readonly string[] }
+  /** Platforms this scenario cannot run on (e.g. a real bash subprocess on
+   * Windows); the scenario is skipped there instead of failing. */
+  skipOn?: readonly NodeJS.Platform[]
 }
 
 const SCENARIOS: SdkScenario[] = [
@@ -93,6 +96,8 @@ const SCENARIOS: SdkScenario[] = [
     prompt: 'Run this exact command with your bash tool, then reply with its stdout only: echo dsh-sdk-proof-7391',
     sessionId: 'sdk-snapshot-bash',
     children: 0,
+    // The scenario drives a real bash subprocess; Windows has no bash to spawn.
+    skipOn: ['win32'],
   },
   {
     name: 'subagent-spawn-in-process',
@@ -112,6 +117,8 @@ const SCENARIOS: SdkScenario[] = [
     expectedSystem: MINIMAL_SYSTEM_PROMPT,
     expectedToolDescriptions: { bash: MINIMAL_BASH_DESCRIPTION },
     runtimeContext: false,
+    // The scenario drives a real persistent bash shell; Windows has no bash.
+    skipOn: ['win32'],
   },
 ]
 
@@ -210,9 +217,15 @@ function contextOfContents(contents: readonly string[]): NormalizeContext {
 async function hydrateReplayFixtures(scenario: SdkScenario, cwd: string): Promise<string[]> {
   const root = join(cwd, '.replay-fixtures')
   await mkdir(root, { recursive: true })
+  // The tokenized fixtures embed `{{cwd}}` inside JSON string values (session
+  // headers, tool arguments). On Windows the real cwd carries backslashes,
+  // which must be JSON-escaped here or the hydrated JSONL fails to parse
+  // ("Bad escaped character") inside llm-replay. POSIX cwds use '/', which is
+  // JSON-safe and passes through untouched.
+  const cwdInJson = cwd.replaceAll('\\', '\\\\')
   return Promise.all(fixtureFiles(scenario).map(async (source) => {
     const destination = join(root, basename(source))
-    await writeFile(destination, (await readFile(source, 'utf8')).replaceAll('{{cwd}}', cwd))
+    await writeFile(destination, (await readFile(source, 'utf8')).replaceAll('{{cwd}}', cwdInJson))
     return destination
   }))
 }
@@ -345,7 +358,7 @@ function fixtureFiles(scenario: SdkScenario): string[] {
 
 describe('TypeScript SDK snapshots over the jsonrpc runtime', () => {
   for (const scenario of SCENARIOS) {
-    it(`replays ${scenario.name} through the SDK`, async () => {
+    it.skipIf(scenario.skipOn?.includes(process.platform) ?? false)(`replays ${scenario.name} through the SDK`, async () => {
       const scenarioDir = join(snapshotsDir, scenario.name)
       const notificationsExpectedPath = join(scenarioDir, 'notifications.expected.jsonl')
       const resultExpectedPath = join(scenarioDir, 'result.expected.json')

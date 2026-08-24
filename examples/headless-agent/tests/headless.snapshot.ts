@@ -20,6 +20,16 @@ import {
 } from '@deepseek-ai/dsh-session-persistence-jsonl/src/zstd.ts'
 import { describe, expect, it } from 'vitest'
 
+// The subprocess deadline these assembled-headless smokes pass to runLoaderSmoke:
+// src/tsx boot under concurrency outgrows the shared 30s default, while the vitest
+// deadline (LOADER_SMOKE_TEST_TIMEOUT_MS = 45s) must keep 5s of margin.
+const HEADLESS_PROCESS_TIMEOUT_MS = 40_000
+// The full CLI (`--profile headless --patch`) boot under tsx is the heaviest
+// launch in this file and outgrows even the 40s subprocess deadline; its wall
+// time fluctuates near 60s, so the budget leaves real headroom.
+const HEADLESS_PROFILE_PROCESS_TIMEOUT_MS = 70_000
+const HEADLESS_PROFILE_TEST_TIMEOUT_MS = 85_000
+
 const snapshotsDir = join(dirname(fileURLToPath(import.meta.url)), 'snapshots')
 const advancedScenarioDir = join(snapshotsDir, 'advanced-toolchain')
 const advancedSessionFixture = join(advancedScenarioDir, 'session.jsonl')
@@ -219,12 +229,16 @@ async function prepareCliMockFixture(cwd: string): Promise<void> {
 }
 
 describe('headless stream-json snapshots', () => {
-  it('runs one task through the product headless profile command', async () => {
+  // The mock adapter drives one real bash call; Windows has no bash to spawn,
+  // so the scenario skips there (the terminal-failure scenario below does not
+  // need bash and still runs).
+  it.skipIf(process.platform === 'win32')('runs one task through the product headless profile command', async () => {
     const task = 'Prove the product headless profile path with one real tool round trip.'
     const result = await runLoaderSmoke({
       label: 'product headless profile snapshot',
       tempDirPrefix: 'headless-snapshot-profile-',
       binScript: dshBinScript,
+      processTimeoutMs: HEADLESS_PROFILE_PROCESS_TIMEOUT_MS,
       configPath: headlessOverlayPath,
       binArgs: ['--profile', 'headless', '--patch', headlessOverlayPath, task],
       tsconfigPath,
@@ -250,13 +264,14 @@ describe('headless stream-json snapshots', () => {
 
     expect(result.stdout).toBe('CLI tool round trip complete: CLI_TOOL_ROUND_TRIP\n')
     expect(result.stderr).toBe('')
-  }, LOADER_SMOKE_TEST_TIMEOUT_MS)
+  }, HEADLESS_PROFILE_TEST_TIMEOUT_MS)
 
   it('prints a terminal model failure through the product headless profile command', async () => {
     const result = await runLoaderSmoke({
       label: 'product headless profile model failure snapshot',
       tempDirPrefix: 'headless-snapshot-profile-failure-',
       binScript: dshBinScript,
+      processTimeoutMs: HEADLESS_PROFILE_PROCESS_TIMEOUT_MS,
       configPath: headlessOverlayPath,
       binArgs: ['--profile', 'headless', '--patch', headlessOverlayPath, 'Trigger the keyless model failure.'],
       tsconfigPath,
@@ -271,7 +286,7 @@ describe('headless stream-json snapshots', () => {
 
     expect(result.stdout).toBe('\n')
     await expect(result.stderr).toMatchFileSnapshot(headlessFailureExpected)
-  }, LOADER_SMOKE_TEST_TIMEOUT_MS)
+  }, HEADLESS_PROFILE_TEST_TIMEOUT_MS)
 
   it('prints the original Loader activation error through the assembled one-shot app', async () => {
     const result = await runLoaderSmoke({
@@ -279,6 +294,7 @@ describe('headless stream-json snapshots', () => {
       tempDirPrefix: 'headless-snapshot-startup-error-',
       binScript,
       libBinScript: binScript,
+      processTimeoutMs: HEADLESS_PROCESS_TIMEOUT_MS,
       configPath: startupFailureConfigPath,
       binArgs: [startupFailureConfigPath, 'unreachable task'],
       tsconfigPath,
@@ -297,6 +313,7 @@ describe('headless stream-json snapshots', () => {
       tempDirPrefix: 'headless-snapshot-provider-retry-',
       binScript,
       libBinScript: binScript,
+      processTimeoutMs: HEADLESS_PROCESS_TIMEOUT_MS,
       configPath: retryConfigPath,
       binArgs: [retryConfigPath, prompt],
       tsconfigPath,
@@ -329,7 +346,9 @@ describe('headless stream-json snapshots', () => {
     expect(normalized).toBe(await readFile(streamExpected, 'utf8'))
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
-  it('recovers from context overflow through an assembled compaction', async () => {
+  // The compaction fixture replays a bash tool call as a real subprocess;
+  // Windows has no bash to spawn, so the scenario skips there.
+  it.skipIf(process.platform === 'win32')('recovers from context overflow through an assembled compaction', async () => {
     const prompt = await scenarioPrompt(compactionScenarioDir, 'compaction-recovery')
     let expectedSession = await readFile(compactionSessionFixture, 'utf8')
     let runCwd = ''
@@ -338,6 +357,7 @@ describe('headless stream-json snapshots', () => {
       tempDirPrefix: 'headless-snapshot-compaction-recovery-',
       binScript,
       libBinScript: binScript,
+      processTimeoutMs: HEADLESS_PROCESS_TIMEOUT_MS,
       configPath: compactionConfigPath,
       binArgs: [compactionConfigPath, prompt],
       tsconfigPath,
@@ -407,6 +427,7 @@ describe('headless stream-json snapshots', () => {
       tempDirPrefix: 'headless-snapshot-missing-credential-',
       binScript,
       libBinScript: binScript,
+      processTimeoutMs: HEADLESS_PROCESS_TIMEOUT_MS,
       configPath: credentialsConfigPath,
       binArgs: [credentialsConfigPath, 'say pong'],
       tsconfigPath,
@@ -445,6 +466,7 @@ describe('headless stream-json snapshots', () => {
       tempDirPrefix: 'headless-snapshot-invalid-credential-',
       binScript,
       libBinScript: binScript,
+      processTimeoutMs: HEADLESS_PROCESS_TIMEOUT_MS,
       configPath: credentialsConfigPath,
       binArgs: [credentialsConfigPath, 'say pong'],
       tsconfigPath,
@@ -480,6 +502,7 @@ describe('headless stream-json snapshots', () => {
       tempDirPrefix: 'headless-snapshot-reasoning-effort-',
       binScript,
       libBinScript: binScript,
+      processTimeoutMs: HEADLESS_PROCESS_TIMEOUT_MS,
       configPath: reasoningConfigPath,
       binArgs: [reasoningConfigPath, 'prove dynamic reasoning effort'],
       tsconfigPath,
@@ -523,6 +546,7 @@ describe('headless stream-json snapshots', () => {
         tempDirPrefix: 'headless-snapshot-deepseek-defaults-',
         binScript,
         libBinScript: binScript,
+        processTimeoutMs: HEADLESS_PROCESS_TIMEOUT_MS,
         configPath: deepseekDefaultsConfigPath,
         binArgs: [
           deepseekDefaultsConfigPath,
@@ -581,6 +605,7 @@ describe('headless stream-json snapshots', () => {
       tempDirPrefix: 'headless-snapshot-advanced-',
       binScript,
       libBinScript: binScript,
+      processTimeoutMs: HEADLESS_PROCESS_TIMEOUT_MS,
       configPath: advancedConfigPath,
       binArgs: [advancedConfigPath, prompt],
       tsconfigPath,
@@ -653,6 +678,7 @@ describe('headless stream-json snapshots', () => {
       tempDirPrefix: 'headless-snapshot-goal-tools-',
       binScript,
       libBinScript: binScript,
+      processTimeoutMs: HEADLESS_PROCESS_TIMEOUT_MS,
       configPath: goalConfigPath,
       binArgs: [goalConfigPath, prompt],
       tsconfigPath,
@@ -710,6 +736,7 @@ describe('headless stream-json snapshots', () => {
       tempDirPrefix: 'headless-snapshot-ralph-loop-',
       binScript,
       libBinScript: binScript,
+      processTimeoutMs: HEADLESS_PROCESS_TIMEOUT_MS,
       configPath: ralphConfigPath,
       binArgs: [ralphConfigPath, prompt],
       tsconfigPath,
@@ -792,6 +819,7 @@ describe('headless stream-json snapshots', () => {
       tempDirPrefix: 'headless-snapshot-subagent-settlement-',
       binScript,
       libBinScript: binScript,
+      processTimeoutMs: HEADLESS_PROCESS_TIMEOUT_MS,
       configPath: settlementConfigPath,
       binArgs: [settlementConfigPath, task],
       tsconfigPath,
@@ -863,6 +891,7 @@ describe('headless stream-json snapshots', () => {
       tempDirPrefix: 'headless-snapshot-pty-',
       binScript,
       libBinScript: binScript,
+      processTimeoutMs: HEADLESS_PROCESS_TIMEOUT_MS,
       configPath: ptyConfigPath,
       binArgs: [ptyConfigPath, prompt],
       tsconfigPath,
