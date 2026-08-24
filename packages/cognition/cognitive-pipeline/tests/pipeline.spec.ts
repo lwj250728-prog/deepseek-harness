@@ -924,6 +924,55 @@ describe('cognitive pipeline integration', () => {
     }
   })
 
+  it('consolidates chains and refreshes jumps at the idle cadence, throttled', async () => {
+    // Offline consolidation: chains that reached their member threshold get
+    // assembled, the jump lexicon refreshes, and a second call inside the
+    // throttle window returns null (repeated idle ticks stay cheap).
+    const { ctx, teardown } = await pipelineHarness({
+      provider: 'cognition-test',
+      model: 'm',
+      offlineConsolidationIntervalMs: 60 * 60 * 1000,
+    })
+    try {
+      // Three experiences tagged with the same chain (threshold is 3).
+      for (let index = 0; index < 3; index += 1) {
+        ctx.cognitivePipeline.store.addExperience({
+          expId: `exp_chain_${index}`,
+          sar: {
+            situation: `链成员 ${index}`,
+            action: '执行目标步骤',
+            outcome: '完成',
+            actionKeywords: ['执行'],
+            outcomeUtility: { materialGain: 7, emotionalValence: 6, energyCost: 5 },
+          },
+          actionVector: actionVector('执行目标步骤', ['执行']),
+          outcomeVector: outcomeVector({ materialGain: 7, emotionalValence: 6, energyCost: 5 }, '完成'),
+          clusterId: null,
+          strategyLabel: null,
+          timestamp: Date.now(),
+          predictionError: null,
+          cumulativeError: 0,
+          hitCount: 0,
+          positiveCount: 0,
+          simulated: false,
+          verification: 'verified',
+          evidenceScore: 0,
+          chainId: 'chain_idle',
+        })
+      }
+      const result = await ctx.cognitivePipeline.offlineConsolidation()
+      expect(result).not.toBeNull()
+      expect(result?.consolidatedChains).toContain('chain_idle')
+      expect(ctx.cognitivePipeline.chains().some(chain => chain.chainId === 'chain_idle')).toBe(true)
+
+      // The throttle returns null for a second call within the window.
+      const again = await ctx.cognitivePipeline.offlineConsolidation()
+      expect(again).toBeNull()
+    } finally {
+      await teardown()
+    }
+  })
+
   it('does not accumulate when the LLM gate rejects', async () => {    const { ctx, teardown } = await pipelineHarness(
     { provider: 'cognition-test', model: 'm', autoAccumulate: true },
     [JSON.stringify({ should_accumulate: false })],

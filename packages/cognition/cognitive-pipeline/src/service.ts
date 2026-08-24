@@ -146,6 +146,10 @@ export interface CognitivePipelineConfig {
    * ranks above an equally similar unused one (default 0.05, small so
    * similarity channels keep dominating). */
   citationRetrievalWeight?: number
+  /** Offline consolidation throttle: minimum gap between sleep-phase
+   * consolidations (chain assembly + jump-lexicon refresh), so repeated idle
+   * ticks stay cheap (default 1 hour). */
+  offlineConsolidationIntervalMs?: number
   /** Layer-2 shrinkage alpha (default 50). */
   shrinkageAlpha?: number
   /** Minimum 80%-interval width (default 0.2). */
@@ -266,6 +270,9 @@ export interface ResolvedCognitivePipelineConfig {
   readonly simulationTtlMs: number
   /** Whether completed turns are automatically accumulated via the LLM gate. */
   readonly autoAccumulate: boolean
+  /** Minimum gap between offline consolidations (chain assembly + jump
+   * refresh), so repeated idle ticks stay cheap. */
+  readonly offlineConsolidationIntervalMs: number
   /** Minimum invoked audits before a criterion's deviation rate can flag rework. */
   readonly acceptanceMinEvidenceCount: number
   /** Violation ratio at/above which an applied criterion flags rework. */
@@ -328,6 +335,7 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   disequilibriumZThreshold: z.number().min(0).default(2),
   disequilibriumMinSamples: z.number().step(1).min(2).default(3),
   citationRetrievalWeight: z.number().min(0).max(1).default(0.05),
+  offlineConsolidationIntervalMs: z.number().step(1).min(60_000).default(60 * 60 * 1000),
   shrinkageAlpha: z.number().min(0).default(50),
   minConfidenceIntervalWidth: z.number().min(0).max(1).default(0.2),
   successReferenceThreshold: z.number().min(0).max(1).default(0.4),
@@ -432,6 +440,7 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
     simulationPermanentThreshold: config.simulationPermanentThreshold ?? 2,
     simulationTtlMs: config.simulationTtlMs ?? 30 * 24 * 60 * 60 * 1000,
     autoAccumulate: config.autoAccumulate ?? false,
+    offlineConsolidationIntervalMs: config.offlineConsolidationIntervalMs ?? 60 * 60 * 1000,
     acceptanceMinEvidenceCount: config.acceptanceMinEvidenceCount ?? 3,
     acceptanceDeviationThreshold: config.acceptanceDeviationThreshold ?? 0.5,
     acceptanceCommandExecution: config.acceptanceCommandExecution ?? false,
@@ -623,6 +632,11 @@ export class CognitivePipelineService extends Service {
   /** Per-session count of resolved predictions at the last summarizeTurn call,
    * so a turn's resolvedPredictions delta is accurate across sessions. */
   private readonly resolvedAtSummarize = new Map<string, number>()
+
+  /** Epoch of the last offline consolidation, or null before the first run.
+   * In-memory throttle: repeated idle ticks stay cheap; a restart simply
+   * allows the next consolidation to run. */
+  private lastOfflineConsolidation: number | null = null
 
   private readonly readinessPromise: Promise<void>
 
@@ -2281,6 +2295,47 @@ export class CognitivePipelineService extends Service {
     }
     if (removed.length > 0) await this.store.flush()
     return removed
+  }
+
+  /**
+   * Offline consolidation (the sleep-phase integration of the self-sustaining
+   * design): consolidate every goal-anchored chain whose tagged members have
+   * reached the threshold, then refresh the trigger-jump lexicon. Throttled by
+   * `offlineConsolidationIntervalMs` (in-memory), so repeated idle ticks from
+   * the orchestrator stay cheap. Runs at an idle cadence — the online loop
+   * accumulates, this pass turns the accumulation into structure.
+   * @returns the consolidation outcome (throttled runs return null).
+   */
+  async offlineConsolidation(): Promise<{
+    consolidatedChains: string[]
+    jump: {
+      added: number
+      pruned: number
+      total: number
+    }
+  } | null> {
+    const now = Date.now()
+    const last = this.lastOfflineConsolidation
+    if (last !== null && now - last < this.resolved.offlineConsolidationIntervalMs) return null
+    this.lastOfflineConsolidation = now
+    const consolidatedChains: string[] = []
+    const chainIds = new Set<string>()
+    for (const exp of this.store.experiencesSnapshot()) {
+      if (exp.chainId !== undefined) chainIds.add(exp.chainId)
+    }
+    for (const chainId of chainIds) {
+      const chain = await this.consolidateChain(chainId)
+      if (chain !== null) consolidatedChains.push(chain.chainId)
+    }
+    const jumps = await this.learnTriggerJumps()
+    return {
+      consolidatedChains,
+      jump: {
+        added: jumps.llmAdded,
+        pruned: jumps.pruned,
+        total: jumps.jumpCount,
+      },
+    }
   }
 
   /**

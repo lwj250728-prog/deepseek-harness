@@ -58,6 +58,9 @@ export interface OrchestrationConfig {
   readonly exploreIntervalMs: number
   /** Maximum exploration tasks executing concurrently. */
   readonly exploreMaxConcurrent: number
+  /** Idle-cadence interval for offline consolidation (chain assembly + jump
+   * refresh); the pipeline's own throttle makes repeated ticks cheap. */
+  readonly offlineConsolidationIntervalMs: number
   /**
    * Daily delegation budget for the loop-driven delegation sink
    * (`createDelegationSink`): how many delegations the sink accepts per day.
@@ -87,6 +90,7 @@ export function resolveOrchestrationConfig(config: Partial<OrchestrationConfig>)
     exploreEnabled: config.exploreEnabled ?? true,
     exploreIntervalMs: config.exploreIntervalMs ?? 60 * 60 * 1000,
     exploreMaxConcurrent: config.exploreMaxConcurrent ?? 1,
+    offlineConsolidationIntervalMs: config.offlineConsolidationIntervalMs ?? 60 * 60 * 1000,
     delegateDailyBudget: config.delegateDailyBudget ?? 5,
     delegateMaxConcurrent: config.delegateMaxConcurrent ?? 2,
     delegateRiskWords: config.delegateRiskWords ?? ['删除', '清空', '覆盖', '发布', '推送', 'rm', '移除', '迁移', '重置', '格式化'],
