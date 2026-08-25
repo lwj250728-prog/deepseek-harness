@@ -313,6 +313,113 @@ describe('goal-anchored chains (the derived cognition object)', () => {
   })
 })
 
+describe('chain principle distillation (template 9, experience→principle)', () => {
+  it('distills ONE reusable principle from the chain members when an explicit route exists', async () => {
+    const distill = JSON.stringify({
+      principle: '当发布失败需要回退时，应回滚版本后重试，避免在失败状态上继续发布',
+      reasoning: '成员经验均为发布失败-回退-重试的循环',
+    })
+    const { ctx, teardown } = await pipelineHarness({ provider: 'cognition-test', model: 'm' }, [distill])
+    try {
+      seed(ctx.cognitivePipeline, 'chain-distill', 1, '发布', '执行发布', 2)   // failure
+      seed(ctx.cognitivePipeline, 'chain-distill', 2, '回退', '回滚版本', 8)
+      seed(ctx.cognitivePipeline, 'chain-distill', 3, '重试', '重新发布', 8)
+      const chain = await ctx.cognitivePipeline.consolidateChain('chain-distill', '发布到生产')
+      expect(chain?.distilledPrinciple).toContain('回滚版本')
+      // The causal skeleton survives alongside the principle.
+      expect(chain?.steps.length).toBe(1)
+      expect(chain?.steps[0]?.polarity).toBe('failure')
+      expect(chain?.memberExpIds.length).toBe(3)
+      // The principle surfaces on the model-visible expose.
+      expect(ctx.cognitivePipeline.chainExpose('chain-distill')).toContain('原则：')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('does not distill without an explicit route (宁缺毋滥: no model, no fabricated rule)', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      seed(ctx.cognitivePipeline, 'chain-noroute', 1, '发布', '执行发布', 2)
+      seed(ctx.cognitivePipeline, 'chain-noroute', 2, '回退', '回滚版本', 8)
+      seed(ctx.cognitivePipeline, 'chain-noroute', 3, '重试', '重新发布', 8)
+      const chain = await ctx.cognitivePipeline.consolidateChain('chain-noroute', '发布到生产')
+      expect(chain?.distilledPrinciple).toBeUndefined()
+      expect(ctx.cognitivePipeline.chainExpose('chain-noroute')).not.toContain('原则：')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('keeps the previous principle while the member set is unchanged (no fresh LLM call)', async () => {
+    const distill = JSON.stringify({
+      principle: '当发布失败需要回退时，应回滚后重试',
+      reasoning: '发布失败循环',
+    })
+    const { ctx, adapter, teardown } = await pipelineHarness({ provider: 'cognition-test', model: 'm' }, [distill])
+    try {
+      seed(ctx.cognitivePipeline, 'chain-carry', 1, '发布', '执行发布', 2)
+      seed(ctx.cognitivePipeline, 'chain-carry', 2, '回退', '回滚版本', 8)
+      seed(ctx.cognitivePipeline, 'chain-carry', 3, '重试', '重新发布', 8)
+      const first = await ctx.cognitivePipeline.consolidateChain('chain-carry', '发布到生产')
+      expect(first?.distilledPrinciple).toContain('回滚后重试')
+
+      // Same atoms, second consolidation: the principle carries over and the
+      // scripted adapter consumed no extra call (cursor stayed at 1).
+      const second = await ctx.cognitivePipeline.consolidateChain('chain-carry')
+      expect(second?.distilledPrinciple).toContain('回滚后重试')
+      expect(adapter?.consumed).toBe(1)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('drops a stale principle when the member set changes, then re-distills from the new atoms', async () => {
+    const distill = JSON.stringify({
+      principle: '当发布失败需要回退时，应回滚后重试',
+      reasoning: '发布失败循环',
+    })
+    const { ctx, adapter, teardown } = await pipelineHarness({ provider: 'cognition-test', model: 'm' }, [distill])
+    try {
+      seed(ctx.cognitivePipeline, 'chain-re', 1, '发布', '执行发布', 2)
+      seed(ctx.cognitivePipeline, 'chain-re', 2, '回退', '回滚版本', 8)
+      seed(ctx.cognitivePipeline, 'chain-re', 3, '重试', '重新发布', 8)
+      const first = await ctx.cognitivePipeline.consolidateChain('chain-re', '发布到生产')
+      expect(first?.distilledPrinciple).toContain('回滚后重试')
+
+      // A new member arrives: the set changed, so the old rule must not ride
+      // along — the rebuilt chain has no principle until the route re-distills.
+      seed(ctx.cognitivePipeline, 'chain-re', 4, '发布', '再次发布', 2)
+      const rebuilt = await ctx.cognitivePipeline.consolidateChain('chain-re', '发布到生产')
+      expect(rebuilt?.memberExpIds.length).toBe(4)
+      // The scripted adapter returned only the first principle; the rebuild's
+      // distillation call consumed the fallback '{}' → principle null.
+      expect(rebuilt?.distilledPrinciple).toBeUndefined()
+      expect(adapter?.consumed).toBe(2)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('runs distillation inside offlineConsolidation for every chain', async () => {
+    const distill = JSON.stringify({
+      principle: '当发布失败需要回退时，应回滚后重试',
+      reasoning: '发布失败循环',
+    })
+    const { ctx, teardown } = await pipelineHarness({ provider: 'cognition-test', model: 'm' }, [distill])
+    try {
+      seed(ctx.cognitivePipeline, 'chain-off', 1, '发布', '执行发布', 2)
+      seed(ctx.cognitivePipeline, 'chain-off', 2, '回退', '回滚版本', 8)
+      seed(ctx.cognitivePipeline, 'chain-off', 3, '重试', '重新发布', 8)
+      const result = await ctx.cognitivePipeline.offlineConsolidation()
+      expect(result?.consolidatedChains).toEqual(['chain-off'])
+      expect(ctx.cognitivePipeline.store.getChain('chain-off')?.distilledPrinciple).toContain('回滚后重试')
+    } finally {
+      await teardown()
+    }
+  })
+})
+
 describe('chain patterns (the recursive derived cognition object)', () => {
   /** Seed a chain whose single failure step yields the signature `发:失败`. */
   function seedPublishChain(service: CognitivePipelineService, chainId: string): void {

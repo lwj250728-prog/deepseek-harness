@@ -427,3 +427,35 @@ export function frameProposeTriggerJumpsInput(
       ? '（无）'
       : samples.map(sample => `- [${sample.expId}] ${sample.text}`).join('\n'))
 }
+
+/** Template 9: chain principle distillation — from experiences to ONE
+ * reusable decision rule (the EvolveR experience-distillation analogue). */
+export const DISTILL_SYSTEM_PROMPT = [
+  '你是认知架构的"经验蒸馏师"。给定一条目标链的成员经验（情境-行动-结果），把多条经验蒸馏成**一条**可直接复用的决策原则。',
+  '【蒸馏任务】：',
+  '1. 优先从失败经验提炼教训（失败比成功更值得记住）。',
+  '2. 输出一条 ≤60 字的行动原则，形如"当【触发条件】时，应【行动】，避免【失败模式】"。',
+  '3. 原则必须能迁移到同类新情境（不是对某条经验的复述，而是抽象出的规则）。',
+  '【宁缺毋滥】：',
+  '- 若成员经验过少或彼此无共同模式，输出 null。',
+  '- 禁止编造成员中不存在的事实；原则只能基于提供的材料。',
+  '【输出JSON格式】：',
+  '{',
+  '  "principle": "蒸馏出的原则，或 null",',
+  '  "reasoning": "一句话说明蒸馏依据"',
+  '}',
+].join('\n')
+
+/** Frame template-9 input with the chain's member experiences.
+ * @param goal - the chain's goal anchor.
+ * @param members - the member experiences (situation/action/outcome), failures first.
+ * @returns the user message body.
+ */
+export function frameDistillInput(
+  goal: string,
+  members: readonly { expId: string; text: string; failed: boolean }[],
+): string {
+  return `【目标】：${goal}\n\n`
+    + '【成员经验】（失败在前）：\n'
+    + members.map(member => `- [${member.expId}]${member.failed ? '（失败）' : ''} ${member.text}`).join('\n')
+}

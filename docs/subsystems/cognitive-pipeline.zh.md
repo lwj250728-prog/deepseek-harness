@@ -599,6 +599,12 @@ interface ChainExperience {
   readonly collapsedCount: number
   /** The bounded summary of the collapsed routine. */
   readonly summary: string
+  /** A distilled reusable principle: the LLM extracted ONE decision rule from
+   * the chain's members (failures first, then successes) during offline
+   * consolidation — the "from experiences to principle" step (EvolveR's
+   * experience distillation analogue). Shorter than the summary and directly
+   * reusable as guidance. Absent on legacy rows and when no route exists. */
+  readonly distilledPrinciple?: string
   /** Whether any member experience records a self-reflexive operation (killed
    * the agent's own host): the chain's causal chain contains a break point
    * where the aftermath is unobservable from the recording session. This is

@@ -21,6 +21,7 @@ import type { HotEngineConfig } from './hot-engine.ts'
 import {
   CognitivePipelineError,
   deriveReference,
+  distillChainPrinciple,
   evaluateAccumulation,
   extractSar,
   generateVariants,
@@ -2146,9 +2147,40 @@ export class CognitivePipelineService extends Service {
     // Tree edges are derived at consolidation, same as the offline projection:
     // the delegated sub-goal chains become this chain's children.
     const withChildren = { ...chain, childChainIds: childChainIdsOf(chain, this.store.experiencesSnapshot()) }
-    this.store.upsertChain(withChildren)
+    // Experience distillation (template 9): with an explicit route, ask the
+    // LLM to extract ONE reusable decision principle from the chain's members
+    // (failures first). Without a route nothing is distilled — the chain stays
+    // a folded summary, never a fabricated rule (宁缺毋滥). assembleChain
+    // already carried the previous principle while the member set is
+    // unchanged; distillation runs only on first consolidation or when the
+    // member set changed — an unchanged chain keeps its rule (or its judged
+    // "no common pattern" verdict) without a fresh LLM call each idle cycle,
+    // and a changed member set drops the stale rule until the route
+    // re-distills from the new atoms.
+    const memberSetChanged = previous !== undefined && (
+      previous.memberExpIds.length !== withChildren.memberExpIds.length
+      || previous.memberExpIds.some((id, index) => id !== withChildren.memberExpIds[index])
+    )
+    let distilled: ChainExperience = withChildren
+    if (hasExplicitRoute(this.resolved.route) && (previous === undefined || memberSetChanged)) {
+      const memberInput = members
+        .map(exp => ({
+          expId: exp.expId,
+          text: `${exp.sar.situation}。${exp.sar.action}。${exp.sar.outcome}`,
+          failed: outcomePolarity(exp.sar.outcomeUtility) === 'negative',
+        }))
+        .sort((a, b) => Number(b.failed) - Number(a.failed))
+      const result = await distillChainPrinciple(this.ctx, this.resolved.route, {
+        goal: withChildren.goal,
+        members: memberInput,
+      }, {})
+      if (result.principle !== null) {
+        distilled = { ...withChildren, distilledPrinciple: result.principle }
+      }
+    }
+    this.store.upsertChain(distilled)
     await this.store.flush()
-    return withChildren
+    return distilled
   }
 
   /**
@@ -2415,6 +2447,7 @@ export class CognitivePipelineService extends Service {
       `【经验链 ${chain.chainId}】目标：${chain.goal}`,
       ...lines,
       ...(chain.summary.length > 0 ? [`  摘要（例行 ${chain.collapsedCount} 步坍缩）：${chain.summary}`] : []),
+      ...(chain.distilledPrinciple !== undefined ? [`  原则：${chain.distilledPrinciple}`] : []),
     ].join('\n')
   }
 
@@ -2450,6 +2483,9 @@ export class CognitivePipelineService extends Service {
       }
       if (chain.summary.length > 0) {
         lines.push(`${indent}  摘要（例行 ${chain.collapsedCount} 步坍缩）：${chain.summary}`)
+      }
+      if (chain.distilledPrinciple !== undefined) {
+        lines.push(`${indent}  原则：${chain.distilledPrinciple}`)
       }
       if (level >= depth) return
       for (const childId of chain.childChainIds) {

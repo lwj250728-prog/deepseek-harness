@@ -89,17 +89,30 @@ export function assembleChain(
       collapsed.push(`${member.sar.action}。${member.sar.outcome}`)
     }
   }
+  const memberExpIds = ordered.map(member => member.expId)
+  // Carry the previous distilled principle only while the member set is
+  // unchanged: a rebuild with the same atoms keeps its LLM-distilled rule
+  // without a fresh (expensive) distillation call, and a changed member set
+  // drops it so the caller re-distills from the new atoms (宁缺毋滥 — never
+  // serve a stale principle against changed evidence).
+  const memberSetChanged = previous !== undefined && (
+    previous.memberExpIds.length !== memberExpIds.length
+    || previous.memberExpIds.some((id, index) => id !== memberExpIds[index])
+  )
   return {
     chainId,
     goal,
     anchorSessionId,
     status: 'consolidated' satisfies ChainStatus,
     steps,
-    memberExpIds: ordered.map(member => member.expId),
+    memberExpIds,
     delegationNodeIds: [...new Set(delegationIds)],
     childChainIds: [],
     collapsedCount: collapsed.length,
     summary: collapsed.slice(0, 4).join('；').slice(0, 500),
+    ...previous !== undefined && !memberSetChanged && previous.distilledPrinciple !== undefined
+      ? { distilledPrinciple: previous.distilledPrinciple }
+      : {},
     ...ordered.some(member => member.selfReflexive === true) ? { selfReflexive: true } : {},
     hitCount: previous?.hitCount ?? 0,
     citedCount: previous?.citedCount ?? 0,

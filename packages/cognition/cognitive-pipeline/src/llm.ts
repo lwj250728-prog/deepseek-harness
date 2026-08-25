@@ -34,12 +34,14 @@ import {
   ACCUMULATE_SYSTEM_PROMPT,
   CALIBRATION_SYSTEM_PROMPT,
   DERIVE_REFERENCE_SYSTEM_PROMPT,
+  DISTILL_SYSTEM_PROMPT,
   PROPOSE_ACCEPTANCE_SYSTEM_PROMPT,
   PROPOSE_TRIGGER_JUMPS_SYSTEM_PROMPT,
   REFINE_RETRIEVAL_SYSTEM_PROMPT,
   frameAccumulateInput,
   frameCalibrationInput,
   frameDeriveReferenceInput,
+  frameDistillInput,
   frameOodInput,
   frameProposeAcceptanceInput,
   frameProposeTriggerJumpsInput,
@@ -992,5 +994,63 @@ export async function proposeTriggerJumps(
   } catch (error) {
     ctx.logger.warn(`cognitive-pipeline: trigger-jump proposal degraded to fallback: ${String(error)}`)
     return triggerJumpsFallback()
+  }
+}
+
+/** One chain-principle distillation result (template 9). */
+export interface DistillResult {
+  /** The distilled decision principle, or null when the members have no common pattern. */
+  readonly principle: string | null
+  /** One sentence explaining the distillation basis. */
+  readonly reasoning: string
+}
+
+/** Deterministic template-9 fallback: no principle (no route → no distillation).
+ * @returns a null-principle result.
+ */
+export function distillFallback(): DistillResult {
+  return { principle: null, reasoning: '无模型复核（降级模式），不蒸馏原则' }
+}
+
+/**
+ * Template 9: distill one reusable decision principle from a chain's member
+ * experiences — the offline-consolidation analogue of EvolveR's
+ * experience-to-principle learning. The route extracts a single ≤60-character
+ * transferable rule, failures first; without an explicit route nothing is
+ * distilled (宁缺毋滥: a chain without a distilled principle is a folded
+ * summary, never a fabricated rule).
+ * @param ctx - plugin context for the LLM call.
+ * @param route - explicit model route.
+ * @param input - the chain goal and its member experiences.
+ * @param options - call context (session/signal/maxTokens).
+ * @returns the distillation result.
+ */
+export async function distillChainPrinciple(
+  ctx: Context,
+  route: CognitiveLlmRoute,
+  input: {
+    goal: string
+    members: readonly { expId: string; text: string; failed: boolean }[]
+  },
+  options: CallOptions,
+): Promise<DistillResult> {
+  if (!hasExplicitRoute(route)) return distillFallback()
+  try {
+    const parsed = asObject(
+      await callJson(ctx, route, DISTILL_SYSTEM_PROMPT, frameDistillInput(input.goal, input.members), {
+        ...options,
+        maxTokens: 400,
+      }),
+      'chain distillation',
+    )
+    const principle = parsed.principle
+    const reasoning = parsed.reasoning
+    return {
+      principle: typeof principle === 'string' && principle.length > 0 ? principle.slice(0, 120) : null,
+      reasoning: typeof reasoning === 'string' && reasoning.length > 0 ? reasoning.slice(0, 200) : '',
+    }
+  } catch (error) {
+    ctx.logger.warn(`cognitive-pipeline: chain distillation degraded to none: ${String(error)}`)
+    return distillFallback()
   }
 }
