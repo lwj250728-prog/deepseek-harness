@@ -191,14 +191,14 @@ describe('situational-state pre-step injection', () => {
   it('attaches an update guide when the chain head is stale (B 方案：链龄感知引导)', async () => {
     // Fresh head (age < threshold): no guide, rendering unchanged.
     const fresh = renderSituationalContext(
-      { nodeId: 'n1', seq: 1, prevNodeId: null, createdAt: Date.now(), situation: '新情景', sessionId: 's1', nextUpdateAfterMs: null },
+      { nodeId: 'n1', seq: 1, prevNodeId: null, createdAt: Date.now(), situation: '新情景', sessionId: SessionId('s1'), nextUpdateAfterMs: null },
       3600_000,
     )
     expect(fresh).toContain('【情景状态参考】')
     expect(fresh).not.toContain('【提示】')
     // Stale head (age ≥ threshold): explicit guide referencing the tool.
     const stale = renderSituationalContext(
-      { nodeId: 'n1', seq: 1, prevNodeId: null, createdAt: Date.now() - 4 * 3600_000, situation: '旧情景', sessionId: 's1', nextUpdateAfterMs: null },
+      { nodeId: 'n1', seq: 1, prevNodeId: null, createdAt: Date.now() - 4 * 3600_000, situation: '旧情景', sessionId: SessionId('s1'), nextUpdateAfterMs: null },
       3600_000,
     )
     expect(stale).toContain('【提示】此情景状态已 4 小时前 未更新')
@@ -206,7 +206,7 @@ describe('situational-state pre-step injection', () => {
     expect(stale).toContain('若当前会话情景已变化')
     // staleGuideMs=0 → any head guides.
     const always = renderSituationalContext(
-      { nodeId: 'n1', seq: 1, prevNodeId: null, createdAt: Date.now(), situation: '即时', sessionId: '', nextUpdateAfterMs: null },
+      { nodeId: 'n1', seq: 1, prevNodeId: null, createdAt: Date.now(), situation: '即时', sessionId: SessionId(''), nextUpdateAfterMs: null },
       0,
     )
     expect(always).toContain('【提示】')
