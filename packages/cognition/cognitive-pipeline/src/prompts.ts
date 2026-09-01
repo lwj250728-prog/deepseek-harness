@@ -385,20 +385,24 @@ export function frameProposeAcceptanceInput(
  * boosted only when injections they helped trigger are actually cited, and
  * pruned when they never pay off. */
 export const PROPOSE_TRIGGER_JUMPS_SYSTEM_PROMPT = [
-  '你是认知管线的"触发联想官"。现在提供给你触发词表（静态行为词 + 经验库派生词）与若干条重要经验。',
+  '你是认知管线的"触发联想官"，负责搭建主动联想网络：把触发词及其**真实使用情景**与用户可能说的话、可能关联的知识连接起来（像人学习时刻意联想同义词、反义词、上下位词、以及"什么情景会用到它"一样）。',
   '【联想任务】：',
-  '1. 为触发词表中的词，找出【同义/近义/口语变体】——用户可能用这些词表达同一件事，但它们从不与触发词在同一经验中共现（例如"卡住"↔"卡壳/挂起/死循环/卡顿"、"发布"↔"发版/上线/灰度"）。',
-  '2. 只允许为【已提供的触发词】添加变体；不得发明新的触发词。',
+  '1. 对【触发词表】中的每个词，先看它对应的【情景实例】——这些是经验库里真实发生过、这个词被用来描述的情境。',
+  '2. 基于【词义 + 情景实例】，联想三类变体：',
+  '   a. 表达变体：用户可能用哪些【同义/近义/口语】说法描述同一类情境（"卡住"↔"卡壳/没反应/死循环"、"发布"↔"发版/上线/灰度"）',
+  '   b. 情景变体：与情景实例强相关的【具体对象/现象/操作词】（如情景"服务重启后需验证"→联想"服务起来了吗/恢复了吗/健康检查"）',
+  '   c. 上下位/相关：更细或更粗的同域词（"报错"→"异常堆栈/exit code/告警"）',
+  '3. 每个触发词至少给出 1 个变体；变体是词或短短语（2-6 字或英文词），不得是整句。',
+  '4. 不得发明新的触发词——trigger 字段必须来自提供的词表。',
   '【联想规则】：',
-  '- 每个变体必须与触发词含义紧密相关（同义或强近义），宁可少而准，不可多而泛。',
-  '- 每个变体必须给出 reason（一句话理由，说明为什么用户会用这个词表达同一情境）。',
-  '- 变体是单个词或短短语，不得是整句。',
-  '- 把握不准时宁可不提案（jumps 可为空数组）。',
+  '- 宁可多而准：对每个触发词给出你最有把握的 1-3 个变体，不要因为"把握不准"就跳过。',
+  '- 情景变体最有价值：优先基于【情景实例】联想用户真实会说的具体词，其次才是通用同义词。',
+  '- 每个变体必须附 reason（一句话：基于什么情景/语义，用户为什么可能这样说）。',
   '【输出JSON格式】：',
   '{',
   '  "jumps": [',
   '    {',
-  '      "trigger": "触发词（必须是提供的触发词表中的词）",',
+  '      "trigger": "触发词（必须来自提供的触发词表）",',
   '      "variants": ["变体1", "变体2"],',
   '      "reason": "一句话理由"',
   '    }',
@@ -406,22 +410,34 @@ export const PROPOSE_TRIGGER_JUMPS_SYSTEM_PROMPT = [
   '}',
 ].join('\n')
 
-/** Frame template-9 input with the trigger lexicons and important experiences.
+/** Frame template-9 input with the trigger lexicons, each bound to the real
+ * situations where it appeared in the experience store. The association task
+ * then sees both the word AND its usage context — producing situation-grounded
+ * variants (how a user would describe THAT kind of situation) instead of bare
+ * synonym lists.
  * @param staticTriggers - the static behavior trigger words.
  * @param derived - the derived trigger words with weights.
  * @param samples - important experience samples for context.
+ * @param situationsByWord - map of trigger word → situation snippets where it occurred.
  * @returns the framed prompt text.
  */
 export function frameProposeTriggerJumpsInput(
   staticTriggers: readonly string[],
   derived: readonly { word: string; weight: number }[],
   samples: readonly { expId: string; text: string }[],
+  situationsByWord: ReadonlyMap<string, readonly string[]> = new Map(),
 ): string {
+  const withSituations = (word: string): string => {
+    const situations = situationsByWord.get(word)
+    return situations !== undefined && situations.length > 0
+      ? `${word}（情景：${situations.slice(0, 2).join('；')}）`
+      : word
+  }
   const derivedLine = derived.length === 0
     ? '（无——冷启动）'
-    : derived.map(entry => `${entry.word}(${entry.weight.toFixed(2)})`).join('、')
-  return `【静态行为触发词】：\n${staticTriggers.join('、')}\n\n`
-    + `【经验库派生触发词】：\n${derivedLine}\n\n`
+    : derived.map(entry => `${withSituations(entry.word)}(${entry.weight.toFixed(2)})`).join('、')
+  return `【静态行为触发词】（附情景实例）：\n${staticTriggers.map(withSituations).join('、')}\n\n`
+    + `【经验库派生触发词】（附情景实例）：\n${derivedLine}\n\n`
     + '【重要经验样例】（用于理解词的真实语境）：\n'
     + (samples.length === 0
       ? '（无）'
@@ -458,4 +474,45 @@ export function frameDistillInput(
   return `【目标】：${goal}\n\n`
     + '【成员经验】（失败在前）：\n'
     + members.map(member => `- [${member.expId}]${member.failed ? '（失败）' : ''} ${member.text}`).join('\n')
+}
+
+/** Template 10: discriminant-axis extraction — from one over-broad cluster to
+ * the axes that separate its members into behaviorally distinct sub-groups.
+ * This is the L2 complement to embedding clustering (LLM 定轴): embedding
+ * groups, the LLM names the discriminating dimension and its poles. */
+export const PROPOSE_DISCRIMINANT_AXES_SYSTEM_PROMPT = [
+  '你是认知架构的"判别维度分析师"。给定一个语义聚类得到的簇及其成员经验（情境-行动-结果），这些成员表面相似（嵌入相近）但内部可能存在行为上不同的子群体。',
+  '【任务】：',
+  '1. 找出簇内真正导致策略/行为不同的**判别维度**（轴），例如：用户熟练度（新手↔资深）、环境故障类型、任务阶段、风险等级、时间压力。',
+  '2. 每个轴给出两个或更多**极性判别词**（该轴两端/各档的典型词或短语），用于在查询侧区分成员。',
+  '3. 只提炼**对行动选择有实际影响**的轴——如果簇内所有成员策略一致、无行为差异，输出空数组（宁缺毋滥）。',
+  '【判别词要求】：',
+  '- 必须来自成员经验中真实出现的词/短语，禁止编造。',
+  '- 每个轴 2-4 个判别词，按区分力排序。',
+  '- 判别词是词或短短语（≤8字），不是整句。',
+  '【输出JSON格式】：',
+  '{',
+  '  "axes": [',
+  '    {',
+  '      "dimension": "situation 或 action",',
+  '      "axisName": "判别轴名称，如 用户熟练度",',
+  '      "terms": ["新手", "资深"],',
+  '      "rationale": "一句话说明为什么这个轴区分行为"',
+  '    }',
+  '  ]',
+  '}',
+].join('\n')
+
+/** Frame template-10 input with one over-broad cluster's members.
+ * @param clusterLabel - the cluster's current name/label.
+ * @param members - the member experiences (situation/action/outcome text).
+ * @returns the user message body.
+ */
+export function frameDiscriminantAxesInput(
+  clusterLabel: string,
+  members: readonly { expId: string; text: string }[],
+): string {
+  return `【当前簇】：${clusterLabel}\n\n`
+    + `【簇内成员经验】（${members.length} 条）：\n`
+    + members.map(member => `- [${member.expId}] ${member.text}`).join('\n')
 }

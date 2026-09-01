@@ -36,11 +36,13 @@ import {
   DERIVE_REFERENCE_SYSTEM_PROMPT,
   DISTILL_SYSTEM_PROMPT,
   PROPOSE_ACCEPTANCE_SYSTEM_PROMPT,
+  PROPOSE_DISCRIMINANT_AXES_SYSTEM_PROMPT,
   PROPOSE_TRIGGER_JUMPS_SYSTEM_PROMPT,
   REFINE_RETRIEVAL_SYSTEM_PROMPT,
   frameAccumulateInput,
   frameCalibrationInput,
   frameDeriveReferenceInput,
+  frameDiscriminantAxesInput,
   frameDistillInput,
   frameOodInput,
   frameProposeAcceptanceInput,
@@ -960,41 +962,58 @@ export async function proposeTriggerJumps(
     staticTriggers: readonly string[]
     derived: readonly { word: string; weight: number }[]
     samples: readonly { expId: string; text: string }[]
+    /** Trigger word → real situation snippets where it appeared, so the LLM
+     * associates from usage context, not bare word lists. */
+    situationsByWord?: ReadonlyMap<string, readonly string[]>
   },
   options: CallOptions,
 ): Promise<TriggerJumpProposalDecision> {
   if (!hasExplicitRoute(route)) return triggerJumpsFallback()
-  try {
-    const framed = frameProposeTriggerJumpsInput(input.staticTriggers, input.derived, input.samples)
-    const parsed = asObject(
-      await callJson(ctx, route, PROPOSE_TRIGGER_JUMPS_SYSTEM_PROMPT, framed, {
-        ...options,
-        maxTokens: 600,
-      }),
-      'trigger-jumps',
-    )
-    const rawJumps = Array.isArray(parsed.jumps) ? parsed.jumps : []
-    const jumps: TriggerJumpProposal[] = []
-    for (const raw of rawJumps) {
-      if (typeof raw !== 'object' || raw === null) continue
-      const entry = raw as Record<string, unknown>
-      const trigger = entry.trigger
-      const reason = entry.reason
-      const variants = Array.isArray(entry.variants)
-        ? entry.variants.filter((variant): variant is string => typeof variant === 'string' && variant.length > 0)
-        : []
-      if (typeof trigger !== 'string' || trigger.length === 0
-        || typeof reason !== 'string' || reason.length === 0
-        || variants.length === 0) {
-        continue
+  // The association task is stochastic: the same input sometimes yields rich
+  // variants and sometimes an empty array (measured finding #11 — identical
+  // inputs produced 0 jumps on one draw and 25+ on the next). Retry up to 3
+  // draws so one unlucky empty sample cannot silently starve the deliberate
+  // synonym network that template 9 exists to build.
+  const maxDraws = 3
+  for (let draw = 0; draw < maxDraws; draw += 1) {
+    try {
+      const framed = frameProposeTriggerJumpsInput(input.staticTriggers, input.derived, input.samples, input.situationsByWord)
+      const parsed = asObject(
+        await callJson(ctx, route, PROPOSE_TRIGGER_JUMPS_SYSTEM_PROMPT, framed, {
+          ...options,
+          // Generous budget: the association task lists 20+ triggers × 1-3
+          // variants each; 1500 tokens truncated mid-JSON (measured: finish
+          // max-tokens, extractJson then failed → empty jumps). 4000 fits the
+          // full variant list.
+          maxTokens: 4000,
+        }),
+        'trigger-jumps',
+      )
+      const rawJumps = Array.isArray(parsed.jumps) ? parsed.jumps : []
+      const jumps: TriggerJumpProposal[] = []
+      for (const raw of rawJumps) {
+        if (typeof raw !== 'object' || raw === null) continue
+        const entry = raw as Record<string, unknown>
+        const trigger = entry.trigger
+        const reason = entry.reason
+        const variants = Array.isArray(entry.variants)
+          ? entry.variants.filter((variant): variant is string => typeof variant === 'string' && variant.length > 0)
+          : []
+        if (typeof trigger !== 'string' || trigger.length === 0
+          || typeof reason !== 'string' || reason.length === 0
+          || variants.length === 0) {
+          continue
+        }
+        jumps.push({ trigger, variants, reason })
       }
-      jumps.push({ trigger, variants, reason })
+      if (jumps.length > 0) return { jumps }
+      ctx.logger.warn(`cognitive-pipeline: trigger-jump draw ${draw + 1} produced zero proposals, retrying`)
+    } catch (error) {
+      ctx.logger.warn(`cognitive-pipeline: trigger-jump proposal degraded to fallback: ${String(error)}`)
+      return triggerJumpsFallback()
     }
-    return { jumps }
-  } catch (error) {
-    ctx.logger.warn(`cognitive-pipeline: trigger-jump proposal degraded to fallback: ${String(error)}`)
-    return triggerJumpsFallback()
   }
+  return triggerJumpsFallback()
 }
 
 /** One chain-principle distillation result (template 9). */
@@ -1053,4 +1072,94 @@ export async function distillChainPrinciple(
     ctx.logger.warn(`cognitive-pipeline: chain distillation degraded to none: ${String(error)}`)
     return distillFallback()
   }
+}
+
+/** One discriminant axis extracted from an over-broad cluster (template 10). */
+export interface DiscriminantAxis {
+  /** Which member field the axis lives in: situation (premise) or action. */
+  readonly dimension: 'situation' | 'action'
+  /** Axis name, e.g. 用户熟练度. */
+  readonly axisName: string
+  /** Polarity terms distinguishing the axis poles (2-4, most discriminating first). */
+  readonly terms: readonly string[]
+  /** One sentence on why this axis separates behavior. */
+  readonly rationale: string
+}
+
+/** Structured template-10 result: the axes found inside one cluster. */
+export interface DiscriminantAxesOutput {
+  readonly axes: readonly DiscriminantAxis[]
+}
+
+/** Deterministic template-10 fallback: no axes (no route → no extraction).
+ * @returns an empty axes result.
+ */
+export function discriminantAxesFallback(): DiscriminantAxesOutput {
+  return { axes: [] }
+}
+
+/**
+ * Template 10: extract discriminant axes from one over-broad cluster — the
+ * L2 complement to embedding clustering (LLM 定轴). Embedding groups surface
+ * near-duplicate members; this step asks the LLM which dimension actually
+ * drives behavior differences inside the cluster (e.g. 新手↔资深 within a
+ * git-push cluster), producing polarity terms for query-side routing. Without
+ * an explicit route nothing is extracted; one unlucky empty draw is retried
+ * once (the association task is stochastic, measured finding #11).
+ * @param ctx - plugin context for the LLM call.
+ * @param route - explicit model route.
+ * @param input - the over-broad cluster's label and member experiences.
+ * @param options - call context (session/signal/maxTokens).
+ * @returns the extracted axes, or an empty set.
+ */
+export async function proposeDiscriminantAxes(
+  ctx: Context,
+  route: CognitiveLlmRoute,
+  input: {
+    clusterLabel: string
+    members: readonly { expId: string; text: string }[]
+  },
+  options: CallOptions,
+): Promise<DiscriminantAxesOutput> {
+  if (!hasExplicitRoute(route)) return discriminantAxesFallback()
+  const maxDraws = 2
+  for (let draw = 0; draw < maxDraws; draw += 1) {
+    try {
+      const parsed = asObject(
+        await callJson(ctx, route, PROPOSE_DISCRIMINANT_AXES_SYSTEM_PROMPT, frameDiscriminantAxesInput(input.clusterLabel, input.members), {
+          ...options,
+          maxTokens: 1500,
+        }),
+        'discriminant-axes',
+      )
+      const rawAxes = Array.isArray(parsed.axes) ? parsed.axes : []
+      const axes: DiscriminantAxis[] = []
+      for (const raw of rawAxes) {
+        if (typeof raw !== 'object' || raw === null) continue
+        const entry = raw as Record<string, unknown>
+        const dimension = entry.dimension
+        const axisName = entry.axisName
+        const terms = Array.isArray(entry.terms)
+          ? entry.terms.filter((term): term is string => typeof term === 'string' && term.length > 0)
+          : []
+        if ((dimension !== 'situation' && dimension !== 'action')
+          || typeof axisName !== 'string' || axisName.length === 0
+          || terms.length < 2) {
+          continue
+        }
+        axes.push({
+          dimension,
+          axisName: axisName.slice(0, 30),
+          terms: terms.slice(0, 4).map(term => term.slice(0, 12)),
+          rationale: typeof entry.rationale === 'string' ? entry.rationale.slice(0, 100) : '',
+        })
+      }
+      if (axes.length > 0) return { axes }
+      ctx.logger.warn(`cognitive-pipeline: discriminant-axis draw ${draw + 1} produced zero axes, retrying`)
+    } catch (error) {
+      ctx.logger.warn(`cognitive-pipeline: discriminant-axis extraction degraded to none: ${String(error)}`)
+      return discriminantAxesFallback()
+    }
+  }
+  return discriminantAxesFallback()
 }

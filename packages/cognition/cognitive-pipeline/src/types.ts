@@ -243,6 +243,12 @@ export interface TempStrategy {
   readonly signatureHash: string
   /** The trial action text the strategy encodes. */
   readonly trialAction: string
+  /** Abstracted strategy text (the 触类旁通 layer): a domain-independent
+   * principle distilled from the trial action's situation, so a structurally
+   * similar situation in ANOTHER domain can reuse it (e.g. "设备异常：小步
+   * 调参+监控反馈+迭代" transfers from 深海推进器 to 离心泵, while the raw
+   * action "调整深海推进器参数" does not). Absent on legacy rows. */
+  readonly strategyText?: string
   /** Result placeholder awaiting the first feedback. */
   readonly pendingResult: string | null
   /** Times this strategy was matched and reused by the hot loop. */
@@ -542,6 +548,24 @@ export interface TriggerJump {
   readonly citedCount: number
   readonly createdAt: number
   readonly updatedAt: number
+}
+
+/** One persisted discriminant axis (template 10, LLM 定轴): the dimension that
+ * separates an over-broad cluster's members into behaviorally distinct groups,
+ * with polarity terms for query-side routing. Produced offline by
+ * `proposeDiscriminantAxes`; consumed by the C-form online scan. */
+export interface DiscriminantAxisRecord {
+  /** The cluster this axis was extracted from. */
+  readonly clusterId: number
+  /** Which member field the axis lives in: situation (premise) or action. */
+  readonly dimension: 'situation' | 'action'
+  /** Axis name, e.g. 用户熟练度. */
+  readonly axisName: string
+  /** Polarity terms distinguishing the axis poles (2-4, most discriminating first). */
+  readonly terms: readonly string[]
+  /** One sentence on why this axis separates behavior. */
+  readonly rationale: string
+  readonly createdAt: number
 }
 
 /** One injection event, recorded for citation-rate measurement: did the model

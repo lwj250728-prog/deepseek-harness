@@ -56,7 +56,10 @@ try {
   Write-Log 'port 3080 free'
 
   # 3. Relaunch the web host detached from this script's console.
-  $proc = Start-Process -FilePath 'C:\Program Files\nodejs\node.exe' `
+  # Git Bash 注入：把 D:\Git\bin 加入 PATH，使新宿主进程的 bash 工具可用
+# （Git 安装时仅将 D:\Git\cmd 加入 PATH，bash.exe 在 D:\Git\bin，Node spawn('bash') 找不到）。
+$env:PATH = "D:\Git\bin;D:\Git\usr\bin;$env:PATH"
+$proc = Start-Process -FilePath 'C:\Program Files\nodejs\node.exe' `
     -ArgumentList @('apps/cli/lib/bin.js', 'web') `
     -WorkingDirectory $root `
     -WindowStyle Hidden `

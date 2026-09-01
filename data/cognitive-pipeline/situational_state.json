@@ -1,0 +1,13 @@
+﻿{
+    "nextSeq":  1,
+    "nodes":  [
+                  {
+                      "nodeId":  "sstate-1",
+                      "seq":  1,
+                      "prevNodeId":  null,
+                      "createdAt":  1787636279834,
+                      "situation":  "档A验证：情景状态链表插件端到端测试",
+                      "nextUpdateAfterMs":  null
+                  }
+              ]
+}

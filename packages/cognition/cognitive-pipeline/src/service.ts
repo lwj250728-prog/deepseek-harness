@@ -27,6 +27,7 @@ import {
   generateVariants,
   hasExplicitRoute,
   proposeAcceptanceUpdates,
+  proposeDiscriminantAxes,
   proposeTriggerJumps,
   resolveRoute,
 } from './llm.ts'
@@ -42,6 +43,7 @@ import type {
   ClaimAudit,
   Cluster,
   CognitiveLoopStats,
+  DiscriminantAxisRecord,
   Experience,
   ExplorationTask,
   FeedbackInput,
@@ -206,6 +208,10 @@ export interface CognitivePipelineConfig {
   triggerJumpMaxPerTrigger?: number
   /** Total cap on the jump table (default 400); the lowest-weight jumps drop. */
   triggerJumpTotalCap?: number
+  /** Reserved slots for LLM-proposed (source 'llm') jumps when the table
+   * overflows — the deliberate synonym network must not be crowded out by
+   * co-occurrence jumps (default 30). */
+  triggerJumpLlmFloor?: number
   /** Gate-time scaling of a jump's contribution to the trigger score; a single
    * jump never opens the gate alone when `scale × 1 < 0.6` (default 0.5). */
   triggerJumpWeightScale?: number
@@ -238,6 +244,10 @@ export interface CognitivePipelineConfig {
   clusterMergeCosine?: number
   /** Cluster-membership cosine threshold (default 0.3). */
   clusterMatchCosine?: number
+  /** Clustering vector space: 'outcome' (default, legacy utility space) or
+   * 'embedding' (semantic space; records without a stored embedding fall back
+   * to the outcome vector per-record). */
+  clusterVectorSource?: 'outcome' | 'embedding'
   /** Feedback error at/above which an emergency local rebuild fires (default 0.8). */
   emergencyErrorThreshold?: number
   /** Real-embedding seam (roadmap R3): when set, the semantic retrieval
@@ -288,6 +298,8 @@ export interface ResolvedCognitivePipelineConfig {
   readonly triggerJumpMaxPerTrigger: number
   /** Total cap on the jump table. */
   readonly triggerJumpTotalCap: number
+  /** Reserved slots for LLM-proposed jumps when the table overflows. */
+  readonly triggerJumpLlmFloor: number
   /** Gate-time scaling of a jump's contribution to the trigger score. */
   readonly triggerJumpWeightScale: number
   /** Citation-rate boost added to a jump's weight during reinforcement. */
@@ -361,6 +373,7 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   triggerJumpEvidenceMin: z.number().step(1).min(1).default(3),
   triggerJumpMaxPerTrigger: z.number().step(1).min(1).default(20),
   triggerJumpTotalCap: z.number().step(1).min(1).default(400),
+  triggerJumpLlmFloor: z.number().step(1).min(0).default(120),
   triggerJumpWeightScale: z.number().min(0).max(1).default(0.5),
   triggerJumpCitationBoost: z.number().min(0).max(1).default(0.2),
   triggerJumpPruneRate: z.number().min(0).max(1).default(0.1),
@@ -375,6 +388,7 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   reconstructRetries: z.number().step(1).min(0).max(5).default(2),
   clusterMergeCosine: z.number().min(0).max(1).default(0.4),
   clusterMatchCosine: z.number().min(0).max(1).default(0.3),
+  clusterVectorSource: z.union([z.const('outcome'), z.const('embedding')]).default('outcome'),
   emergencyErrorThreshold: z.number().min(0).max(1).default(0.8),
   embedding: z.object({
     baseUrl: z.string().default('https://api.deepseek.com'),
@@ -433,6 +447,7 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
       reconstructRetries: config.reconstructRetries ?? 2,
       clusterMergeCosine: config.clusterMergeCosine ?? 0.4,
       clusterMatchCosine: config.clusterMatchCosine ?? 0.3,
+      clusterVectorSource: config.clusterVectorSource ?? 'outcome',
     }),
     tempStrategyHitThreshold: config.tempStrategyHitThreshold ?? 3,
     tempStrategyPositiveRatio: config.tempStrategyPositiveRatio ?? 0.667,
@@ -449,6 +464,7 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
     triggerJumpEvidenceMin: config.triggerJumpEvidenceMin ?? 3,
     triggerJumpMaxPerTrigger: config.triggerJumpMaxPerTrigger ?? 20,
     triggerJumpTotalCap: config.triggerJumpTotalCap ?? 400,
+    triggerJumpLlmFloor: config.triggerJumpLlmFloor ?? 120,
     triggerJumpWeightScale: config.triggerJumpWeightScale ?? 0.5,
     triggerJumpCitationBoost: config.triggerJumpCitationBoost ?? 0.2,
     triggerJumpPruneRate: config.triggerJumpPruneRate ?? 0.1,
@@ -1165,6 +1181,13 @@ export class CognitivePipelineService extends Service {
    */
   async rebuild(scope: 'local' | 'global', call?: PipelineCallContext): Promise<RebuildResult> {
     const result = await this.cold.runRebuild(scope, call?.sessionId, call?.signal)
+    // A full rebuild replaces the cluster set, so the C-form discriminant
+    // axes must follow: re-extract from the new clusters (embedding clusters,
+    // LLM names the discriminating poles). Local emergency patches keep the
+    // existing axes — they repair one cluster, not the taxonomy shape.
+    if (scope === 'global' && result.accepted) {
+      await this.extractDiscriminantAxes(call)
+    }
     await this.store.flush()
     return result
   }
@@ -1849,11 +1872,23 @@ export class CognitivePipelineService extends Service {
       const prior = existing.get(jumpWord)
       jumps.set(jumpWord, {
         jumpWord,
-        triggers: kept.map(({ trigger, acc }) => ({
-          trigger,
-          weight: round3(0.3 + 0.7 * (acc.importance / maxImportance)),
-          evidenceCount: acc.evidenceCount,
-        })),
+        // Bidirectional coupling: a strong association runs both ways. When
+        // the trigger word also associates back to this jump word (it too is
+        // a jump candidate toward it), the reverse evidence proves the pair
+        // is genuinely coupled; a one-way association is a weaker link. The
+        // reverse strength is folded in as a coupling multiplier so
+        // deliberately built networks (A⇄B) rank above incidental ones.
+        triggers: kept.map(({ trigger, acc }) => {
+          const reverse = accumulator.get(trigger)?.get(jumpWord)
+          const coupling = reverse !== undefined && reverse.evidenceCount >= this.resolved.triggerJumpEvidenceMin
+            ? Math.min(1, reverse.evidenceCount / Math.max(1, acc.evidenceCount))
+            : 0.5
+          return {
+            trigger,
+            weight: round3(clamp01(0.3 + 0.7 * (acc.importance / maxImportance)) * (0.5 + 0.5 * coupling)),
+            evidenceCount: acc.evidenceCount,
+          }
+        }),
         evidenceCount: Math.max(...kept.map(candidate => candidate.acc.evidenceCount)),
         source: 'cooccurrence',
         rationale: '',
@@ -1872,10 +1907,37 @@ export class CognitivePipelineService extends Service {
         .filter(exp => importanceOf(exp) > 0)
         .slice(0, 10)
         .map(exp => ({ expId: exp.expId, text: `${exp.sar.situation}。${exp.sar.action}` }))
+      // Balanced lexicon: 30 words (15 static + 15 derived) measurably
+      // stabilizes the association task (3/4 draws at 30 words vs 2/5 at 56 —
+      // finding #11). The full list pushed the LLM's JSON toward the token
+      // ceiling where truncation intermittently failed parsing. 30 words keeps
+      // the deliberate network growing while the citation loop gates quality.
+      const staticTriggers = [...STATIC_TRIGGERS].slice(0, 15)
+      const derivedTriggers = [...derived.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 15)
+        .map(([word, weight]) => ({ word, weight }))
+      // Bind each trigger word to the REAL situations where it appeared in the
+      // experience store, so the LLM associates from usage context — the
+      // situation-grounded association the user's critique pointed at: words
+      // alone yield synonym lists (卡住→卡壳), words+their situations yield
+      // how a user would describe THAT kind of scenario (服务重启→服务起来了吗).
+      const focusWords = new Set<string>([...staticTriggers, ...derivedTriggers.map(entry => entry.word)])
+      const situationsByWord = new Map<string, string[]>()
+      for (const exp of this.store.experiencesSnapshot()) {
+        const text = `${exp.sar.situation} ${exp.sar.action}`
+        for (const word of focusWords) {
+          if (!text.includes(word)) continue
+          const bucket = situationsByWord.get(word) ?? []
+          if (bucket.length < 2) bucket.push(exp.sar.situation.slice(0, 60))
+          situationsByWord.set(word, bucket)
+        }
+      }
       const decision = await proposeTriggerJumps(this.ctx, this.resolved.route, {
-        staticTriggers: [...STATIC_TRIGGERS],
-        derived: [...derived.entries()].map(([word, weight]) => ({ word, weight })),
-        samples,
+        staticTriggers,
+        derived: derivedTriggers,
+        samples: samples.slice(0, 3),
+        situationsByWord,
       }, {
         sessionId: call?.sessionId,
         signal: call?.signal,
@@ -1884,9 +1946,22 @@ export class CognitivePipelineService extends Service {
         if (!STATIC_TRIGGERS.has(proposal.trigger) && !derived.has(proposal.trigger)) continue
         for (const variant of proposal.variants) {
           if (variant === proposal.trigger || STOP_WORDS.has(variant) || jumps.has(variant)) continue
+          // Multi-char gate: the variant must be multi-character (CJK word of
+          // 2+ chars or any latin token), never a single CJK char — single
+          // chars are the measured noise class that made the old table
+          // meaningless. A CJK variant of any length ≥2 is a real word
+          // (卡壳/死循环/发版), unlike the single-char co-occurrence noise.
+          if ([...variant].length < 2 && /[\u4e00-\u9fff]/.test(variant)) continue
           jumps.set(variant, {
             jumpWord: variant,
-            triggers: [{ trigger: proposal.trigger, weight: 0.4, evidenceCount: 0 }],
+            // Deliberate associations start stronger than random co-occurrence
+            // (0.4 was too weak: one colloquial word scored 0.4×0.5=0.2, far
+            // under the 0.6 gate — "卡壳" alone never opened it, measured in
+            // the colloquial test). 0.9 keeps a single word below the gate
+            // (0.45) while two synonyms together cross it (0.9), so the
+            // deliberately built network actually fires without re-opening
+            // the noise door.
+            triggers: [{ trigger: proposal.trigger, weight: 0.9, evidenceCount: 0 }],
             evidenceCount: 0,
             source: 'llm',
             rationale: proposal.reason,
@@ -1900,13 +1975,35 @@ export class CognitivePipelineService extends Service {
       }
     }
 
+    // Inherit prior LLM variants: the association task is stochastic (measured
+    // finding #11 — the same input yields different variants across draws), so
+    // a rebuild that replaces the table would silently drop yesterday's
+    // deliberate synonyms. Every surviving LLM jump from the previous table is
+    // carried forward (its citation stats included), so the deliberate network
+    // ACCUMULATES across rebuilds instead of drifting with the last draw.
+    // Co-occurrence jumps are NOT inherited — they rebuild from the store.
+    for (const [word, prior] of existing) {
+      if (prior.source !== 'llm') continue
+      if (jumps.has(word)) continue
+      jumps.set(word, prior)
+    }
+
     // Total cap: keep the highest-weight jumps when the table overflows.
+    // LLM-proposed variants get a reserved floor (triggerJumpLlmFloor) so the
+    // deliberate synonym network is never crowded out by co-occurrence noise:
+    // the measured rebuild produced 0 llm_added because 400 co-occurrence
+    // jumps (weight ≥ 0.3) out-ranked every variant (weight 0.4) for the cap.
     let list = [...jumps.values()]
     const cap = this.resolved.triggerJumpTotalCap
+    const llmFloor = this.resolved.triggerJumpLlmFloor
     if (list.length > cap) {
-      list = list
+      const llmJumps = list.filter(jump => jump.source === 'llm')
         .sort((a, b) => maxJumpWeight(b) - maxJumpWeight(a))
-        .slice(0, cap)
+        .slice(0, llmFloor)
+      const cooccurrence = list.filter(jump => jump.source !== 'llm')
+        .sort((a, b) => maxJumpWeight(b) - maxJumpWeight(a))
+        .slice(0, Math.max(0, cap - llmJumps.length))
+      list = [...cooccurrence, ...llmJumps]
     }
 
     // Reinforcement: measured jumps (enough hits) are boosted by citation rate
@@ -1944,6 +2041,14 @@ export class CognitivePipelineService extends Service {
    */
   triggerJumps(): readonly TriggerJump[] {
     return this.store.triggerJumpsSnapshot()
+  }
+
+  /** The discriminant-axis table (public for the inject plugin's C-form
+   * routing): embedding clusters, LLM names the discriminating poles.
+   * @returns a detached axis list, insertion order.
+   */
+  discriminantAxes(): readonly DiscriminantAxisRecord[] {
+    return this.store.discriminantAxesSnapshot()
   }
 
   /**
@@ -2181,6 +2286,58 @@ export class CognitivePipelineService extends Service {
     this.store.upsertChain(distilled)
     await this.store.flush()
     return distilled
+  }
+
+  /**
+   * Extract discriminant axes from over-broad clusters (template 10, LLM 定轴):
+   * for each cluster whose members are semantically near-duplicates but may
+   * split behaviorally, ask the LLM which dimension actually drives the
+   * difference (e.g. 新手↔资深 inside a git-push cluster). The axes persist as
+   * the C-form routing table — embedding clusters, LLM names the discriminating
+   * poles. Clusters with < 8 members are skipped (too small to split); the
+   * over-broad cluster is the target, not the whole taxonomy.
+   * @param call - optional session/signal context.
+   * @returns how many axes were extracted and persisted.
+   */
+  async extractDiscriminantAxes(call?: PipelineCallContext): Promise<{ axesCount: number; clustersExamined: number }> {
+    if (!hasExplicitRoute(this.resolved.route)) return { axesCount: 0, clustersExamined: 0 }
+    const clusters = this.store.clustersSnapshot()
+    const records: DiscriminantAxisRecord[] = []
+    let clustersExamined = 0
+    const now = Date.now()
+    for (const cluster of clusters) {
+      // Members = experiences actually assigned to this cluster (the clusterId
+      // field on the experience row), not just the anchor evidence ids — the
+      // anchors are 3-5 seed rows, too few to discriminate; membership can be
+      // an order of magnitude larger (measured: cluster 10 holds 31 rows).
+      const members = this.store.experiencesSnapshot()
+        .filter(exp => exp.clusterId === cluster.clusterId)
+      // Skip small clusters: an axis needs enough members to be discriminable.
+      if (members.length < 8) continue
+      clustersExamined += 1
+      const result = await proposeDiscriminantAxes(this.ctx, this.resolved.route, {
+        clusterLabel: cluster.name,
+        members: members.map(exp => ({
+          expId: exp.expId,
+          text: `${exp.sar.situation}。${exp.sar.action}。${exp.sar.outcome}`,
+        })),
+      }, { sessionId: call?.sessionId, signal: call?.signal })
+      for (const axis of result.axes) {
+        records.push({
+          clusterId: cluster.clusterId,
+          dimension: axis.dimension,
+          axisName: axis.axisName,
+          terms: axis.terms,
+          rationale: axis.rationale,
+          createdAt: now,
+        })
+      }
+    }
+    if (records.length > 0 || clustersExamined > 0) {
+      this.store.replaceDiscriminantAxes(records)
+      await this.store.flush()
+    }
+    return { axesCount: records.length, clustersExamined }
   }
 
   /**

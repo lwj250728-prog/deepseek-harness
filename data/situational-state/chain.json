@@ -1,0 +1,32 @@
+{
+  "nodes": [
+    {
+      "nodeId": "sstate-1",
+      "seq": 1,
+      "prevNodeId": null,
+      "createdAt": 1787657941127,
+      "situation": "认知管线运维会话：审计经验注入利用率（272 条经验/3 条引用）、已重建触发跳转（400 条）、检查自决情景状态链表是否持续写入",
+      "sessionId": "session-e61093ac-f945-48ed-9cdc-8b8b9063b83e",
+      "nextUpdateAfterMs": null
+    },
+    {
+      "nodeId": "sstate-2",
+      "seq": 2,
+      "prevNodeId": "sstate-1",
+      "createdAt": 1787659114524,
+      "situation": "正在排查认知注入触发失败的问题：注入门没有打开，怀疑经验检索不到，需要参考之前遇到过的经验",
+      "sessionId": "session-e61093ac-f945-48ed-9cdc-8b8b9063b83e",
+      "nextUpdateAfterMs": null
+    },
+    {
+      "nodeId": "sstate-3",
+      "seq": 3,
+      "prevNodeId": "sstate-2",
+      "createdAt": 1788238349238,
+      "situation": "认知管线改进收尾会话：完成嵌入升级（bge-m3 1024维回填326条经验）、触发门分层架构（检索驱动+显著性门+veto）、情景链 B 方案（链龄感知更新引导）已上线并验证注入；正进行最终收尾与文档更新",
+      "sessionId": "session-e33179fe-158c-4f3e-8c5e-2ce354d7678d",
+      "nextUpdateAfterMs": 3600000
+    }
+  ],
+  "nextSeq": 3
+}

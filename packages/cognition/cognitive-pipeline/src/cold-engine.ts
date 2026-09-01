@@ -39,7 +39,23 @@ export interface ColdEngineConfig {
   readonly reconstructRetries: number
   readonly clusterMergeCosine: number
   readonly clusterMatchCosine: number
+  /** Clustering vector space: 'outcome' (legacy, utility space) or 'embedding'
+   * (semantic space, roadmap R3). Experiences without a stored embedding fall
+   * back to the outcome vector per-record, so a partially-embedded store still
+   * clusters. */
+  readonly clusterVectorSource: 'outcome' | 'embedding'
 }
+
+/** Calibrated agglomerative merge cosine for the embedding space
+ * (colddomain-test/calibrate-merge.mjs): bge-m3 similarity on this corpus is
+ * high (pairwise median 0.504), so the outcome-space default 0.4 would merge
+ * everything into one giant cluster; 0.75 yields 118 clusters with a 53% giant
+ * and semantically correct small clusters. */
+export const EMBEDDING_MERGE_COSINE = 0.75
+/** Calibrated membership cosine for the embedding space
+ * (colddomain-test/calibrate-match.mjs): ≥0.65 keeps 89% of true members while
+ * cutting cross-cluster bleed from 145 to 68 per cluster at 0.60. */
+export const EMBEDDING_MATCH_COSINE = 0.65
 
 /** One agglomerative cluster in progress. */
 interface AggCluster {
@@ -103,10 +119,18 @@ function clampLabel(value: number): number {
  * cluster axis reflects what was actually verified, not what the record
  * claimed. Experiences without samples keep their self-reported vector, so
  * legacy and young records are unaffected.
+ *
+ * In `embedding` space (source === 'embedding') the stored real-embedding
+ * vector is used directly when present (semantic clustering, the roadmap R3
+ * axis that carries premise discrimination missing from utility space); a
+ * record without an embedding degrades to the outcome vector, so a
+ * partially-embedded store still clusters.
  * @param exp - the experience to vectorize for clustering.
- * @returns the evidence-aware outcome vector.
+ * @param source - the clustering space: outcome (legacy) or embedding (semantic).
+ * @returns the evidence-aware vector in the requested space.
  */
-function clusterVectorOf(exp: Experience): readonly number[] {
+function clusterVectorOf(exp: Experience, source: 'outcome' | 'embedding'): readonly number[] {
+  if (source === 'embedding' && exp.embedding !== undefined) return exp.embedding
   const samples = exp.settlements ?? []
   if (samples.length === 0) return exp.outcomeVector
   const mean = samples.reduce((sum, sample) => sum + sample.quality, 0) / samples.length
@@ -192,6 +216,7 @@ function verifyEvidence(
   byId: ReadonlyMap<string, Experience>,
   minCount: number,
   maxDistance: number,
+  source: 'outcome' | 'embedding',
 ): { ok: boolean; reason: string } {
   if (candidate.evidenceIds.length < minCount) {
     return { ok: false, reason: `证据不足（${candidate.evidenceIds.length} < ${minCount}）` }
@@ -203,7 +228,7 @@ function verifyEvidence(
   let maxDistanceSeen = 0
   for (let i = 0; i < evidence.length; i += 1) {
     for (let j = i + 1; j < evidence.length; j += 1) {
-      const distance = 1 - cosine(clusterVectorOf(evidence[i] as Experience), clusterVectorOf(evidence[j] as Experience))
+      const distance = 1 - cosine(clusterVectorOf(evidence[i] as Experience, source), clusterVectorOf(evidence[j] as Experience, source))
       maxDistanceSeen = Math.max(maxDistanceSeen, distance)
     }
   }
@@ -228,6 +253,19 @@ export class ColdEngine {
     this.store = store
     this.config = config
     this.route = route
+  }
+
+  /** Agglomerative merge cosine resolved for the configured clustering space.
+   * Embedding mode uses the corpus-calibrated threshold (0.75) because bge-m3
+   * similarity on this corpus is high; outcome mode keeps the configured value. */
+  private mergeCosine(): number {
+    return this.config.clusterVectorSource === 'embedding' ? EMBEDDING_MERGE_COSINE : this.config.clusterMergeCosine
+  }
+
+  /** Membership cosine resolved for the configured clustering space
+   * (embedding 0.65 calibrated against member recall vs cross-cluster bleed). */
+  private matchCosine(): number {
+    return this.config.clusterVectorSource === 'embedding' ? EMBEDDING_MATCH_COSINE : this.config.clusterMatchCosine
   }
 
   /**
@@ -280,8 +318,8 @@ export class ColdEngine {
 
     // ── utility-space clustering ──────────────────────────────────────────
     const groups = agglomerate(
-      train.map(exp => clusterVectorOf(exp)),
-      this.config.clusterMergeCosine,
+      train.map(exp => clusterVectorOf(exp, this.config.clusterVectorSource)),
+      this.mergeCosine(),
     ).filter(group => group.memberIndices.length >= this.config.evidenceMinCount)
 
     const groupsWithUtility = groups.map((group) => {
@@ -326,14 +364,15 @@ export class ColdEngine {
           expectedUtilityRange: cluster.expectedUtilityRange,
           evidenceIds: cluster.supportingEvidenceIds,
           fallbackAction: cluster.fallbackAction,
-          centroid: centroidOf(evidence.map(exp => clusterVectorOf(exp))),
+          centroid: centroidOf(evidence.map(exp => clusterVectorOf(exp, this.config.clusterVectorSource))),
           meanUtility: mean,
           polarity: meanUtilityScore(mean) > 0 ? 'success' : 'risk',
         }
       })
       const verified: CandidateCluster[] = []
       for (const candidate of candidates) {
-        const check = verifyEvidence(candidate, byId, this.config.evidenceMinCount, this.config.evidenceMaxDistance)
+        const check = verifyEvidence(candidate, byId, this.config.evidenceMinCount,
+          this.config.evidenceMaxDistance, this.config.clusterVectorSource)
         if (!check.ok) {
           rejectedClusters += 1
           this.ctx.logger.warn(`cognitive-pipeline: 簇 "${candidate.name}" 被证据校验驳回：${check.reason}`)
@@ -358,7 +397,8 @@ export class ColdEngine {
     // written — a fallback path never bypasses verification.
     if (finalCandidates.length === 0 && groupsWithUtility.length > 0) {
       for (const candidate of this.fallbackCandidates(groupsWithUtility, byId)) {
-        const check = verifyEvidence(candidate, byId, this.config.evidenceMinCount, this.config.evidenceMaxDistance)
+        const check = verifyEvidence(candidate, byId, this.config.evidenceMinCount,
+          this.config.evidenceMaxDistance, this.config.clusterVectorSource)
         if (check.ok) {
           finalCandidates = [...finalCandidates, candidate]
         } else {
@@ -636,9 +676,9 @@ export class ColdEngine {
       : train.reduce((sum, exp) => sum + exp.sar.outcomeUtility.materialGain, 0) / train.length / 10
     return validation.map((exp) => {
       let best = -1
-      let bestScore = this.config.clusterMatchCosine
+      let bestScore = this.matchCosine()
       for (const view of taxonomy) {
-        const score = cosine(clusterVectorOf(exp), view.centroid)
+        const score = cosine(clusterVectorOf(exp, this.config.clusterVectorSource), view.centroid)
         if (score >= bestScore) {
           bestScore = score
           best = view.meanUtility.materialGain / 10
@@ -688,7 +728,8 @@ export class ColdEngine {
 
     for (const candidate of candidates) {
       const clusterId = this.store.nextClusterId()
-      const members = all.filter(exp => cosine(clusterVectorOf(exp), candidate.centroid) >= this.config.clusterMatchCosine)
+      const members = all.filter(exp =>
+        cosine(clusterVectorOf(exp, this.config.clusterVectorSource), candidate.centroid) >= this.matchCosine())
       if (members.length === 0) continue
       let cumError = 0
       for (const member of members) {
@@ -768,12 +809,14 @@ export class ColdEngine {
       : source.sar.outcomeUtility
     const strategyVector = outcomeVector(seedUtility, strategy.trialAction)
     let bestIndex = -1
-    let bestScore = this.config.clusterMatchCosine
+    // Note: strategyVector lives in outcome space; in embedding mode this
+    // compares across spaces (approximation for graduated-strategy anchoring).
+    let bestScore = this.matchCosine()
     for (let index = 0; index < clusters.length; index += 1) {
       const cluster = clusters[index] as Cluster
       const evidence = cluster.supportingEvidenceIds.map(id => byId.get(id)).filter((exp): exp is Experience => exp !== undefined)
       if (evidence.length === 0) continue
-      const centroid = centroidOf(evidence.map(exp => clusterVectorOf(exp)))
+      const centroid = centroidOf(evidence.map(exp => clusterVectorOf(exp, this.config.clusterVectorSource)))
       const score = cosine(strategyVector, centroid)
       if (score >= bestScore) {
         bestScore = score

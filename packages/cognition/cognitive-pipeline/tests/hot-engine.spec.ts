@@ -58,7 +58,14 @@ describe('hot loop (predict_outcome)', () => {
       const second = await ctx.cognitivePipeline.predict({ situation: '深夜', action: '立即起身去健身房' })
       expect(second.isNovel).toBe(true)
       expect(second.usedTempStrategy).toBe(true)
-      expect(second.advice).toContain('临时试行方案')
+      // The scratchpad now carries an abstracted strategy text (触类旁通), so
+      // the reuse advice surfaces the transferable strategy, not the raw action.
+      expect(second.advice).toContain('可迁移策略')
+      // The abstracted strategy must generalize the concrete action (健身房→对象).
+      const strategy = ctx.cognitivePipeline.store.tempStrategiesSnapshot()
+        .find(s => s.status === 'active' && s.strategyText !== undefined)
+      expect(strategy?.strategyText).toBeDefined()
+      expect(strategy?.strategyText).not.toContain('健身房')
     } finally {
       await teardown()
     }
@@ -483,7 +490,9 @@ describe('hot loop (predict_outcome)', () => {
     try {
       const first = await ctx.cognitivePipeline.predict({ situation: '未知领域', action: '尝试新的搜索策略' })
       expect(first.advice).toContain('1/1')
-      const second = await ctx.cognitivePipeline.predict({ situation: '另一个未知领域', action: '尝试另一种搜索策略' })
+      // A semantically UNRELATED action is not a scratchpad reuse, so it must
+      // hit the exhausted-budget guard instead of reusing the first plan.
+      const second = await ctx.cognitivePipeline.predict({ situation: '另一个未知领域', action: '搭建视频剪辑工作站' })
       expect(second.advice).toContain('探索预算已耗尽')
       expect(ctx.cognitivePipeline.store.explorationSnapshot().used).toBe(1)
     } finally {
@@ -506,6 +515,37 @@ describe('hot loop (predict_outcome)', () => {
       expect(ctx.cognitivePipeline.store.explorationSnapshot().entries[0]?.outcome).toBe('graduated')
       const insp = ctx.cognitivePipeline.inspect()
       expect(insp.exploration.graduated).toBe(1)
+    } finally {
+      await teardown()
+    }
+  })
+
+  // ── #4 regression (cold-domain finding): exact-signature-hash lookup never
+  // reused a scratchpad — real task actions rarely repeat verbatim, so every
+  // novel prediction spawned a new plan and hitCount stayed 1 forever. The
+  // lookup now falls back to semantic matching (findMatchingTempStrategy), so
+  // a near-identical action reuses the existing trial plan, its hitCount
+  // grows, and the reuse error folds back into the plan's exploration entry.
+  it('reuses a scratchpad via semantic match when the action phrasing differs', async () => {
+    const { ctx, teardown } = await pipelineHarness({ exploreDailyBudget: 5, tempStrategyMatchThreshold: 0.5 })
+    try {
+      const service = ctx.cognitivePipeline
+      // Create the scratchpad with one phrasing.
+      await service.predict({ situation: '未知领域', action: '尝试新的搜索策略' })
+      const before = service.store.tempStrategiesSnapshot().filter(s => s.status === 'active')
+      expect(before).toHaveLength(1)
+
+      // A semantically near-identical phrasing must reuse the SAME plan.
+      const reuse = await service.predict({ situation: '未知领域', action: '尝试新的搜索方案' })
+      expect(reuse.usedTempStrategy).toBe(true)
+      const after = service.store.tempStrategiesSnapshot().filter(s => s.status === 'active')
+      expect(after).toHaveLength(1)
+      expect(after[0]?.hitCount).toBeGreaterThanOrEqual(2)
+
+      // Feedback on the fuzzy reuse folds into the plan's exploration entry.
+      await service.report({ predictionId: reuse.predictionId, actualOutcome: '有效', outcomeQuality: 8 })
+      const entry = service.store.explorationSnapshot().entries[0]
+      expect(entry?.validatedError).not.toBeNull()
     } finally {
       await teardown()
     }
@@ -606,4 +646,132 @@ describe('hot loop (predict_outcome)', () => {
       await teardown()
     }
   })
+
+  // ── F1 regression (cold-domain stress test): the point estimate must
+  // always lie inside the confidence interval. The point estimate passes
+  // through shrinkage (layer 2) and the bucket correction (layer 5) while
+  // the interval is taken verbatim from the calibration output, so extreme
+  // raw probabilities used to produce point > upper (low raw) or point <
+  // lower (high raw). enforcePointInInterval extends the interval by the
+  // violated slack so the invariant point ∈ CI always holds. ─────────────
+  it('F1 regression: known path keeps the point estimate inside a high-raw confidence interval', async () => {
+    const { ctx, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm' },
+      [JSON.stringify({
+        base_success_rate: 80,
+        risk_factors: [],
+        final_confidence_interval_low: 70,
+        final_confidence_interval_high: 90,
+        final_calibrated_probability: 80,
+        advice_preview: '按计划执行',
+      })],
+    )
+    try {
+      const store = ctx.cognitivePipeline.store
+      for (let index = 1; index <= 6; index += 1) {
+        seed(store, `exp_f1_known_${index}`, POSITIVE_UTILITY.action, POSITIVE_UTILITY.situation, { materialGain: 8, emotionalValence: 7, energyCost: 3 })
+      }
+      const result = await ctx.cognitivePipeline.predict({ situation: '清晨', action: '晨跑五公里' })
+      expect(result.isNovel).toBe(false)
+      // raw 0.8 with k=6 shrinks toward 0.5, far below the verbatim 0.7 lower
+      // bound; without the fix this assertion fails.
+      expect(result.calibratedProbability).toBeGreaterThanOrEqual(result.confidenceLow)
+      expect(result.calibratedProbability).toBeLessThanOrEqual(result.confidenceHigh)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('F1 regression: novel path keeps the point estimate inside a low-raw confidence interval', async () => {
+    const { ctx, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm' },
+      [
+        JSON.stringify({ is_known: false, confidence_score: 10, reasoning_short: '陌生情境', suggested_initial_risk_level: 'high' }),
+        JSON.stringify({
+          base_success_rate: 10,
+          risk_factors: [],
+          final_confidence_interval_low: 5,
+          final_confidence_interval_high: 20,
+          final_calibrated_probability: 10,
+          advice_preview: '谨慎试探',
+        }),
+      ],
+    )
+    try {
+      const result = await ctx.cognitivePipeline.predict({ situation: '深夜', action: '立即起身去健身房' })
+      expect(result.isNovel).toBe(true)
+      // k=0 shrinkage pins the point at 0.5 while the verbatim interval tops
+      // out at 0.2; without the fix this assertion fails.
+      expect(result.calibratedProbability).toBeGreaterThanOrEqual(result.confidenceLow)
+      expect(result.calibratedProbability).toBeLessThanOrEqual(result.confidenceHigh)
+    } finally {
+      await teardown()
+    }
+  })
+
+  // ── F2 regression (cold-domain stress test): a query that lands in a
+  // taxonomy coverage gap must not be silently routed as known just because
+  // generic action words (e.g. "调整参数") superficially match experiences
+  // from an unrelated domain. The gap verdict now raises novelty suspicion
+  // and forces the OOD review, which overrides to novel when it says so.
+  it('F2 regression: a coverage-gap query with high action similarity is reviewed and routed as novel', async () => {
+    const RECON = JSON.stringify({
+      new_clusters: [
+        {
+          cluster_name: '系统调参簇',
+          decision_rule: 'if 服务器性能下降 then 调整系统参数',
+          expected_utility_range: { low: 6, high: 10 },
+          supporting_evidence_ids: ['exp_1', 'exp_2', 'exp_3'],
+          fallback_action: '重启服务',
+        },
+      ],
+      taxonomy_summary_short: '重组为1簇：系统调参',
+    })
+    const { ctx, teardown } = await pipelineHarness(
+      {
+        provider: 'cognition-test',
+        model: 'm',
+        predictionErrorThreshold: 0,
+        minValidationCount: 1,
+      },
+      [
+        RECON,
+        JSON.stringify({ is_known: false, confidence_score: 10, reasoning_short: '领域不同，不可迁移', suggested_initial_risk_level: 'high' }),
+        JSON.stringify({
+          base_success_rate: 40,
+          risk_factors: [],
+          final_confidence_interval_low: 20,
+          final_confidence_interval_high: 60,
+          final_calibrated_probability: 40,
+          advice_preview: '先小试',
+        }),
+      ],
+    )
+    try {
+      const service = ctx.cognitivePipeline
+      const store = service.store
+      // Three server-tuning successes plus one weaker outcome. Identical
+      // samples would make the cold-start baseline look perfect (validation
+      // error 0) and the rebuild would refuse to write the cluster; the
+      // weaker newest sample gives the validation slice a nonzero error so
+      // the first build is accepted against the baseRate.
+      for (let index = 1; index <= 3; index += 1) {
+        seed(store, `exp_${index}`, '调整系统参数', '服务器性能下降', { materialGain: 8, emotionalValence: 7, energyCost: 3 }, '性能恢复')
+      }
+      seed(store, 'exp_4', '调整系统参数', '服务器性能下降', { materialGain: 4, emotionalValence: 4, energyCost: 7 }, '性能部分恢复')
+      const rebuild = await service.rebuild('global')
+      expect(rebuild.accepted).toBe(true)
+
+      // Same action vocabulary as the seeded experiences, but a completely
+      // different domain (fermentation): the action channel matches (no OOD
+      // signal) while the situation falls outside every cluster centroid
+      // (coverage gap). Without the F2 fix this routes as known.
+      const result = await service.predict({ situation: '毕赤酵母发酵罐诱导期异常', action: '调整系统参数' })
+      expect(result.taxonomyContext.coverage).toBe('gap')
+      expect(result.isNovel).toBe(true)
+    } finally {
+      await teardown()
+    }
+  })
+
 })

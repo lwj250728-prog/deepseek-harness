@@ -56,22 +56,25 @@ export function importanceOf(exp: Experience): number {
 }
 
 /**
- * Derive the trigger lexicon from the experience store: tokens of the
- * situation/action of important experiences (high utility, high-risk, or
- * frequently hit) accumulate their importance into per-token weights, the
+ * Derive the trigger lexicon from the experience store: multi-char words of
+ * the situation/action of important experiences (high utility, high-risk, or
+ * frequently hit) accumulate their importance into per-word weights, the
  * top-N survive, normalized to [DERIVED_TRIGGER_MIN, 1].
+ *
+ * Vocabulary matches the jump layer (finding #10): single CJK characters were
+ * noise — the derived table measured 59/60 single chars (行×189, 验×184) that
+ * let nearly any message cross the 0.6 gate, making injection indiscriminate
+ * (83% of 126 injections never cited). Only multi-char words (CJK bigrams +
+ * latin tokens) carry associative specificity.
  * @param service - the pipeline service whose store feeds the lexicon.
- * @returns the derived trigger map (token → weight).
+ * @returns the derived trigger map (word → weight).
  */
 export function deriveTriggerWords(service: CognitivePipelineService): Map<string, number> {
   const weights = new Map<string, number>()
   for (const exp of service.store.experiencesSnapshot()) {
     const importance = importanceOf(exp)
     if (importance <= 0) continue
-    const tokens = new Set([
-      ...tokenize(exp.sar.situation),
-      ...tokenize(exp.sar.action),
-    ])
+    const tokens = new Set(jumpVocabulary(`${exp.sar.situation} ${exp.sar.action}`))
     for (const token of tokens) {
       if (STOP_WORDS.has(token) || STATIC_TRIGGERS.has(token)) continue
       weights.set(token, (weights.get(token) ?? 0) + importance)
@@ -114,6 +117,14 @@ export function emptyJumpAccumulator(): JumpAccumulator {
  * excluded from being jump candidates: they share the experience vocabulary,
  * and a jump adds association strength toward the more diagnostic trigger on
  * top of the token's own derived weight.
+ *
+ * Token vocabulary (finding: the jump layer's single-CJK-character tokens were
+ * noise — "该/置/目" associate with every generic verb, 89% of the 400-word
+ * table never fired and 0 were ever cited): a jump word must be a multi-char
+ * latin token (bundle/bug/dsh) or a CJK bigram from the text (端口/挂起/重启).
+ * Single CJK characters are dropped — they co-occur with everything and carry
+ * no associative specificity. The bigrams are extracted locally so the shared
+ * `tokenize` (which feeds retrieval vectors) is untouched.
  * @param service - the pipeline service whose store feeds the accumulation.
  * @param accumulator - the accumulator to fold into (fresh from
  *   {@link emptyJumpAccumulator} for a rebuild).
@@ -130,7 +141,7 @@ export function accumulateTriggerJumps(
     const importance = importanceOf(exp)
     if (importance <= 0) continue
     const text = `${exp.sar.situation} ${exp.sar.action}`
-    const tokens = [...new Set(tokenize(text))]
+    const tokens = jumpVocabulary(text)
     const presentTriggers = new Set<string>()
     for (const trigger of STATIC_TRIGGERS) {
       if (text.includes(trigger)) presentTriggers.add(trigger)
@@ -148,4 +159,45 @@ export function accumulateTriggerJumps(
       }
     }
   }
+}
+
+/** Whether one character is CJK. */
+function isCjkChar(char: string): boolean {
+  const code = char.codePointAt(0) ?? 0
+  return code >= 0x4e00 && code <= 0x9fff
+}
+
+/** The jump-word vocabulary of one text: multi-char latin tokens plus CJK
+ * bigrams (every adjacent pair inside a CJK run). Single CJK characters are
+ * excluded — the measured jump layer of 400 words was 89% single-char noise
+ * (该/置/目) that never fired and never got cited. Exported so the inject
+ * gate matches messages with the same vocabulary the lexicon was built from.
+ */
+export function jumpVocabulary(text: string): string[] {
+  const tokens = tokenize(text)
+  const words = new Set<string>()
+  for (const token of tokens) {
+    // Latin/digit runs (bundle, bug, dsh, cli) are naturally multi-char.
+    if (/[a-zA-Z0-9]/.test(token)) words.add(token)
+  }
+  // CJK bigrams: slide over each contiguous CJK run, emit every adjacent pair.
+  let run = ''
+  for (const char of text) {
+    if (isCjkChar(char)) {
+      run += char
+    } else {
+      if (run.length >= 2) {
+        for (let index = 0; index + 1 < run.length; index += 1) {
+          words.add(run.slice(index, index + 2))
+        }
+      }
+      run = ''
+    }
+  }
+  if (run.length >= 2) {
+    for (let index = 0; index + 1 < run.length; index += 1) {
+      words.add(run.slice(index, index + 2))
+    }
+  }
+  return [...words]
 }

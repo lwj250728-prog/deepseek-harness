@@ -16,6 +16,7 @@ import type {
   ChainPattern,
   ClaimAudit,
   Cluster,
+  DiscriminantAxisRecord,
   Experience,
   ExploreEntry,
   ExplorationState,
@@ -118,6 +119,7 @@ export class CognitiveStore {
   private acceptance = new Map<string, AcceptanceCheck>()
   private claimAudits = new Map<string, ClaimAudit>()
   private triggerJumps = new Map<string, TriggerJump>()
+  private discriminantAxes: DiscriminantAxisRecord[] = []
   private injections = new Map<string, InjectionRecord>()
   private chains = new Map<string, ChainExperience>()
   private chainPatterns = new Map<string, ChainPattern>()
@@ -152,7 +154,7 @@ export class CognitiveStore {
       experiences, predictions, tempStrategies, clusters, calibration,
       channelWeights, exploration, tasks, loopExecutions, acceptance,
       claimAudits, triggerJumps, injections, chains, chainPatterns, taxonomy,
-      solidifiedStrategies, variants,
+      solidifiedStrategies, variants, discriminantAxes,
     ] = await Promise.all([
       readFile(this.file('experiences.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('predictions.jsonl'), 'utf8').catch(() => ''),
@@ -172,6 +174,7 @@ export class CognitiveStore {
       readFile(this.file('taxonomy.json'), 'utf8').catch(() => ''),
       readFile(this.file('solidified_strategies.json'), 'utf8').catch(() => ''),
       readFile(this.file('variants.json'), 'utf8').catch(() => ''),
+      readFile(this.file('discriminant_axes.json'), 'utf8').catch(() => ''),
     ])
     for (const record of parseLines(experiences)) {
       if (typeof record !== 'object' || record === null) continue
@@ -341,6 +344,14 @@ export class CognitiveStore {
           if (typeof jump.jumpWord !== 'string' || jump.jumpWord.length === 0) continue
           this.triggerJumps.set(jump.jumpWord, jump)
         }
+      }
+    }
+    if (discriminantAxes !== '') {
+      const parsed = JSON.parse(discriminantAxes) as unknown
+      if (Array.isArray(parsed)) {
+        this.discriminantAxes = parsed.filter((record): record is DiscriminantAxisRecord =>
+          typeof record === 'object' && record !== null
+          && typeof (record as DiscriminantAxisRecord).clusterId === 'number')
       }
     }
     for (const record of parseLines(injections)) {
@@ -1165,6 +1176,22 @@ export class CognitiveStore {
   replaceTriggerJumps(jumps: readonly TriggerJump[]): void {
     this.triggerJumps = new Map(jumps.map(jump => [jump.jumpWord, jump]))
     this.enqueue('trigger_jumps.json', [...this.triggerJumps.values()])
+  }
+
+  /** Snapshot of every discriminant axis, insertion order.
+   * @returns the axis list.
+   */
+  discriminantAxesSnapshot(): readonly DiscriminantAxisRecord[] {
+    return this.discriminantAxes
+  }
+
+  /** Replace the whole discriminant-axis table (a rebuild replaces the axes
+   * together with the clusters they were extracted from).
+   * @param axes - the new table.
+   */
+  replaceDiscriminantAxes(axes: readonly DiscriminantAxisRecord[]): void {
+    this.discriminantAxes = [...axes]
+    this.enqueue('discriminant_axes.json', this.discriminantAxes)
   }
 
   /** Allocate the next injection-record id.

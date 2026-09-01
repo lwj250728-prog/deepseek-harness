@@ -24,6 +24,40 @@ import {
   symptomOverlap,
 } from './vectorizer.ts'
 
+/**
+ * Abstract a novel action into a domain-free transferable strategy — the
+ * 触类旁通 (analogical transfer) layer. Humans transfer RELATION STRUCTURE
+ * (an abstract principle) between domains, not surface attributes: "设备异常
+ * → 小步调参+监控反馈+迭代" transfers from 深海推进器 to 离心泵, while the
+ * literal action "调整深海推进器参数并增加水下巡检频率" does not. This
+ * extraction keeps the action's OPERATION pattern and replaces concrete
+ * domain objects with their generic class, so a structurally similar
+ * situation in another domain can reuse the strategy correctly.
+ * @param situation - the situation text at scratchpad creation.
+ * @param action - the novel action text.
+ * @returns the abstracted strategy text (≤60 chars, CJK).
+ */
+function abstractStrategy(situation: string, action: string): string {
+  // Concrete domain nouns → generic class, so the strategy survives
+  // cross-domain transfer (深海推进器/离心泵/发酵罐/数据库 → 对象; 健身房/客厅
+  // → 场所; 患者/用户 → 对象).
+  const generic = `${situation} ${action}`
+    .replace(/深海推进器|离心泵|压缩机|发动机|反应釜|发酵罐|数据库|服务器|web|服务|插件|模块|组件/g, '对象')
+    .replace(/患者|病人|游客|用户|客户/g, '对象')
+    .replace(/健身房|跑步机|客厅|卧室|书房|办公室/g, '场所')
+  // Extract the OPERATION verbs — the transferable skeleton — into a compact
+  // principle: strip domain nouns (already genericized), keep action verbs.
+  const operationWords = '调整 修改 排查 更换 重试 尝试 检测 恢复 重启 观察 监控 验证 评估 优化 处理 分析 设置 清除 清理 备份 建立 实施 开展 推进 部署 迁移 升级 配置 使用 提升 降低 加强 控制 更新 测试 修复 解决 判断 决定 确认 检查 审核 校验 比对 校勘 整理 归纳 提炼 推导 计算 记录 编写 翻译'.split(' ')
+  const operations = generic.match(new RegExp(operationWords.join('|'), 'g')) ?? []
+  if (operations.length > 0) {
+    const unique = [...new Set(operations)]
+    return `策略：${unique.join('')}（先小步试，观察反馈后迭代）`
+  }
+  // No recognized verb: fall back to a compact generic excerpt.
+  const compact = generic.replace(/\s+/g, '').slice(0, 40)
+  return compact.length > 0 ? compact : action.slice(0, 40)
+}
+
 /** Fully resolved engine thresholds (no optional fields). */
 export interface HotEngineConfig {
   readonly topK: number
@@ -134,6 +168,27 @@ function widenInterval(low: number, high: number, minWidth: number): { low: numb
   if (lower === 0 && upper < 1) return { low: 0, high: Math.min(1, minWidth) }
   if (upper === 1 && lower > 0) return { low: Math.max(0, 1 - minWidth), high: 1 }
   return { low: 0, high: 1 }
+}
+
+/**
+ * Enforce the interval-consistency invariant: the reported point estimate must
+ * always lie inside the confidence interval. The point estimate goes through
+ * shrinkage (layer 2) and the lifetime bucket correction (layer 5) while the
+ * interval is taken verbatim from the calibration output, so the two can
+ * drift apart when the raw probability is extreme (observed in cold-domain
+ * stress tests: point > upper bound on low-raw predictions, point < lower
+ * bound on high-raw ones). Rather than distorting the point estimate, the
+ * interval is extended symmetrically by the violated slack so the width
+ * semantics (uncertainty) are preserved and the invariant point ∈ CI holds.
+ * @param point - the final calibrated point estimate in [0, 1].
+ * @param low - the widened interval lower bound in [0, 1].
+ * @param high - the widened interval upper bound in [0, 1].
+ * @returns an interval containing the point estimate, never narrower than the input.
+ */
+function enforcePointInInterval(point: number, low: number, high: number): { low: number; high: number } {
+  if (Number.isFinite(point) && point < low) return { low: point, high }
+  if (Number.isFinite(point) && point > high) return { low, high: point }
+  return { low, high }
 }
 
 /**
@@ -298,9 +353,18 @@ export class HotEngine {
     const topChannels = refined[0] === undefined ? null : refined[0].channels
 
     // Math-only OOD suspicion: any signal means the LLM (or its fallback)
-    // confirms novelty unless the review overrides it.
-    let isNovel = oodSignal !== 'none'
-    if (oodSignal !== 'none' && ranked.length > 0) {
+    // confirms novelty unless the review overrides it. Structural taxonomy
+    // non-coverage also raises novelty suspicion: a query that lands in a
+    // coverage gap must not be silently treated as known just because generic
+    // pattern channels (e.g. "parameter tuning") superficially match experiences
+    // from unrelated domains (cold-domain stress test finding F2: the
+    // fermentation query matched 10 generic hits with no real prior and
+    // skipped OOD). Only the explicit 'gap' verdict is used — 'no-taxonomy'
+    // (system not yet built) stays on the math-only path so warm-store
+    // predictions without clusters keep their known routing.
+    const taxonomyGap = taxonomyContext.coverage === 'gap'
+    let isNovel = oodSignal !== 'none' || taxonomyGap
+    if ((oodSignal !== 'none' || taxonomyGap) && ranked.length > 0) {
       const review = await reviewOod(
         this.ctx,
         this.route,
@@ -506,7 +570,13 @@ export class HotEngine {
     // ROI tracking: strategies that expired never graduated — a failed
     // exploration attempt.
     for (const expiredHash of expired) this.store.resolveExploration(expiredHash, 'expired')
-    let strategy = this.store.getTempStrategy(hash)
+    // Scratchpad lookup: exact signature hash first, then semantic matching
+    // (cosine over the action vectors, threshold tempStrategyMatchThreshold).
+    // Exact-hash-only lookup never reused a plan in practice — real task
+    // actions rarely repeat verbatim — so 18/18 active strategies sat at
+    // hitCount=1 with no convergence (cold-domain finding #4). The fuzzy
+    // match lets a near-identical action reuse the existing trial plan.
+    let strategy = this.findMatchingTempStrategy(input.action, input.situation)
     let usedTempStrategy = false
     // Whether this prediction is linked to an exploration ledger entry: true
     // when it reused an active scratchpad OR created a budgeted one. Its
@@ -516,7 +586,11 @@ export class HotEngine {
     if (strategy !== undefined && strategy.status === 'active') {
       usedTempStrategy = true
       explored = true
-      strategy = this.store.updateTempStrategy(hash, {
+      // Update the MATCHED strategy (its own signature hash), never the query
+      // hash: a fuzzy match binds a different action to this plan, and the
+      // exploration ledger is keyed by the plan's hash, so the reuse error
+      // must fold back into the plan's entry.
+      strategy = this.store.updateTempStrategy(strategy.signatureHash, {
         hitCount: strategy.hitCount + 1,
         pendingResult: null,
       })
@@ -535,15 +609,22 @@ export class HotEngine {
 
     const raw = calibration.finalCalibratedProbability
     const shrunk = this.shrink(raw, 0)
-    const widened = widenInterval(
+    const widenedIntervalRaw = widenInterval(
       clamp01(calibration.finalConfidenceIntervalLow),
       clamp01(calibration.finalConfidenceIntervalHigh),
       this.config.minConfidenceIntervalWidth,
     )
+    const widened = enforcePointInInterval(shrunk, widenedIntervalRaw.low, widenedIntervalRaw.high)
 
     let advice: string
     if (usedTempStrategy && strategy !== undefined) {
-      advice = `⚠️ 全新现象（命中临时试行方案）：${strategy.trialAction}。此为临时试行方案，尚未晋升为主记忆。`
+      // 触类旁通 injection: surface the ABSTRACTED strategy (domain-free
+      // principle) when available, so a structurally similar cross-domain
+      // reuse reads as a transferable plan ("设备异常：小步调参+监控反馈")
+      // instead of a wrong-domain literal action ("调整深海推进器参数").
+      advice = strategy.strategyText !== undefined && strategy.strategyText.length > 0
+        ? `⚠️ 全新现象（命中可迁移策略）：${strategy.strategyText}。此为试探策略，尚未晋升为主记忆，请结合当前领域验证适用性。`
+        : `⚠️ 全新现象（命中临时试行方案）：${strategy.trialAction}。此为临时试行方案，尚未晋升为主记忆。`
     } else {
       // Active exploration (scheme 2): a novel scratchpad creation counts
       // against the daily curiosity budget ONLY when the action is reversible
@@ -579,6 +660,7 @@ export class HotEngine {
       this.store.addTempStrategy({
         signatureHash: hash,
         trialAction: input.action,
+        strategyText: abstractStrategy(input.situation, input.action),
         pendingResult: null,
         hitCount: 1,
         positiveCount: 0,
@@ -611,7 +693,11 @@ export class HotEngine {
       // Link feedback back to the exploration ledger whenever this prediction
       // reused (or created) a scratchpad: the reuse error folds into the
       // entry's ROI so "did this exploration pay off" is measured in practice.
-      exploredActionHash: explored ? hash : null,
+      // A fuzzy reuse binds the query to the MATCHED plan, so the ledger key
+      // is the plan's signature hash — never the query's own hash.
+      exploredActionHash: explored
+        ? (usedTempStrategy && strategy !== undefined ? strategy.signatureHash : hash)
+        : null,
       timestamp: Date.now(),
       actualOutcome: null,
       predictionError: null,
@@ -679,7 +765,7 @@ export class HotEngine {
     // Layer 2: sample-size shrinkage toward the 0.5 ignorance line.
     const shrunk = this.shrink(raw, k)
     // Layer 3: enforce the minimum interval width.
-    const widened = widenInterval(
+    const widenedIntervalRaw = widenInterval(
       clamp01(calibration.finalConfidenceIntervalLow),
       clamp01(calibration.finalConfidenceIntervalHigh),
       this.config.minConfidenceIntervalWidth,
@@ -687,6 +773,13 @@ export class HotEngine {
     // Layer 5: lifetime bucket correction, smoothed against the shrunk value.
     const empirical = this.store.empiricalAccuracyFor(shrunk)
     const finalProbability = empirical === null ? shrunk : clamp01(0.7 * shrunk + 0.3 * empirical)
+    // Interval-consistency invariant: the point estimate (post shrinkage and
+    // bucket correction) must lie inside the reported interval. The interval
+    // itself is taken from the calibration output untouched by those layers,
+    // so extend it by the violated slack when the point estimate drifts out
+    // (cold-domain stress test finding F1: extreme raw probabilities produced
+    // point > upper or point < lower).
+    const widened = enforcePointInInterval(finalProbability, widenedIntervalRaw.low, widenedIntervalRaw.high)
 
     const nearest = samples[0]
     const clusterId = nearest === undefined ? null : nearest.clusterId
@@ -753,15 +846,26 @@ export class HotEngine {
   }
 
   /** Find an active scratchpad strategy loosely matching one action.
+   * Exact hash first; then a semantic match at the STRATEGY layer — the
+   * query is abstracted the same way scratchpads were (触类旁通), so a
+   * structurally similar situation in another domain matches the abstracted
+   * principle ("调整深海推进器参数+巡检" → "策略：调整（先小步试…）" matches
+   * the 离心泵 query's identical strategy), not the raw action. Legacy rows
+   * without a strategyText fall back to raw-action matching.
    * @param action - the action text to match.
+   * @param situation - the situation text, used for the strategy abstraction.
    * @returns the matching active strategy, or undefined.
    */
-  findMatchingTempStrategy(action: string): TempStrategy | undefined {
+  findMatchingTempStrategy(action: string, situation: string = ''): TempStrategy | undefined {
     const hash = String(signatureHash(action))
     this.store.expireTempStrategies()
+    const queryStrategy = abstractStrategy(situation, action)
     return this.store.tempStrategiesSnapshot().find(strategy =>
       strategy.status === 'active'
       && (strategy.signatureHash === hash
-        || cosine(actionVector(action, []), actionVector(strategy.trialAction, [])) >= this.config.tempStrategyMatchThreshold))
+        || cosine(
+          actionVector(queryStrategy, []),
+          actionVector(strategy.strategyText ?? strategy.trialAction, []),
+        ) >= this.config.tempStrategyMatchThreshold))
   }
 }

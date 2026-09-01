@@ -26,13 +26,13 @@ import {
   refineRetrieval,
   situationVector,
   symptomOverlap,
-  tokenize,
 } from '@deepseek-ai/dsh-cognitive-pipeline'
 import type { CognitivePipelineService } from '@deepseek-ai/dsh-cognitive-pipeline'
-import type { OutcomePolarity, SolidifiedStrategy } from '@deepseek-ai/dsh-cognitive-pipeline'
+import type { Experience, OutcomePolarity, SolidifiedStrategy } from '@deepseek-ai/dsh-cognitive-pipeline'
 import {
   DERIVED_TRIGGER_MIN,
   deriveTriggerWords,
+  jumpVocabulary,
   STATIC_TRIGGERS,
 } from '@deepseek-ai/dsh-cognitive-pipeline/src/triggers.ts'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
@@ -60,6 +60,26 @@ export interface Config {
   contextDepth?: number
   /** False disables injection while keeping the listener mounted (default true). */
   enabled?: boolean
+  /** Same-session cooldown: an experience injected into this session within
+   * the last `injectCooldownMs` is not injected again (default 10 min). Repeats
+   * of the same memory in one session are noise, not recall — the measured
+   * adoption collapse came with exp_1 injected 13×, exp_303 9× (cold-domain
+   * finding #3). 0 disables the cooldown. */
+  injectCooldownMs?: number
+  /** Situation-driven gate: a retrieval hit whose top similarity clears this
+   * threshold opens the gate WITHOUT any trigger word — the situation itself
+   * is the recall cue. Calibrated per retrieval space (finding #13):
+   * hash-bag cosine → 0.45 (business med 0.419, chitchat p75 0.362);
+   * embedding cosine (bge-m3) → 0.5 (business med 0.651, chitchat med 0.470,
+   * business min 0.455). Lower than minSimilarity is meaningless. */
+  directSimilarityThreshold?: number
+  /** Soft trigger boost: when a trigger word (static/derived/jump) fires, the
+   * top similarity is boosted by this amount before the gate check. Calibrated
+   * with the embedding space: 0.15 lifts a near-miss business hit (e.g. 0.455
+   * → 0.605) while a chitchat + trigger stays below a boosted threshold.
+   * In the hash space 0.3 was used; the embedding space needs less because
+   * scores sit higher. */
+  triggerBoost?: number
 }
 
 /** Schemastery validation for {@link Config}. */
@@ -70,6 +90,9 @@ export const Config: z<Config> = z.object({
   failureTopK: z.number().step(1).min(1).max(10).default(3),
   contextDepth: z.number().step(1).min(1).max(20).default(4),
   enabled: z.boolean().default(true),
+  injectCooldownMs: z.number().min(0).default(10 * 60 * 1000),
+  directSimilarityThreshold: z.number().min(0).max(1).default(0.5),
+  triggerBoost: z.number().min(0).max(1).default(0.15),
 })
 
 /** Resolved configuration with every optional field materialized. */
@@ -80,6 +103,9 @@ export interface ResolvedConfig {
   readonly failureTopK: number
   readonly contextDepth: number
   readonly enabled: boolean
+  readonly injectCooldownMs: number
+  readonly directSimilarityThreshold: number
+  readonly triggerBoost: number
 }
 
 /** Resolve the plugin configuration.
@@ -94,6 +120,9 @@ export function resolveConfig(config: Config): ResolvedConfig {
     failureTopK: config.failureTopK ?? 3,
     contextDepth: config.contextDepth ?? 4,
     enabled: config.enabled ?? true,
+    injectCooldownMs: config.injectCooldownMs ?? 10 * 60 * 1000,
+    directSimilarityThreshold: config.directSimilarityThreshold ?? 0.5,
+    triggerBoost: config.triggerBoost ?? 0.15,
   })
 }
 
@@ -196,6 +225,45 @@ interface RankedHit extends ExperienceHit {
 }
 
 /**
+ * C-form discriminant-axis boost (LLM 定轴 → 权重表参数化在线扫描):
+ * when the query hits one pole of a persisted discriminant axis and the
+ * candidate experience belongs to that axis's cluster, its similarity is
+ * nudged toward the matching pole. This restores premise discrimination that
+ * embedding cosine alone flattens (exp_56/57: 新手/资深 within one git-push
+ * cluster) — the axis terms are LLM-extracted polarity words, consumed as a
+ * static lookup so the online scan stays as cheap as the plain embedding scan.
+ * @param service - the pipeline service (for the axis table).
+ * @param query - the current situation text.
+ * @param exp - the candidate experience.
+ * @param clusterId - the experience's cluster assignment, if any.
+ * @returns the added boost in [-0.1, 0.1], or 0 when no axis applies.
+ */
+function axisBoost(
+  service: CognitivePipelineService,
+  query: string,
+  exp: Experience,
+  clusterId: number | null,
+): number {
+  if (clusterId === null) return 0
+  let boost = 0
+  for (const axis of service.discriminantAxes()) {
+    if (axis.clusterId !== clusterId) continue
+    // Query must actually speak the axis's language to route along it.
+    const hitTerm = axis.terms.find(term => query.includes(term))
+    if (hitTerm === undefined) continue
+    // Candidate matches the pole when its own text carries the same term;
+    // the boost is capped so a single axis never overrides the semantic rank.
+    const matches = axis.terms.some(term => exp.sar.situation.includes(term) || exp.sar.action.includes(term))
+    boost += matches ? AXIS_BOOST_GAIN : -AXIS_BOOST_GAIN
+  }
+  return Math.max(-0.1, Math.min(0.1, boost))
+}
+
+/** Cap for one discriminant-axis contribution to similarity (C-form routing
+ * nudge, not override). */
+const AXIS_BOOST_GAIN = 0.05
+
+/**
  * Retrieve experiences related to the current situation on both axes, then
  * guarantee **viewpoint coverage**: when both a failure and a success
  * experience clear the threshold, at least one of each is included — the
@@ -205,28 +273,46 @@ interface RankedHit extends ExperienceHit {
  * overlap adds a capped bonus proportional to the semantic score, so the
  * current setback surfaces related past experience without letting literal
  * markers override relevance.
+ *
+ * Embedding-aware (roadmap R3 + finding #13): when the pipeline has a real
+ * embedding scorer (e.g. SiliconFlow bge-m3), the query is embedded once and
+ * the semantic channel uses embedding cosine against experiences that carry a
+ * stored embedding; experiences without one fall back to the hash-bag cosine
+ * against the SAME query — the two axes are mixed per-experience, so a
+ * partially-embedded store still retrieves correctly (cold-store legacy rows
+ * and newly embedded rows coexist). No embedder → pure hash, unchanged.
+ *
+ * C-form (design 13): the persisted discriminant-axis table adds a small
+ * pole-matching nudge per candidate (see {@link axisBoost}), so premise
+ * discrimination (新手↔资深) survives the flattened embedding ranking.
  */
-function retrieve(
+async function retrieve(
   service: CognitivePipelineService,
   situation: string,
   minSimilarity: number,
   topK: number,
-): readonly RankedHit[] {
+): Promise<readonly RankedHit[]> {
   const vector = actionVector(situation, [])
   const situationVec = situationVector(situation)
+  const embedder = service.embedder
+  const queryEmbedding = embedder === null ? null : await embedder.embed(situation)
   const hits = service.store.experiencesSnapshot()
     .filter(exp => !isTaskRestatement(exp))
     .map((exp): RankedHit => {
       const text = `${exp.sar.situation}。${exp.sar.action}。${exp.sar.outcome}`
-      const semantic = Math.max(
-        cosine(vector, exp.actionVector),
-        cosine(situationVec, situationVector(exp.sar.situation)),
-      )
+      const semantic = queryEmbedding !== null && exp.embedding !== undefined
+        ? cosine(queryEmbedding, exp.embedding)
+        : Math.max(
+          cosine(vector, exp.actionVector),
+          cosine(situationVec, situationVector(exp.sar.situation)),
+        )
       return {
         expId: exp.expId,
         text,
         polarity: outcomePolarity(exp.sar.outcomeUtility),
-        similarity: semantic + symptomOverlap(situation, text) * SYMPTOM_BONUS * semantic,
+        similarity: semantic
+          + symptomOverlap(situation, text) * SYMPTOM_BONUS * semantic
+          + axisBoost(service, situation, exp, exp.clusterId),
         ...exp.selfReflexive === true ? { selfReflexive: true } : {},
       }
     })
@@ -257,6 +343,36 @@ function coverViewpoints(hits: readonly RankedHit[], topK: number): readonly Ran
     if (!selected.has(hit.expId)) selected.set(hit.expId, hit)
   }
   return hits.filter(hit => selected.has(hit.expId))
+}
+
+/**
+ * Drop candidates whose experience was already injected into this session
+ * within the cooldown window. Repeated injection of the same memory inside
+ * one session is noise, not recall — the measured adoption collapse came
+ * with the same expIds injected over and over (exp_1 13×, exp_303 9×;
+ * cold-domain finding #3). The cooldown is per-session so the same memory
+ * still surfaces in a later session where it is genuinely new.
+ * @param service - the pipeline service (for the durable injection ledger).
+ * @param sessionId - the session the current step runs in.
+ * @param hits - the candidates before the cooldown filter.
+ * @param cooldownMs - the cooldown window; 0 disables the filter.
+ * @returns the candidates not injected recently in this session.
+ */
+function coolDownInjected(
+  service: CognitivePipelineService,
+  sessionId: string,
+  hits: readonly ExperienceHit[],
+  cooldownMs: number,
+): readonly ExperienceHit[] {
+  if (cooldownMs <= 0 || hits.length === 0) return hits
+  const cutoff = Date.now() - cooldownMs
+  const recent = new Set<string>()
+  for (const record of service.store.injectionsSnapshot()) {
+    if (record.sessionId !== sessionId || record.createdAt < cutoff) continue
+    for (const expId of record.expIds) recent.add(expId)
+  }
+  if (recent.size === 0) return hits
+  return hits.filter(hit => !recent.has(hit.expId))
 }
 
 /** Render one reference block from the retrieved hits. */
@@ -293,7 +409,12 @@ function solidifiedStrategyForHits(
   situation: string,
 ): SolidifiedStrategy | undefined {
   // Channel 1: a hit's experience carries a chainId; if that chain seeded a
-  // solidified strategy, the strategy is the converged rule.
+  // solidified strategy, the strategy is the converged rule. Chain membership
+  // alone is NOT transferability: a hit that merely RECORDS the chain's past
+  // verification (its situation is about the strategy, not the task) must not
+  // promote the strategy out of context. The goal domain must also match the
+  // situation — the same gate Channel 2 applies — so promotion requires BOTH
+  // the chain link AND task relevance.
   const chainIds = new Set<string>()
   for (const hit of hits) {
     const exp = service.store.getExperience(hit.expId)
@@ -301,7 +422,10 @@ function solidifiedStrategyForHits(
   }
   if (chainIds.size > 0) {
     for (const strategy of service.solidifiedStrategies()) {
-      if (strategy.sourceChainId !== '' && chainIds.has(strategy.sourceChainId)) return strategy
+      if (strategy.sourceChainId !== '' && chainIds.has(strategy.sourceChainId)
+        && strategy.goalDomain.length > 0 && situation.includes(strategy.goalDomain)) {
+        return strategy
+      }
     }
   }
   // Channel 2: goal-domain matching. Legacy experiences (exp_100/101) were
@@ -387,11 +511,15 @@ export function triggeredBy(
     }
   }
   const derived = deriveTriggerWords(service)
-  for (const token of tokenize(text)) {
-    const weight = derived.get(token)
+  // Derived words are multi-char (CJK bigrams + latin tokens, matching the
+  // lexicon build — finding #10: single-char derived words were noise that
+  // let any message cross the gate). Match the message with the same
+  // vocabulary so a multi-char derived word actually hits.
+  for (const word of jumpVocabulary(text)) {
+    const weight = derived.get(word)
     if (weight !== undefined && weight >= DERIVED_TRIGGER_MIN) {
       score += weight
-      if (source === '') source = `derived:${token}`
+      if (source === '') source = `derived:${word}`
       if (score >= TRIGGER_MATCH_THRESHOLD) return { fired: true, triggerSource: source, jumpWords: [] }
     }
   }
@@ -463,20 +591,39 @@ export function apply(ctx: Context, config: Config = {}): void {
         })
     }
     const afterFailure = isAfterFailure(agent)
-    // Trigger gate: after a failed step always prime; otherwise only when the
-    // current messages carry a trigger (static behavior word, a SAR-derived
-    // keyword of important experiences, or a learned jump word). Routine
-    // conversation never injects, even when retrieval would find a weak hit.
+    const situation = situationText(decision.messages, resolved.contextDepth)
+    if (situation.trim().length === 0) return decision
+    // ── Situation-driven gate (architecture change, finding #12) ──────────
+    // Retrieval runs FIRST (hash-bag cosine is millisecond-cheap); the gate is
+    // decided AFTER retrieval by significance, not before by trigger words:
+    //   · top similarity ≥ directSimilarityThreshold (0.45)  → direct recall,
+    //     the situation itself is the cue (measured: business med 0.419,
+    //     chitchat p75 0.362 — 0.45 admits ~40% business, keeps chitchat out)
+    //   · OR a trigger fired → top similarity + triggerBoost (0.3)  → 求助信号
+    //     soft-lifts a mid-similarity hit across the gate, never opens alone
+    //   · after a failed step → lower threshold (minSimilarity × factor)
+    // The trigger gate is therefore a SOFT signal now, not the hard switch it
+    // was: routine chat with a weak hit stays silent, a business situation
+    // opens without any trigger word. Cold start still relies on triggers when
+    // the store is empty (retrieval finds nothing).
     const verdict = triggeredBy(decision.messages, ctx.cognitivePipeline, resolved.contextDepth)
-    if (!afterFailure && !verdict.fired) return decision
     const threshold = afterFailure
       ? resolved.minSimilarity * resolved.failureThresholdFactor
       : resolved.minSimilarity
     const topK = afterFailure ? resolved.failureTopK : resolved.topK
-    const situation = situationText(decision.messages, resolved.contextDepth)
-    if (situation.trim().length === 0) return decision
-    const hits = retrieve(ctx.cognitivePipeline, situation, threshold, topK)
+    const hits = await retrieve(ctx.cognitivePipeline, situation, threshold, topK)
     if (hits.length === 0) return decision
+    const topHit = hits[0]?.similarity ?? 0
+    const gateScore = verdict.fired ? topHit + resolved.triggerBoost : topHit
+    const gateThreshold = afterFailure
+      ? resolved.minSimilarity * resolved.failureThresholdFactor
+      : resolved.directSimilarityThreshold
+    if (gateScore < gateThreshold) return decision
+    // Cooldown filter: a memory injected into THIS session within the window
+    // is not injected again — same-session repeats are noise (finding #3:
+    // exp_1 13×, exp_303 9×). All recent → nothing new to say, stay silent.
+    const cooled = coolDownInjected(ctx.cognitivePipeline, agent.session.id, hits, resolved.injectCooldownMs)
+    if (cooled.length === 0) return decision
     // Prewarm enrichment for the veto gate: a short message ("重启") may match
     // an unrelated experience by surface words (exp_67's literal-overlap false
     // positive). The veto route judges applicability — so it must see what the
@@ -486,18 +633,32 @@ export function apply(ctx: Context, config: Config = {}): void {
     const vetoSituation = prewarmed !== undefined && prewarmed.length > 0
       ? `【当前会话正在进行】${prewarmed}\n【当前消息】${situation}`
       : situation
-    // Solidified-strategy priority: when the retrieved experiences link to a
-    // chain that seeded a solidified strategy (the repeated-success promotion),
-    // inject the STRATEGY — a short, machine-verifiable rule with a drift
-    // sensor — instead of the scattered, unverified experiences. The strategy
-    // is the converged form: it tells the executor exactly what to run and how
-    // to check it worked, so the task converges instead of re-deriving each
-    // time (the "restart DSH" case: exp_101's script, solidified).
-    const strategy = solidifiedStrategyForHits(ctx.cognitivePipeline, hits, situation)
+    // Veto gate: retrieval may surface over-threshold candidates that do not
+    // genuinely fit (a literal hit is not transferability). The template-7
+    // refine route judges each candidate; every accepted one is injected
+    // (viewpoint coverage survives), every rejection records a note, and
+    // all-rejected suppresses injection. Without a route the route keeps the
+    // candidates (deterministic degradation to the threshold-only behavior).
+    // The veto runs BEFORE solidified-strategy promotion: a chain link alone
+    // must not bypass the applicability judgement (a hit that merely RECORDS
+    // the chain's verification is not a request to run its strategy).
+    const vetoed = await vetoTopCandidates(
+      ctx, ctx.cognitivePipeline.resolved.route, vetoSituation, cooled, signal,
+    )
+    if (vetoed.accepted.length === 0) return decision
+    // Solidified-strategy priority, AFTER the veto: when the ACCEPTED
+    // experiences link to a chain that seeded a solidified strategy (the
+    // repeated-success promotion), inject the STRATEGY — a short,
+    // machine-verifiable rule with a drift sensor — instead of the scattered,
+    // unverified experiences. The strategy is the converged form: it tells the
+    // executor exactly what to run and how to check it worked, so the task
+    // converges instead of re-deriving each time (the "restart DSH" case:
+    // exp_101's script, solidified).
+    const strategy = solidifiedStrategyForHits(ctx.cognitivePipeline, vetoed.accepted, situation)
     if (strategy !== undefined) {
       const block = strategyBlock(strategy)
       ctx.cognitivePipeline.recordInjection({
-        expIds: hits.map(hit => hit.expId),
+        expIds: vetoed.accepted.map(hit => hit.expId),
         triggerSource: verdict.triggerSource,
         sessionId: agent.session.id,
         jumpWords: verdict.jumpWords,
@@ -508,16 +669,6 @@ export function apply(ctx: Context, config: Config = {}): void {
         messages: [...decision.messages, block],
       }
     }
-    // Veto gate: retrieval may surface over-threshold candidates that do not
-    // genuinely fit (a literal hit is not transferability). The template-7
-    // refine route judges each candidate; every accepted one is injected
-    // (viewpoint coverage survives), every rejection records a note, and
-    // all-rejected suppresses injection. Without a route the route keeps the
-    // candidates (deterministic degradation to the threshold-only behavior).
-    const vetoed = await vetoTopCandidates(
-      ctx, ctx.cognitivePipeline.resolved.route, vetoSituation, hits, signal,
-    )
-    if (vetoed.accepted.length === 0) return decision
     const block = referenceBlock(vetoed.accepted, afterFailure, vetoed.rejectedNotes)
     // Record the injection for citation-rate measurement: which expIds reached
     // the model, which trigger opened the gate, and which jump words (if any)

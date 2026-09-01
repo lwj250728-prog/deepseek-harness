@@ -19,10 +19,23 @@
         # and reconstruction then run model-assisted.
         provider: deepseek-official
         model: deepseek-v4-flash
+        # Real-embedding seam (SiliconFlow bge-m3, OpenAI-compatible): the
+        # semantic retrieval channel uses embedding cosine when both sides have
+        # vectors; hash-bag cosine remains the fallback. Key in
+        # data/.credentials.yaml as SILICONFLOW_API_KEY.
+        embedding:
+          baseUrl: https://api.siliconflow.cn/v1
+          model: BAAI/bge-m3
+          apiKeyEnv: SILICONFLOW_API_KEY
         # Automatic accumulation: every completed turn is judged by the LLM
         # route and written as an experience when it deems the episode worth it
         # (pure chat is filtered deterministically before any LLM call).
         autoAccumulate: true
+          # Command-execution support for claim audits (verify_claim command
+          # anchors): lets the pipeline run a shell command and observe only its
+          # exit code. Enabled for F1/F2 fix verification (vitest run).
+          # acceptanceCommandExecution: true  ← 启用后重启宿主即可获得 command anchor 通道（配置缩进修正需手动，见 05-improvement-report.md）
+
 
     # Main-conversation SAR priming: at every agent pre-step, retrieve
     # situation-related experiences from the pipeline store and inject them as
@@ -39,6 +52,15 @@
         failureThresholdFactor: 0.6
         failureTopK: 3
         contextDepth: 4
+
+    # Self-scheduled situational state chain: the main-session agent commits
+    # periodic situation snapshots (situational_state_commit) and decides the
+    # next update time; the latest node is injected at every pre-step as
+    # ongoing context. Mounts after cognitive-inject so both primings coexist.
+    - id: situational-state
+      name: '@deepseek-ai/dsh-situational-state'
+      config:
+        injectEnabled: true
 
     # Task-level cognition orchestration: wraps the spawn provider so child
     # prompts receive related SAR experience and settled outcomes are written

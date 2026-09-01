@@ -226,6 +226,50 @@ describe('cognitive-inject priming', () => {
     }
   })
 
+  it('does not re-inject the same experience within the cooldown window (去重/冷却)', async () => {
+    const { ctx, teardown } = await mount({ injectCooldownMs: 60 * 60 * 1000 })
+    try {
+      // The default message text matches this experience's situation.
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '测试脚本挂起，发现浮点死循环', '改为无循环算法', '测试全部恢复')
+      const { agent, session } = stubAgent('cooldown')
+      session.append('turn/start', { turn: 1 })
+
+      // First pre-step injects exp_1 (nothing injected yet in this session).
+      const first = await fire(ctx, agent, 1, 1)
+      expect(first).toHaveLength(1)
+      expect(first[0]).toContain('exp_1')
+
+      // Second pre-step in the SAME session within the cooldown window: the
+      // memory was already injected, so the cooldown filter suppresses it.
+      const second = await fire(ctx, agent, 1, 2)
+      expect(second).toHaveLength(0)
+      expect(session.events.filter(event => event.type === 'user/message')).toHaveLength(1)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('re-injects after the cooldown window expires (冷却过期后重新注入)', async () => {
+    const { ctx, teardown } = await mount({ injectCooldownMs: 10 })
+    try {
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '测试脚本挂起，发现浮点死循环', '改为无循环算法', '测试全部恢复')
+      const { agent, session } = stubAgent('cooldown-expired')
+      session.append('turn/start', { turn: 1 })
+
+      const first = await fire(ctx, agent, 1, 1)
+      expect(first).toHaveLength(1)
+
+      // Wait past the 10ms cooldown, then the same memory is injectable again
+      // (a later recall is genuinely new).
+      await new Promise(resolve => setTimeout(resolve, 20))
+      const second = await fire(ctx, agent, 1, 2)
+      expect(second).toHaveLength(1)
+      expect(second[0]).toContain('exp_1')
+    } finally {
+      await teardown()
+    }
+  })
+
   it('recalls more aggressively after a failed step', async () => {
     const { ctx, teardown } = await mount({ minSimilarity: 0.5 })
     try {
@@ -282,12 +326,14 @@ describe('cognitive-inject priming', () => {
     }
   })
 
-  it('does not inject on routine conversation without a trigger, even when retrieval would hit', async () => {
+  it('does not inject on routine conversation with only a weak similarity hit (situation gate)', async () => {
     const { ctx, teardown } = await mount()
     try {
-      // The situation literally shares tokens with the experience ("重启"), so
-      // retrieval would find it — but the message carries no trigger word, so
-      // the trigger gate must suppress the injection.
+      // The situation shares only generic tokens with the experience ("重启"),
+      // far below the direct-similarity threshold; the message carries no
+      // trigger word, so neither the situation nor the soft trigger boost
+      // opens the gate. Routine chat stays silent (finding #12: chitchat
+      // p75 0.362 < direct 0.45).
       seedExperience(ctx.cognitivePipeline.store, 'exp_1', '库存系统凌晨故障', '重启数据库服务器', '恢复，失败交易全部回滚')
       const { agent, session } = stubAgent('routine')
       session.append('turn/start', { turn: 1 })
@@ -295,6 +341,46 @@ describe('cognitive-inject priming', () => {
       const injected = await fire(ctx, agent, 1, 1, '重启一下')
 
       expect(injected).toHaveLength(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('injects on a high-similarity situation WITHOUT any trigger word (situation-driven recall)', async () => {
+    const { ctx, teardown } = await mount()
+    try {
+      // The message IS the business situation itself (服务重启后需要验证恢复) —
+      // token-identical to the seeded experience, so top similarity clears
+      // the direct threshold WITHOUT any static/derived/jump trigger. This is
+      // the architecture change: a strong situation match opens the gate by
+      // itself; trigger words are no longer the only key.
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '服务重启后需要验证恢复', '重启服务并验证', '服务恢复')
+      const { agent, session } = stubAgent('situation-gate')
+      session.append('turn/start', { turn: 1 })
+
+      const injected = await fire(ctx, agent, 1, 1, '服务重启后需要验证恢复')
+
+      expect(injected.length).toBe(1)
+      expect(injected[0]).toContain('exp_1')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('soft trigger boost lifts a mid-similarity hit across the gate (求助信号加权)', async () => {
+    const { ctx, teardown } = await mount()
+    try {
+      // The message has a weak semantic hit (top ≈ 0.3, below direct 0.45) but
+      // carries a trigger word (排查): the boost (0.3) lifts it to 0.6+ and
+      // the gate opens. Without the trigger it would stay silent.
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '服务启动失败排查日志', '检查依赖并重启', '定位到配置问题')
+      const { agent, session } = stubAgent('boost')
+      session.append('turn/start', { turn: 1 })
+
+      const injected = await fire(ctx, agent, 1, 1, '帮我排查一下这个服务')
+
+      expect(injected.length).toBe(1)
+      expect(injected[0]).toContain('exp_1')
     } finally {
       await teardown()
     }
@@ -556,6 +642,82 @@ describe('cognitive-inject priming', () => {
       expect(injected[0]).toContain('验收锚点')
       expect(injected[0]).toContain('autorestart.ps1')
       expect(injected[0]).toContain('前置校验')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('does not promote a strategy when the chain-linked hit lacks the goal domain (情境不匹配)', async () => {
+    const { ctx, teardown } = await mount()
+    try {
+      // A chain-linked experience whose situation merely RECORDS the chain's
+      // past verification (the exp_182 lesson: "固化策略实跑验证" talk, not a
+      // restart request). It carries chainId=chain-restart, so the old Channel-1
+      // rule would promote the restart strategy out of context.
+      seedExperience(
+        ctx.cognitivePipeline.store,
+        'exp_record',
+        '固化策略机制实跑验证时，核查注入记录和固化策略表确认根因',
+        '核查注入记录与固化策略表，确认链成员资格误配',
+        '确认根因：链成员资格不等于情境可迁移',
+        undefined,
+        false,
+        'chain-restart',
+      )
+      ctx.cognitivePipeline.solidifyStrategy({
+        goalDomain: '重启',
+        action: '调用 scripts/dsh-web-autorestart.ps1',
+        verificationAnchor: 'restart-result.json ok=true AND selfPerformed=true',
+        preChecks: ['端口 3080 存在监听'],
+        sourceChainId: 'chain-restart',
+      })
+      const { agent } = stubAgent('strategy-context-mismatch')
+      // The situation discusses the verification run itself, NOT a restart.
+      // "经验" is a static trigger; the chain-linked experience clears the
+      // similarity threshold. The strategy must NOT be promoted: its goal
+      // domain (重启) is absent from the situation.
+      const injected = await fire(ctx, agent, 1, 1, '帮我排查固化策略验证经验注入的问题')
+      expect(injected.length).toBe(1)
+      expect(injected[0]).not.toContain('【固化策略 重启】')
+      // The plain reference block carries the record experience instead.
+      expect(injected[0]).toContain('【认知经验参考】')
+      expect(injected[0]).toContain('exp_record')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('vetoes a chain-linked candidate before any strategy promotion (否决先行)', async () => {
+    const reject = JSON.stringify({ should_keep: false, rejected_exp_id: 'exp_chain', reason: '情境不可迁移：仅记录链验证，非重启请求' })
+    const { ctx, teardown } = await mount(
+      {},
+      { provider: 'cognition-test', model: 'm', script: [reject] },
+    )
+    try {
+      // Even a goal-domain-matching chain hit is suppressed when the veto
+      // route rejects it: promotion must not bypass the applicability
+      // judgement (the B2 fix).
+      seedExperience(
+        ctx.cognitivePipeline.store,
+        'exp_chain',
+        '需要重启本机的 DSH Web 服务',
+        '调用 dsh-web-autorestart.ps1 执行重启',
+        '重启成功，selfPerformed=true',
+        undefined,
+        false,
+        'chain-restart',
+      )
+      ctx.cognitivePipeline.solidifyStrategy({
+        goalDomain: '重启',
+        action: '调用 scripts/dsh-web-autorestart.ps1',
+        verificationAnchor: 'restart-result.json ok=true AND selfPerformed=true',
+        preChecks: ['端口 3080 存在监听'],
+        sourceChainId: 'chain-restart',
+      })
+      const { agent } = stubAgent('strategy-veto-first')
+      const injected = await fire(ctx, agent, 1, 1, '帮我重启 DSH Web 服务')
+      // The veto route rejected the only candidate → no injection at all.
+      expect(injected).toHaveLength(0)
     } finally {
       await teardown()
     }

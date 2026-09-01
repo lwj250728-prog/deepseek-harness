@@ -62,14 +62,17 @@ describe('trigger-jump learning', () => {
     const { ctx, teardown } = await pipelineHarness()
     try {
       // Three distinct experiences where "发版" (non-trigger) co-occurs with
-      // "发布" (a static trigger): the jump 版→发布 must exist, evidence 3.
+      // "发布" (a static trigger): the jump 发版→发布 must exist, evidence 3.
+      // Jump words are multi-char (CJK bigram or latin token), never single
+      // CJK characters — single chars co-occur with everything and never fired
+      // in the measured 400-word table (89% single-char, 0 cited).
       seed(ctx.cognitivePipeline, '发版窗口临近', '准备发布到生产环境')
       seed(ctx.cognitivePipeline, '发版失败回滚', '排查发布超时问题')
       seed(ctx.cognitivePipeline, '发版计划变更', '调整发布流程')
       const result = await ctx.cognitivePipeline.learnTriggerJumps()
       expect(result.jumpCount).toBeGreaterThan(0)
       expect(result.cooccurrenceCount).toBeGreaterThan(0)
-      const jump = ctx.cognitivePipeline.triggerJumps().find(entry => entry.jumpWord === '版')
+      const jump = ctx.cognitivePipeline.triggerJumps().find(entry => entry.jumpWord === '发版')
       expect(jump).toBeDefined()
       const trigger = jump?.triggers.find(entry => entry.trigger === '发布')
       expect(trigger).toBeDefined()
@@ -78,6 +81,8 @@ describe('trigger-jump learning', () => {
       expect(trigger?.weight).toBeLessThanOrEqual(1)
       expect(jump?.source).toBe('cooccurrence')
       expect(jump?.evidenceCount).toBe(3)
+      // Single CJK chars never become jump words (the measured 89% noise).
+      expect(ctx.cognitivePipeline.triggerJumps().find(entry => entry.jumpWord === '版')).toBeUndefined()
     } finally {
       await teardown()
     }
@@ -93,19 +98,19 @@ describe('trigger-jump learning', () => {
 
       const cited = ctx.cognitivePipeline.recordInjection({
         expIds: ['exp_1'],
-        triggerSource: 'jump:版→发布',
+        triggerSource: 'jump:发版→发布',
         sessionId: 's1',
-        jumpWords: ['版'],
+        jumpWords: ['发版'],
       })
       const uncited = ctx.cognitivePipeline.recordInjection({
         expIds: ['exp_2'],
-        triggerSource: 'jump:版→发布',
+        triggerSource: 'jump:发版→发布',
         sessionId: 's1',
-        jumpWords: ['版'],
+        jumpWords: ['发版'],
       })
       expect(await ctx.cognitivePipeline.settleInjectionCitations('s1', '参考了 exp_1 的发布做法'))
         .toEqual({ settled: 2, cited: 1 })
-      const jump = ctx.cognitivePipeline.triggerJumps().find(entry => entry.jumpWord === '版')!
+      const jump = ctx.cognitivePipeline.triggerJumps().find(entry => entry.jumpWord === '发版')!
       expect(jump.hitCount).toBe(2)
       expect(jump.citedCount).toBe(1)
       // The settled records persist and never re-settle.
@@ -130,9 +135,9 @@ describe('trigger-jump learning', () => {
       seed(ctx.cognitivePipeline, '服务卡住', '处理卡壳现象')
       seed(ctx.cognitivePipeline, '测试卡住', '分析卡壳原因')
       // Seed measured stats directly (the rebuild regenerates both jumps from
-      // the store and carries the stats): 版 never cited, 壳 always cited.
+      // the store and carries the stats): 发版 never cited, 卡住 always cited.
       ctx.cognitivePipeline.store.upsertTriggerJump({
-        jumpWord: '版',
+        jumpWord: '发版',
         triggers: [{ trigger: '发布', weight: 0.8, evidenceCount: 3 }],
         evidenceCount: 3,
         source: 'cooccurrence',
@@ -143,7 +148,7 @@ describe('trigger-jump learning', () => {
         updatedAt: Date.now(),
       })
       ctx.cognitivePipeline.store.upsertTriggerJump({
-        jumpWord: '壳',
+        jumpWord: '卡壳',
         triggers: [{ trigger: '卡住', weight: 0.5, evidenceCount: 3 }],
         evidenceCount: 3,
         source: 'cooccurrence',
@@ -154,11 +159,35 @@ describe('trigger-jump learning', () => {
         updatedAt: Date.now(),
       })
       const result = await ctx.cognitivePipeline.learnTriggerJumps()
-      // 版 (rate 0 ≤ 0.1, 5 hits) pruned; 壳 (rate 1.0) boosted.
+      // 发版 (rate 0 ≤ 0.1, 5 hits) pruned; 卡壳 (rate 1.0) boosted.
       expect(result.pruned).toBeGreaterThanOrEqual(1)
-      const boosted = ctx.cognitivePipeline.triggerJumps().find(entry => entry.jumpWord === '壳')
+      const boosted = ctx.cognitivePipeline.triggerJumps().find(entry => entry.jumpWord === '卡壳')
       expect(boosted?.triggers[0]?.weight).toBeGreaterThan(0.5)
-      expect(ctx.cognitivePipeline.triggerJumps().find(entry => entry.jumpWord === '版')).toBeUndefined()
+      expect(ctx.cognitivePipeline.triggerJumps().find(entry => entry.jumpWord === '发版')).toBeUndefined()
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('builds bidirectional coupling when two non-static words co-occur as trigger and target', async () => {
+    const { ctx, teardown } = await pipelineHarness()
+    try {
+      // "排查" (static trigger) appears in every experience; "服务" and "重启"
+      // co-occur with it across enough experiences to pass the evidence gate.
+      // The jump 服务→排查 (hitting 服务 activates the 排查 trigger) is built;
+      // single CJK chars (务/启/重) never become jump words.
+      seed(ctx.cognitivePipeline, '服务重启后排查', '重启服务验证')
+      seed(ctx.cognitivePipeline, '服务重启失败排查', '排查重启服务问题')
+      seed(ctx.cognitivePipeline, '服务重启超时排查', '分析重启服务现象')
+      await ctx.cognitivePipeline.learnTriggerJumps()
+
+      const forward = ctx.cognitivePipeline.triggerJumps().find(entry => entry.jumpWord === '服务')
+      expect(forward).toBeDefined()
+      const toRestart = forward?.triggers.find(entry => entry.trigger === '排查')
+      expect(toRestart).toBeDefined()
+      expect(toRestart?.evidenceCount).toBeGreaterThanOrEqual(3)
+      // The multi-char jump word 服务 exists; single chars 务/启/重 do not.
+      expect(ctx.cognitivePipeline.triggerJumps().find(entry => entry.jumpWord === '务')).toBeUndefined()
     } finally {
       await teardown()
     }
@@ -183,6 +212,29 @@ describe('trigger-jump learning', () => {
       expect(card?.rationale).toContain('卡壳')
       // The non-trigger target proposal never entered the table.
       expect(ctx.cognitivePipeline.triggerJumps().find(entry => entry.jumpWord === '变体')).toBeUndefined()
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('reserves the LLM floor: synonym variants survive the total cap (③ 主动联想保底)', async () => {
+    const proposal = JSON.stringify({
+      jumps: [
+        { trigger: '卡住', variants: ['卡壳'], reason: '用户口语常把卡住说成卡壳' },
+      ],
+    })
+    const { ctx, teardown } = await pipelineHarness(
+      { provider: 'cognition-test', model: 'm', triggerJumpTotalCap: 1, triggerJumpLlmFloor: 1 },
+      [proposal],
+    )
+    try {
+      // A co-occurrence jump would fill the cap=1; the LLM variant must keep
+      // its reserved floor slot instead of being crowded out.
+      seed(ctx.cognitivePipeline, '程序卡住', '排查挂起问题')
+      const result = await ctx.cognitivePipeline.learnTriggerJumps()
+      expect(result.llmAdded).toBe(1)
+      const card = ctx.cognitivePipeline.triggerJumps().find(entry => entry.jumpWord === '卡壳')
+      expect(card?.source).toBe('llm')
     } finally {
       await teardown()
     }
