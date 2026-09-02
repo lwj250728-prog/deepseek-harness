@@ -1,0 +1,91 @@
+/**
+ * Trigger lexicon of the injection gate: the static behavior words, the
+ * SAR-derived keywords weighted by importance, and the co-occurrence jump
+ * builder that turns "words that appear with a trigger in real experiences"
+ * into associative jump words. The lexicon is experience-derived knowledge,
+ * so it lives with the pipeline store (like the taxonomy and the acceptance
+ * ledger); the inject plugin imports it rather than re-deriving it.
+ * @module @deepseek-ai/dsh-cognitive-pipeline/triggers
+ */
+import type { CognitivePipelineService } from './service.ts';
+import type { Experience } from './types.ts';
+/** Static behavior triggers: words whose presence means the current message
+ * is asking for help, exploring, or deciding — the situations where humans
+ * actually consult past experience. A single static hit triggers injection. */
+export declare const STATIC_TRIGGERS: ReadonlySet<string>;
+/** CJK stop words: tokens too common to carry trigger signal. */
+export declare const STOP_WORDS: ReadonlySet<string>;
+/** How many SAR-derived trigger words to keep (by accumulated importance). */
+export declare const DERIVED_TRIGGER_COUNT = 60;
+/** Minimum derived-trigger weight to count as a hit. */
+export declare const DERIVED_TRIGGER_MIN = 0.3;
+/**
+ * Importance of one experience for trigger learning: outcome extremity
+ * (|utilityScore|/15) plus a high-risk bonus for negative outcomes and a
+ * frequency bonus for experiences the hot loop has hit before. Experiences
+ * with no signal (neutral utility, never hit) contribute nothing.
+ * @param exp - the experience.
+ * @returns the importance in [0, 1.2].
+ */
+export declare function importanceOf(exp: Experience): number;
+/**
+ * Derive the trigger lexicon from the experience store: multi-char words of
+ * the situation/action of important experiences (high utility, high-risk, or
+ * frequently hit) accumulate their importance into per-word weights, the
+ * top-N survive, normalized to [DERIVED_TRIGGER_MIN, 1].
+ *
+ * Vocabulary matches the jump layer (finding #10): single CJK characters were
+ * noise — the derived table measured 59/60 single chars (行×189, 验×184) that
+ * let nearly any message cross the 0.6 gate, making injection indiscriminate
+ * (83% of 126 injections never cited). Only multi-char words (CJK bigrams +
+ * latin tokens) carry associative specificity.
+ * @param service - the pipeline service whose store feeds the lexicon.
+ * @returns the derived trigger map (word → weight).
+ */
+export declare function deriveTriggerWords(service: CognitivePipelineService): Map<string, number>;
+/** One accumulated (jumpWord → trigger) association before thresholding. */
+export interface JumpAccumulation {
+    /** Distinct experiences backing the association. */
+    readonly evidenceCount: number;
+    /** Sum of experience importance over the backing experiences. */
+    readonly importance: number;
+}
+/** The raw co-occurrence accumulator keyed by jump word then trigger word. */
+export type JumpAccumulator = Map<string, Map<string, JumpAccumulation>>;
+/** Initialize an empty jump accumulator.
+ * @returns a fresh empty accumulator.
+ */
+export declare function emptyJumpAccumulator(): JumpAccumulator;
+/**
+ * Accumulate trigger↔token co-occurrence from the experience store. For each
+ * important experience, every trigger word (static phrase or derived token)
+ * present in its situation/action text associates with every other
+ * non-trigger, non-stop token in that text — the jump candidate. Directional:
+ * the candidate maps the co-occurring token TO the trigger, so hitting the
+ * jump word activates its trigger in the gate. Derived trigger tokens are NOT
+ * excluded from being jump candidates: they share the experience vocabulary,
+ * and a jump adds association strength toward the more diagnostic trigger on
+ * top of the token's own derived weight.
+ *
+ * Token vocabulary (finding: the jump layer's single-CJK-character tokens were
+ * noise — "该/置/目" associate with every generic verb, 89% of the 400-word
+ * table never fired and 0 were ever cited): a jump word must be a multi-char
+ * latin token (bundle/bug/dsh) or a CJK bigram from the text (端口/挂起/重启).
+ * Single CJK characters are dropped — they co-occur with everything and carry
+ * no associative specificity. The bigrams are extracted locally so the shared
+ * `tokenize` (which feeds retrieval vectors) is untouched.
+ * @param service - the pipeline service whose store feeds the accumulation.
+ * @param accumulator - the accumulator to fold into (fresh from
+ *   {@link emptyJumpAccumulator} for a rebuild).
+ * @param derived - the derived trigger lexicon (static triggers are matched
+ *   as substrings, derived ones as exact tokens).
+ */
+export declare function accumulateTriggerJumps(service: CognitivePipelineService, accumulator: JumpAccumulator, derived: ReadonlyMap<string, number>): void;
+/** The jump-word vocabulary of one text: multi-char latin tokens plus CJK
+ * bigrams (every adjacent pair inside a CJK run). Single CJK characters are
+ * excluded — the measured jump layer of 400 words was 89% single-char noise
+ * (该/置/目) that never fired and never got cited. Exported so the inject
+ * gate matches messages with the same vocabulary the lexicon was built from.
+ */
+export declare function jumpVocabulary(text: string): string[];
+//# sourceMappingURL=triggers.d.ts.map

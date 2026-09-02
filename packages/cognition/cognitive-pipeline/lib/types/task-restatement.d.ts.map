@@ -1,0 +1,1 @@
+{"version":3,"file":"task-restatement.d.ts","sourceRoot":"","sources":["../../src/task-restatement.ts"],"names":[],"mappings":"AAAA;;;;;;;;;;GAUG;AAEH,kFAAkF;AAClF,MAAM,WAAW,wBAAwB;IACvC,QAAQ,CAAC,GAAG,EAAE;QACZ,QAAQ,CAAC,SAAS,EAAE,MAAM,CAAA;QAC1B,QAAQ,CAAC,MAAM,EAAE,MAAM,CAAA;KACxB,CAAA;CACF;AAED;;;;GAIG;AACH,wBAAgB,iBAAiB,CAAC,SAAS,EAAE,wBAAwB,GAAG,OAAO,CAQ9E"}
