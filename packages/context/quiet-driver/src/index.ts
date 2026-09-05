@@ -433,11 +433,18 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       const fresh = now - latestFinding.ts < 30 * 60 * 1000
       if (!fresh) return decision
       lastInjectedAt = now
+      // v10 经验门控标注: isNovel=true 表示该帧关注点无匹配经验(冷启动/全新域),
+      // 警觉置信应标注为低——供主会话参考, 不冒充有经验支撑的警报。
+      const noveltyNote = latestFinding.novel === true
+        ? '\n\n【经验门控】本帧关注点未匹配到过往经验（全新现象）——上述为推断信号，置信低，需实测验证而非当作已知风险。'
+        : latestFinding.novel === false
+          ? '\n\n【经验门控】本帧关注点有相似历史经验支撑，警觉置信正常。'
+          : ''
       const summary = latestFinding.anomaly
         ? `旁路三问 #${latestFinding.frameNo}：检测到风险信号`
         : `旁路三问 #${latestFinding.frameNo}：例行检查无异常`
       const text = latestFinding.anomaly
-        ? `【旁路三问发现】(来源: quiet-driver 旁路思考, 自动注回)\n旁路例行三问检测到值得注意的信号，供参考：\n${latestFinding.output}`
+        ? `【旁路三问发现】(来源: quiet-driver 旁路思考, 自动注回)\n旁路例行三问检测到值得注意的信号，供参考：\n${latestFinding.output}${noveltyNote}`
         : `【旁路三问状态】旁路例行检查完成：无异常。${latestFinding.output.slice(0, 120)}`
       const block = createUserMessage({
         content: [{ type: 'text', text }],
