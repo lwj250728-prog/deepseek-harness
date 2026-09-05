@@ -26,6 +26,9 @@ import z from '@deepseek-ai/schemastery'
 
 export const name = 'quiet-driver'
 
+/** v18 升级触发器：连续增量帧达此值 → 强制一次全检（防渐变漏检）。 */
+const MAX_INCREMENTAL_FRAMES = 6
+
 /** Services this plugin relies on. */
 export const inject = ['agents']
 
@@ -124,17 +127,19 @@ function buildIncrementalFrameText(carrier: CarrierIdentity): string {
     ].join('\n')
 }
 
-/** 选择帧模式：读 think-log 最近 frame 产出，环境部分高度重复→增量，否则全检。 */
-function chooseFrameMode(prevOutput: string | undefined): 'full' | 'incremental' {
+/** 选择帧模式：读 think-log 最近 frame 产出，环境部分高度重复→增量，否则全检。
+ *  v18 升级触发器：连续 incremental 达 MAX_INCREMENTAL 帧 → 强制 full（防渐变漏检）。 */
+function chooseFrameMode(prevOutput: string | undefined, consecutiveIncremental: number): 'full' | 'incremental' {
+  // 升级触发器：连续增量过多 = 可能环境渐变而增量漏检 → 强制全检一次。
+  if (consecutiveIncremental >= MAX_INCREMENTAL_FRAMES) return 'full'
   if (prevOutput === undefined || prevOutput.length === 0) return 'full'  // 首帧/无历史 → 全检
   // 启发式：上帧提到"无变化/一致/实质相同"等 → 熟悉域 → 增量。
-  // 覆盖常见表述：无变化/没有变化/未变/没变/无新增/无实质变化/实质相同/与上帧相同/一致/无异常。
   return /无变化|没有变化|未变|没变|无新增|无实质变化|实质相同|与上帧相同|与上次相同|一致|无异常变化|基本相同/.test(prevOutput) ? 'incremental' : 'full'
 }
 
-/** Frame text 入口：根据上帧产出选择协议（v18 自适应）。 */
-function buildFrameText(carrier: CarrierIdentity, prevOutput?: string): string {
-  return chooseFrameMode(prevOutput) === 'full'
+/** Frame text 入口：根据上帧产出选择协议（v18 自适应 + 升级触发器）。 */
+function buildFrameText(carrier: CarrierIdentity, prevOutput?: string, consecutiveIncremental = 0): string {
+  return chooseFrameMode(prevOutput, consecutiveIncremental) === 'full'
     ? buildFullFrameText(carrier)
     : buildIncrementalFrameText(carrier)
 }
@@ -157,11 +162,12 @@ async function logFrame(thinkLogPath: string, entry: object): Promise<void> {
   }
 }
 
-/** Read the most recent frame context from the think-log (v18 自适应).
- *  Returns the last frame's output text, or a sentinel that forces incremental
- *  when the last record was a direct frame already run in incremental mode.
- *  Priority: last frame with output > last direct-frame (mode preserved). */
-async function readLastFrameOutput(thinkLogPath: string): Promise<string | undefined> {
+/** Read the most recent frame context from the think-log (v18 自适应 + 升级触发器).
+ *  Returns the last frame's output and the count of consecutive incremental-mode
+ *  records (for the v18 escalation trigger). */
+async function readLastFrameContext(thinkLogPath: string): Promise<{ output: string | undefined; consecutiveIncremental: number }> {
+  let consecutive = 0
+  let lastOutput: string | undefined
   const target = expandHome(thinkLogPath)
   try {
     const { readFile } = await import('node:fs/promises')
@@ -174,19 +180,29 @@ async function readLastFrameOutput(thinkLogPath: string): Promise<string | undef
         const e = JSON.parse(line) as { kind?: string; output?: string; mode?: string } | null
         if (e === null) continue
         const out = e.output
-        // 旁路/普通帧：有产出文本 → 返回文本（由 chooseFrameMode 判定）。
-        if ((e.kind === undefined || e.kind === 'frame') && typeof out === 'string' && out.length > 0) {
-          return out
+        // 直驱帧：无产出文本但记录了 mode → 统计增量延续。
+        if (e.kind === 'direct-frame') {
+          if (e.mode === 'incremental') {
+            consecutive += 1
+            continue
+          }
+          break  // full 直驱帧中断增量链
         }
-        // 直驱帧：无产出文本但记录了 mode → 直接返回该 mode 的判定（增量延续）。
-        if (e.kind === 'direct-frame' && e.mode === 'incremental') {
-          return '与上帧一致'  // 触发增量判定的哨兵文本
+        // 旁路/普通帧：有产出文本 → 统计其是否"无变化"(增量判定)。
+        if ((e.kind === undefined || e.kind === 'frame') && typeof out === 'string') {
+          if (out.length > 0 && lastOutput === undefined) lastOutput = out
+          if (out.length > 0 && /无变化|没有变化|未变|没变|无新增|无实质变化|实质相同|与上帧相同|与上次相同|一致|无异常变化|基本相同/.test(out)) {
+            consecutive += 1
+          } else if (out.length > 0) {
+            break
+          }
         }
       } catch { /* skip malformed */ }
     }
   } catch { /* no think-log yet */ }
-  return undefined
+  return { output: lastOutput, consecutiveIncremental: consecutive }
 }
+
 
 /** Minimal prediction settlement: find the oldest unsettled prediction in the
  * think-log and report a coarse outcome, so the pipeline's calibration loop
@@ -327,10 +343,11 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       agentOptions: { provider: selection.provider, model: selection.model },
     })
     const agent = handle.agent
-    // v18 自适应: 读上帧产出, 决定全检/增量协议。
-    const prevOutput = await readLastFrameOutput(config.thinkLogPath)
+    // v18 自适应: 读上帧产出+连续增量计数, 决定全检/增量协议(升级触发器)。
+    const frameCtx = await readLastFrameContext(config.thinkLogPath)
+    const escalated = frameCtx.consecutiveIncremental >= MAX_INCREMENTAL_FRAMES
     agent.followup(createUserMessage({
-      content: [{ type: 'text', text: buildFrameText(carrier, prevOutput) }],
+      content: [{ type: 'text', text: buildFrameText(carrier, frameCtx.output, escalated ? MAX_INCREMENTAL_FRAMES : 0) }],
       source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧旁路 #${frameNo}` },
     }))
     await agent.whenIdle()
@@ -490,11 +507,12 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
         void settleOldestPrediction(ctx, config.thinkLogPath)
           .catch((error: unknown) => { console.error('[quiet-driver] prediction settle (direct) failed:', error) })
       }
-      // v18 自适应: 异步读上帧选协议, 再 followup。
-      void readLastFrameOutput(config.thinkLogPath).then(async (prevOutput) => {
-        const mode = chooseFrameMode(prevOutput)
+      // v18 自适应: 异步读上帧选协议(含升级触发器), 再 followup。
+      void readLastFrameContext(config.thinkLogPath).then(async (frameCtx) => {
+        const escalated = frameCtx.consecutiveIncremental >= MAX_INCREMENTAL_FRAMES
+        const mode = chooseFrameMode(frameCtx.output, escalated ? MAX_INCREMENTAL_FRAMES : 0)
         const message = createUserMessage({
-          content: [{ type: 'text', text: buildFrameText(carrier, prevOutput) }],
+          content: [{ type: 'text', text: buildFrameText(carrier, frameCtx.output, escalated ? MAX_INCREMENTAL_FRAMES : 0) }],
           source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧 #${frames}` },
         })
         ctx.logger.info('[quiet-driver] wake #%d: direct followup to %s (真正空闲, %s)', frames, sessionId, mode)
