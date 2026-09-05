@@ -258,7 +258,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
   ctx.logger.info('[quiet-driver] carrier identity: pid=%s started=%s', carrier.pid, carrier.startedAt)
 
   // --- Latest side-channel finding, injected back into the main session at pre-step.
-  let latestFinding: { ts: number; frameNo: number; output: string; anomaly: boolean } | null = null
+  let latestFinding: { ts: number; frameNo: number; output: string; anomaly: boolean; novel: boolean | null } | null = null
   let lastInjectedAt = 0
 
   // --- User-active tracking: last user message timestamp on the target session.
@@ -359,6 +359,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       frameNo,
       output: text,
       anomaly: isAnomalous(text),
+      novel: null,  // v10 经验门控: predict 后回填(无匹配经验=novel)
     }
     if (config.persistToCognitive) {
       try {
@@ -404,6 +405,8 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
             advice: prediction.advice,
             novel: prediction.isNovel,
           })
+          // v10 经验门控: 回填 novel——无匹配经验(全新现象)时, 帧的警觉置信应标注为低。
+          if (latestFinding !== null) latestFinding.novel = prediction.isNovel
           ctx.logger.info('[quiet-driver] side-channel #%d prediction recorded (%s, p=%.2f)',
             frameNo, prediction.predictionId, prediction.calibratedProbability)
         }
