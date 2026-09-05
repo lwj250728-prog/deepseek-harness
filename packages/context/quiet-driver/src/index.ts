@@ -1,0 +1,407 @@
+/**
+ * @deepseek-ai/dsh-quiet-driver — quiet-hours three-question frame driver (最小原型 v3).
+ *
+ * Think-agenda 最小原型 v3：双通道三问帧 + 用户活跃感知。
+ *   - 用户活跃（对话中，lastUserMsgAt 在窗口内）→ 旁路：spawn 独立会话跑帧，
+ *     产出落 think-log + 写入认知管线（SAR）→ 自动经【认知经验参考】汇入后续回合。
+ *   - 用户不活跃且主会话 idle → 直驱：followup 主会话（帧即主回合）。
+ *   - 用户不活跃但主会话 busy（长任务执行中）→ 让位不打扰（v9），等下次 tick。
+ *
+ * v3 修复 v2 缺陷：对话间隙 agent 回 idle 被误判"空闲"走直驱打扰用户。
+ * 判定从 `agent.status` 改为 `用户活跃窗口`（与 agent 状态正交）。
+ *
+ * @module @deepseek-ai/dsh-quiet-driver
+ */
+
+import { appendFile, mkdir } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import type { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import z from '@deepseek-ai/schemastery'
+
+export const name = 'quiet-driver'
+
+/** Services this plugin relies on. */
+export const inject = ['agents']
+
+/** Plugin config. */
+export interface Config {
+  enabled: boolean
+  /** Target main session to wake when idle. */
+  targetSessionId: string
+  /** Interval between quiet checks (ms). */
+  intervalMs: number
+  /** Skip direct wake when the target agent is not idle. */
+  onlyWhenIdle: boolean
+  /** When the user is active (in-dialog): spawn a side-channel session instead. */
+  bypassMode: boolean
+  /** Log path for side-channel frame outputs (think-log). ~ expands. */
+  thinkLogPath: string
+  /** Model selection: 'default' resolves via agentDefaultModel; else provider:model string. */
+  model: string
+  /** Treat the target as "user active" within this window after the last user message (ms). */
+  userActiveWindowMs: number
+  /** Persist side-channel outputs into the cognitive pipeline (SAR) so they surface via 认知经验参考. */
+  persistToCognitive: boolean
+  /** Inject the latest side-channel finding back into the main session at pre-step (like 认知经验). */
+  injectBackToMain: boolean
+  /** Only inject full findings when the frame flagged an anomaly; otherwise a one-line status. */
+  injectAbnormalOnly: boolean
+  /** Record a pipeline prediction per frame (v5: 预测兑现闭环, report on later frames). */
+  predictionLoop: boolean
+}
+
+export const Config: z<Config> = z.object({
+  enabled: z.boolean().default(false),
+  targetSessionId: z.string().default(''),
+  intervalMs: z.number().default(20 * 60 * 1000),
+  onlyWhenIdle: z.boolean().default(true),
+  bypassMode: z.boolean().default(true),
+  thinkLogPath: z.string().default('~/.dsh/cognitive-pipeline/quiet-driver-frames.jsonl'),
+  model: z.string().default('default'),
+  userActiveWindowMs: z.number().default(5 * 60 * 1000),
+  persistToCognitive: z.boolean().default(true),
+  injectBackToMain: z.boolean().default(true),
+  injectAbnormalOnly: z.boolean().default(true),
+  predictionLoop: z.boolean().default(true),
+})
+
+function expandHome(p: string): string {
+  return p.startsWith('~') ? join(homedir(), p.slice(1)) : p
+}
+
+/** Frame text: v17/v18 精简三问。 */
+function buildFrameText(): string {
+  return [
+    '【三问帧】(source: plugin/quiet-driver, form: epistemic-frame)',
+    '你正在做一次例行自我评估。这是旁路思考——请直接回答，不要执行额外任务。',
+    '',
+    'Q1 环境：自上次检查以来，环境有什么变化？（引用具体对象；无变化须说明你查证了什么）',
+    'Q2 当下：当前议程中有什么到期或未处理的事？（报可数事实，不用"正常"类判断词）',
+    'Q3 预测：什么最可能出错？如果错了怎么发现（证伪信号）？',
+    '',
+    '回答请控制在 5 句以内，直接给结论。',
+  ].join('\n')
+}
+
+/** Heuristic anomaly flag: frame text mentions concrete risk/failure signals. */
+function isAnomalous(text: string): boolean {
+  const low = text.toLowerCase()
+  return /风险|出错|失败|异常|问题|警告|空转|越界|阻塞|未兑现|错|隐患|缺口/.test(low)
+}
+
+/** Append one side-channel frame output to the think-log. */
+async function logFrame(thinkLogPath: string, entry: object): Promise<void> {
+  try {
+    const target = expandHome(thinkLogPath)
+    await mkdir(dirname(target), { recursive: true })
+    await appendFile(target, JSON.stringify(entry) + '\n', 'utf8')
+  } catch (error: unknown) {
+    // Logging must never break the driver.
+    console.error('[quiet-driver] think-log write failed:', error)
+  }
+}
+
+/** Minimal prediction settlement: find the oldest unsettled prediction in the
+ * think-log and report a coarse outcome, so the pipeline's calibration loop
+ * learns. The outcome is intentionally coarse — frame content correlation is
+ * left to a later refinement; this only closes the loop so predictions do not
+ * linger open forever. */
+async function settleOldestPrediction(ctx: Context, thinkLogPath: string): Promise<void> {
+  const target = expandHome(thinkLogPath)
+  let entries: Array<Record<string, unknown>> = []
+  try {
+    const { readFile } = await import('node:fs/promises')
+    const raw = await readFile(target, 'utf8')
+    entries = raw.split('\n').filter(Boolean).map((l) => {
+      try { return JSON.parse(l) as Record<string, unknown> }
+      catch { return null }
+    }).filter((e): e is Record<string, unknown> => e !== null)
+  } catch {
+    return // no think-log yet — nothing to settle
+  }
+  const open = entries.find((e) => e.kind === 'prediction' && e.settled !== true)
+  if (open === undefined) return
+  const pipeline = ctx.get('cognitivePipeline') as {
+    report(input: { predictionId: string; actualOutcome: string; outcomeQuality: number }): Promise<unknown>
+  } | undefined
+  if (pipeline === undefined) return
+  const predictionId = open.predictionId as string
+  const frameNo = open.frameNo as number
+  await pipeline.report({
+    predictionId,
+    actualOutcome: `三问帧旁路后续帧结算：预测 #${frameNo} 的关注点未经后续帧确认应验（粗结算，中性质量）`,
+    outcomeQuality: 5,
+  })
+  // Mark settled by rewriting the entry (read-modify-write; low frequency, fine).
+  try {
+    const { readFile, writeFile } = await import('node:fs/promises')
+    const raw = await readFile(target, 'utf8')
+    const lines = raw.split('\n')
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i]
+      if (!line) continue
+      try {
+        const e = JSON.parse(line) as Record<string, unknown>
+        if (e.kind === 'prediction' && e.predictionId === predictionId && e.settled !== true) {
+          lines[i] = JSON.stringify({ ...e, settled: true, settledAt: Date.now() })
+          break
+        }
+      } catch { /* keep line */ }
+    }
+    await writeFile(target, lines.join('\n'), 'utf8')
+  } catch { /* non-fatal */ }
+  ctx.logger.info('[quiet-driver] settled prediction %s (frame #%s)', predictionId, String(frameNo))
+}
+
+export function apply(ctx: Context, config: Config): (() => void) | void {
+  if (!config.enabled) return
+  if (!config.targetSessionId) {
+    ctx.logger.warn('[quiet-driver] enabled but targetSessionId empty — no-op')
+    return
+  }
+  const sessionId = SessionId(config.targetSessionId)
+  const targetAgent = (): Agent | undefined => ctx.agents.get(sessionId)
+
+  // --- Latest side-channel finding, injected back into the main session at pre-step.
+  let latestFinding: { ts: number; frameNo: number; output: string; anomaly: boolean } | null = null
+  let lastInjectedAt = 0
+
+  // --- User-active tracking: last user message timestamp on the target session.
+  // SessionEvent carries `time` (epoch ms), so history replay CAN recover when
+  // the last user message arrived — even across plugin restarts.
+  let lastUserMsgAt = 0
+  let trackingArmed = false
+  const isUserSource = (msg: { source?: { kind?: string } }): boolean => msg.source?.kind === 'user'
+  /** Lazily attach the session listener once the target agent exists (it may not at apply time). */
+  const ensureTracking = (agent: Agent | undefined): void => {
+    if (trackingArmed) return
+    if (agent === undefined) return
+    const session = agent.session
+    trackingArmed = true
+    // Replay history: last user-sourced message event's `time`.
+    for (let i = session.events.length - 1; i >= 0; i -= 1) {
+      const event = session.events[i]
+      if (event?.type === 'user/message' && isUserSource(event.data as { source?: { kind?: string } })) {
+        lastUserMsgAt = Math.max(lastUserMsgAt, event.time)
+        break
+      }
+    }
+    ctx.on('session/event', (subject, event) => {
+      if (subject !== session) return
+      if (event.type === 'user/message' && isUserSource(event.data)) {
+        lastUserMsgAt = Date.now()
+      }
+    })
+    ctx.logger.info('[quiet-driver] user-activity tracking armed; replayed lastUserMsgAt=%s',
+      lastUserMsgAt === 0 ? '(none)' : new Date(lastUserMsgAt).toISOString())
+  }
+
+  /** Resolve model selection for spawned side-channel agents. */
+  const resolveModel = (): { provider: string; model: string } | undefined => {
+    if (config.model !== 'default') {
+      const idx = config.model.indexOf(':')
+      if (idx > 0) return { provider: config.model.slice(0, idx), model: config.model.slice(idx + 1) }
+    }
+    const defaultModel = ctx.get('agentDefaultModel') as { currentSelection(): { provider: string; model: string } } | undefined
+    return defaultModel?.currentSelection()
+  }
+
+  /** Side-channel: spawn an isolated agent, run one frame, persist output. (载体 B) */
+  const runSideChannel = async (frameNo: number, reason: string): Promise<void> => {
+    // ── Prediction settlement (v5): before spawning, settle the oldest open
+    // prediction from the think-log. The frame's Q1 "what changed" outcome is a
+    // coarse proxy for whether the predicted concern materialized; the report
+    // closes the calibration loop so the pipeline learns frame-by-frame.
+    if (config.predictionLoop) {
+      try {
+        await settleOldestPrediction(ctx, config.thinkLogPath)
+      } catch (error: unknown) {
+        console.error('[quiet-driver] prediction settle failed:', error)
+      }
+    }
+    const agents = ctx.agents
+    const sessions = ctx.get('sessions') as { flush(session: unknown): Promise<void> } | undefined
+    const selection = resolveModel()
+    if (agents === undefined || selection === undefined) {
+      ctx.logger.warn('[quiet-driver] side-channel deps missing — skip')
+      return
+    }
+    const handle = await agents.create({
+      sessionId: SessionId(`quiet-frame-${randomUUID()}`),
+      meta: { cwd: process.cwd(), origin: 'subagent' },
+      agentOptions: { provider: selection.provider, model: selection.model },
+    })
+    const agent = handle.agent
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: buildFrameText() }],
+      source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧旁路 #${frameNo}` },
+    }))
+    await agent.whenIdle()
+    await sessions?.flush(agent.session)
+    // Extract final assistant text.
+    let text = ''
+    for (const event of agent.session.events) {
+      if (event.type === 'assistant/message') {
+        // Real shape: data = { turn, step, message: { role, content: [...] } }
+        const msg = (event.data as { message?: { content?: Array<{ type?: string; text?: string }> } }).message
+        const blocks = msg?.content
+        const lastText = blocks?.filter((b) => b.type === 'text').map((b) => b.text ?? '').join('')
+        if (lastText) text = lastText
+      }
+    }
+    await handle.dispose()
+
+    // Persist: think-log + cognitive pipeline (SAR) so the output surfaces via 【认知经验参考】.
+    await logFrame(config.thinkLogPath, {
+      ts: Date.now(), channel: 'sidecar', frameNo, reason,
+      session: agent.session.id, output: text,
+    })
+    // Record latest finding for pre-step injection back into the main session.
+    latestFinding = {
+      ts: Date.now(),
+      frameNo,
+      output: text,
+      anomaly: isAnomalous(text),
+    }
+    if (config.persistToCognitive) {
+      try {
+        const pipeline = ctx.get('cognitivePipeline') as { rememberMeta(input: {
+          situation: string; action: string; outcome: string
+          utility: { material_gain: number; emotional_valence: number; energy_cost: number }
+        }): string } | undefined
+        if (pipeline !== undefined) {
+          pipeline.rememberMeta({
+            situation: `三问帧旁路评估 #${frameNo}（原因：${reason}）。评估时环境状态：${text.slice(0, 400)}`,
+            action: 'quiet-driver 旁路三问帧：定时触发独立会话例行自我评估（环境/当下/预测）',
+            outcome: text,
+            utility: { material_gain: 1, emotional_valence: 0, energy_cost: 2 },
+          })
+          ctx.logger.info('[quiet-driver] side-channel #%d persisted to cognitive pipeline', frameNo)
+        }
+      } catch (error: unknown) {
+        console.error('[quiet-driver] cognitive persist failed:', error)
+      }
+    }
+    // ── Prediction loop (v5): record a trackable prediction from this frame.
+    // The frame's own Q3 "what may go wrong" is the prediction we want to
+    // verify later. We ask the pipeline for a calibrated probability and keep
+    // the predictionId; a later frame reports the actual outcome (report).
+    if (config.predictionLoop) {
+      try {
+        const pipeline = ctx.get('cognitivePipeline') as {
+          predict(input: { situation: string; action: string; context?: string }): Promise<{
+            predictionId: string; calibratedProbability: number; advice: string; isNovel: boolean
+          }>
+          report(input: { predictionId: string; actualOutcome: string; outcomeQuality: number }): Promise<unknown>
+        } | undefined
+        if (pipeline !== undefined) {
+          const prediction = await pipeline.predict({
+            situation: `三问帧旁路 #${frameNo}：${text.slice(0, 200)}`,
+            action: '帧 Q3 关注点按预测方向发展（即"什么可能出错"会否应验）',
+            context: 'quiet-driver 旁路例行三问：Q3 预测的证伪跟踪',
+          })
+          await logFrame(config.thinkLogPath, {
+            ts: Date.now(), kind: 'prediction', frameNo,
+            predictionId: prediction.predictionId,
+            probability: prediction.calibratedProbability,
+            advice: prediction.advice,
+            novel: prediction.isNovel,
+          })
+          ctx.logger.info('[quiet-driver] side-channel #%d prediction recorded (%s, p=%.2f)',
+            frameNo, prediction.predictionId, prediction.calibratedProbability)
+        }
+      } catch (error: unknown) {
+        console.error('[quiet-driver] prediction record failed:', error)
+      }
+    }
+    ctx.logger.info('[quiet-driver] side-channel #%d done (%s), %d chars', frameNo, reason, text.length)
+  }
+
+  // --- Inject latest finding back into the main session at pre-step.
+  // Mirrors cognitive-inject: a plugin-sourced context message, rendered as a
+  // collapsible row. Abnormal findings inject in full; normal ones inject a
+  // one-line status. Cooldown prevents same-session spam.
+  if (config.injectBackToMain) {
+    const INJECT_COOLDOWN_MS = 10 * 60 * 1000
+    ctx.on('agent/pre-step', async ({ agent, messages: _messages }, next) => {
+      const decision = await next()
+      if (decision.kind === 'reject') return decision
+      if (agent.id !== sessionId) return decision
+      if (latestFinding === null) return decision
+      const now = Date.now()
+      if (now - lastInjectedAt < INJECT_COOLDOWN_MS) return decision
+      const fresh = now - latestFinding.ts < 30 * 60 * 1000
+      if (!fresh) return decision
+      lastInjectedAt = now
+      const summary = latestFinding.anomaly
+        ? `旁路三问 #${latestFinding.frameNo}：检测到风险信号`
+        : `旁路三问 #${latestFinding.frameNo}：例行检查无异常`
+      const text = latestFinding.anomaly
+        ? `【旁路三问发现】(来源: quiet-driver 旁路思考, 自动注回)\n旁路例行三问检测到值得注意的信号，供参考：\n${latestFinding.output}`
+        : `【旁路三问状态】旁路例行检查完成：无异常。${latestFinding.output.slice(0, 120)}`
+      const block = createUserMessage({
+        content: [{ type: 'text', text }],
+        source: {
+          kind: 'plugin', plugin: 'quiet-driver', form: 'notice',
+          summary,
+        },
+      })
+      ctx.logger.info('[quiet-driver] injected finding #%d to main (anomaly=%s)', latestFinding.frameNo, latestFinding.anomaly)
+      return { kind: 'enter', messages: [...decision.messages, block] }
+    })
+  }
+
+  let frames = 0
+  const timer = setInterval(async () => {
+    if (!config.enabled) return
+    const agent = targetAgent()
+    if (agent === undefined) {
+      ctx.logger.info('[quiet-driver] tick: target agent not live — skip')
+      return
+    }
+    ensureTracking(agent) // attach user-activity listener as soon as the agent exists
+    frames += 1
+    const userActive = Date.now() - lastUserMsgAt < config.userActiveWindowMs
+    if (userActive) {
+      // User is actively dialoguing → side-channel, never interrupt the dialog.
+      if (config.bypassMode) {
+        ctx.logger.info('[quiet-driver] tick #%d: user active — side-channel (载体 B)', frames)
+        void runSideChannel(frames, 'user-active')
+      } else {
+        ctx.logger.info('[quiet-driver] tick #%d: user active — yield', frames)
+      }
+      return
+    }
+    if (agent.status !== 'idle') {
+      // Not dialoguing but agent busy (long task) → yield, wait for next tick.
+      ctx.logger.info('[quiet-driver] tick #%d: quiet but busy — yield', frames)
+      return
+    }
+    if (config.onlyWhenIdle) {
+      // Settle the oldest open prediction before a direct frame too (v5).
+      if (config.predictionLoop) {
+        void settleOldestPrediction(ctx, config.thinkLogPath)
+          .catch((error: unknown) => { console.error('[quiet-driver] prediction settle (direct) failed:', error) })
+      }
+      const message = createUserMessage({
+        content: [{ type: 'text', text: buildFrameText() }],
+        source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧 #${frames}` },
+      })
+      ctx.logger.info('[quiet-driver] wake #%d: direct followup to %s (真正空闲)', frames, sessionId)
+      agent.followup(message)
+    }
+  }, config.intervalMs)
+
+  timer.unref?.()
+
+  // Cordis plugin convention: return a cleanup disposer (not ctx.on('dispose')).
+  return () => {
+    clearInterval(timer)
+    ctx.logger.info('[quiet-driver] disposed after %d ticks', frames)
+  }
+}

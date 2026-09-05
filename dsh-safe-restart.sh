@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# dsh-safe-restart.sh — 安全重启 dsh web（user 级服务；防插件错误崩溃循环 + 自我感知）
+#
+# 背景教训（exp_98）：
+#   1. 当前 web 由 **user 级** systemd 服务承载（Hermes 托管, lib/bin.js）。
+#      system 级 dsh-web.service 已禁用——不要再操作它。
+#   2. agent 运行在被重启的服务里——重启 = 中断当前会话。本脚本在重启前
+#      打印"自我感知"警告，提示该操作会重启承载当前对话的进程。
+#   3. quiet-driver 曾因语法错误导致崩溃循环（NRestarts=793）。重启前先预检
+#      最近改动的插件（tsx 冒烟加载），把错误挡在重启之前。
+#
+# 用法:
+#   ./dsh-safe-restart.sh              # 预检 → 重启 user 级服务 → 健康确认
+#   ./dsh-safe-restart.sh --force      # 跳过预检直接重启
+#   ./dsh-safe-restart.sh --verify-only  # 只预检不重启
+#   ./dsh-safe-restart.sh --status     # 只看状态（含自我感知信息）
+#
+set -euo pipefail
+
+DSH_ROOT="${DSH_ROOT:-/home/ubuntu/dsh-fork}"
+CHECK_WINDOW_MIN="${CHECK_WINDOW_MIN:-120}"
+CHECK_TIMEOUT_S="${CHECK_TIMEOUT_S:-30}"
+SERVICE="dsh-web.service"
+CTL="systemctl --user"   # user 级（当前正统；system 级已禁用）
+
+log() { echo "[safe-restart] $*"; }
+die() { log "✗ $*" >&2; exit 1; }
+
+# ---------- 0. 自我感知（exp_98：我是被重启的进程内的实体） ----------
+self_awareness() {
+  log "⚠ 自我感知：当前 web 由 ${CTL} 承载。重启/停服会中断运行中的对话会话。"
+  log "  运行中的实例: PID $(systemctl --user show "$SERVICE" -p MainPID --value 2>/dev/null || echo none)"
+  log "  若要保留对话连续性，确认会话已落盘（session.jsonl 自动写入）后再重启。"
+}
+
+# ---------- 1. 找出最近修改的插件源码 ----------
+find_changed_plugins() {
+  find "$DSH_ROOT/packages" -path '*/src/*.ts' -newermt "-${CHECK_WINDOW_MIN} minutes" \
+    -not -path '*/node_modules/*' 2>/dev/null \
+    | sed -E 's|.*/packages/([^/]+/[^/]+)/src/.*|\1|' \
+    | sort -u
+}
+
+# ---------- 2. 对每个改动插件做 tsx 冒烟加载 ----------
+verify_plugin() {
+  local pkg_dir="$1"
+  local entry="$pkg_dir/src/index.ts"
+  [ -f "$entry" ] || { log "  跳过 $pkg_dir（无 src/index.ts）"; return 0; }
+  log "  预检 $pkg_dir ..."
+  if ! (cd "$DSH_ROOT" && timeout "$CHECK_TIMEOUT_S" npx tsx --eval \
+      "import('file://$entry').then(()=>process.exit(0)).catch(e=>{console.error(e.message);process.exit(1)})" \
+      >/tmp/dsh-safe-restart-check.log 2>&1); then
+    log "  ✗ $pkg_dir 加载失败：" >&2
+    tail -n 8 /tmp/dsh-safe-restart-check.log >&2 || true
+    return 1
+  fi
+  log "  ✓ $pkg_dir OK"
+  return 0
+}
+
+verify_all() {
+  log "预检最近 ${CHECK_WINDOW_MIN} 分钟内改动的插件 ..."
+  local changed
+  changed="$(find_changed_plugins)"
+  if [ -z "$changed" ]; then
+    log "  无最近改动的插件，跳过预检"
+    return 0
+  fi
+  local pkg failed=0
+  while IFS= read -r pkg; do
+    [ -n "$pkg" ] || continue
+    if ! verify_plugin "$DSH_ROOT/packages/$pkg"; then failed=$((failed + 1)); fi
+  done <<< "$changed"
+  if [ "$failed" -gt 0 ]; then
+    die "${failed} 个插件预检失败——请先修复源码，或用 --force 强制重启（不推荐）"
+  fi
+  log "全部插件预检通过"
+}
+
+# ---------- 3. 重启 + 健康确认 ----------
+safe_restart() {
+  local before_pid after_pid
+  before_pid="$($CTL show "$SERVICE" -p MainPID --value 2>/dev/null || true)"
+  log "重启 $SERVICE (旧 PID ${before_pid:-none}) ..."
+  # user 级服务不需要 sudo。
+  if ! $CTL restart "$SERVICE" 2>/tmp/dsh-safe-restart-ctl.log; then
+    log "✗ 重启失败：" >&2
+    cat /tmp/dsh-safe-restart-ctl.log >&2 || true
+    return 1
+  fi
+  local waited=0 ok=0
+  while [ "$waited" -lt 30 ]; do
+    sleep 2; waited=$((waited + 2))
+    if ! $CTL is-active --quiet "$SERVICE"; then
+      log "✗ 服务未 active（重启后崩溃？），最近日志：" >&2
+      journalctl --user -u "$SERVICE" --since "1 minute ago" 2>/dev/null | grep -iE "error|failed|Transform" | tail -n 10 >&2 || true
+      ok=1; break
+    fi
+    after_pid="$($CTL show "$SERVICE" -p MainPID --value 2>/dev/null || true)"
+    if [ -n "$after_pid" ] && [ "$after_pid" != "0" ] \
+       && curl -fsS --max-time 3 -o /dev/null "http://127.0.0.1:3080/" 2>/dev/null; then
+      ok=0; break
+    fi
+  done
+  if [ "$ok" -eq 0 ]; then
+    log "✓ 服务就绪 (PID ${after_pid})"
+    return 0
+  fi
+  log "✗ 等待就绪超时/崩溃——需人工介入 (journalctl --user -u $SERVICE)"
+  return 1
+}
+
+# ---------- main ----------
+cmd="${1:-safe}"
+case "$cmd" in
+  --force)
+    self_awareness
+    log "强制重启（跳过预检）"
+    safe_restart
+    ;;
+  --verify-only)
+    verify_all
+    ;;
+  --status)
+    self_awareness
+    log "服务状态: $($CTL is-active "$SERVICE" 2>/dev/null)"
+    log "PID: $($CTL show "$SERVICE" -p MainPID --value 2>/dev/null)"
+    log "NRestarts: $($CTL show "$SERVICE" -p NRestarts --value 2>/dev/null)"
+    ;;
+  safe|restart|"")
+    self_awareness
+    verify_all
+    safe_restart
+    ;;
+  *)
+    echo "用法: $0 [--force | --verify-only | --status | safe]" >&2
+    exit 2
+    ;;
+esac
