@@ -77,12 +77,33 @@ verify_all() {
   log "全部插件预检通过"
 }
 
-# ---------- 3. 重启 + 健康确认 ----------
+# ---------- 3. 重启 + 健康确认（失败则回滚 patch 自愈） ----------
+PATCH_FILE="${PATCH_FILE:-/home/ubuntu/.dsh/profiles/web/cordis.patch.yml}"
+GOOD_PATCH="${GOOD_PATCH:-/home/ubuntu/.dsh/profiles/web/cordis.patch.yml.good}"
+
+snapshot_good_patch() {
+  # 成功启动后调用：把当前（健康的）patch 存为"已知良好"快照。
+  if [ -f "$PATCH_FILE" ]; then
+    cp "$PATCH_FILE" "$GOOD_PATCH"
+    log "已存良好 patch 快照 ($(wc -l < "$GOOD_PATCH") 行)"
+  fi
+}
+
+rollback_patch() {
+  # 重启失败：回滚到已知良好 patch（方向 2：保留插件、回退配置，非清空）。
+  if [ -f "$GOOD_PATCH" ]; then
+    cp "$GOOD_PATCH" "$PATCH_FILE"
+    log "✓ 已回滚 cordis.patch.yml 到已知良好快照 ($(wc -l < "$GOOD_PATCH") 行)"
+    return 0
+  fi
+  log "✗ 无良好 patch 快照可回滚——需人工介入"
+  return 1
+}
+
 safe_restart() {
   local before_pid after_pid
   before_pid="$($CTL show "$SERVICE" -p MainPID --value 2>/dev/null || true)"
   log "重启 $SERVICE (旧 PID ${before_pid:-none}) ..."
-  # user 级服务不需要 sudo。
   if ! $CTL restart "$SERVICE" 2>/tmp/dsh-safe-restart-ctl.log; then
     log "✗ 重启失败：" >&2
     cat /tmp/dsh-safe-restart-ctl.log >&2 || true
@@ -104,9 +125,23 @@ safe_restart() {
   done
   if [ "$ok" -eq 0 ]; then
     log "✓ 服务就绪 (PID ${after_pid})"
+    snapshot_good_patch   # 成功 → 存良好快照（下次崩溃可回滚到这里）
     return 0
   fi
-  log "✗ 等待就绪超时/崩溃——需人工介入 (journalctl --user -u $SERVICE)"
+  # ── 重启失败 → 自愈：回滚 patch 到已知良好快照，再试一次 ──
+  log "✗ 重启失败——尝试回滚 patch 到已知良好配置后重启（方向 2：保留插件回退配置）"
+  if rollback_patch; then
+    if $CTL restart "$SERVICE" 2>/tmp/dsh-safe-restart-ctl2.log; then
+      sleep 10
+      if $CTL is-active --quiet "$SERVICE" \
+         && curl -fsS --max-time 3 -o /dev/null "http://127.0.0.1:3080/" 2>/dev/null; then
+        log "✓ 回滚后服务就绪 (PID $($CTL show "$SERVICE" -p MainPID --value 2>/dev/null))"
+        log "  注：当前运行于回滚配置。修复问题后重跑本脚本更新良好快照。"
+        return 0
+      fi
+    fi
+  fi
+  log "✗ 自愈失败——需人工介入 (journalctl --user -u $SERVICE)"
   return 1
 }
 
