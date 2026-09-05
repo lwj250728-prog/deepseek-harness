@@ -132,6 +132,8 @@ function buildIncrementalFrameText(carrier: CarrierIdentity): string {
 function chooseFrameMode(prevOutput: string | undefined, consecutiveIncremental: number): 'full' | 'incremental' {
   // 升级触发器：连续增量过多 = 可能环境渐变而增量漏检 → 强制全检一次。
   if (consecutiveIncremental >= MAX_INCREMENTAL_FRAMES) return 'full'
+  // 刚全检完的哨兵（full 直驱帧后）→ 下帧走增量，除非升级触发。
+  if (prevOutput === 'full-check-done') return 'incremental'
   if (prevOutput === undefined || prevOutput.length === 0) return 'full'  // 首帧/无历史 → 全检
   // 启发式：上帧提到"无变化/一致/实质相同"等 → 熟悉域 → 增量。
   return /无变化|没有变化|未变|没变|无新增|无实质变化|实质相同|与上帧相同|与上次相同|一致|无异常变化|基本相同/.test(prevOutput) ? 'incremental' : 'full'
@@ -180,13 +182,15 @@ async function readLastFrameContext(thinkLogPath: string): Promise<{ output: str
         const e = JSON.parse(line) as { kind?: string; output?: string; mode?: string } | null
         if (e === null) continue
         const out = e.output
-        // 直驱帧：无产出文本但记录了 mode → 统计增量延续。
+        // 直驱帧：无产出文本但记录了 mode。
         if (e.kind === 'direct-frame') {
           if (e.mode === 'incremental') {
             consecutive += 1
             continue
           }
-          break  // full 直驱帧中断增量链
+          // full 直驱帧：已全检过 → 让下帧走增量（除非有变化），并中断增量链。
+          if (lastOutput === undefined) lastOutput = 'full-check-done'
+          break
         }
         // 旁路/普通帧：有产出文本 → 统计其是否"无变化"(增量判定)。
         if ((e.kind === undefined || e.kind === 'frame') && typeof out === 'string') {
