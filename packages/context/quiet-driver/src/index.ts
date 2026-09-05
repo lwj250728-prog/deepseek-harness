@@ -83,8 +83,11 @@ interface CarrierIdentity {
   hostname: string
 }
 
-/** Frame text: v17/v18 精简三问 + v20 载体身份。 */
-function buildFrameText(carrier: CarrierIdentity): string {
+/** Frame text base (v18 自适应: 全检/增量两种协议)。 */
+function frameHeader(carrier: CarrierIdentity, mode: 'full' | 'incremental'): string {
+  const protocol = mode === 'full'
+    ? '检查协议：全检（环境有变化或陌生——逐层细查）'
+    : '检查协议：增量（环境与上帧高度相似=熟悉域——只比对差异与异常，不重复盘点）'
   return [
     '【三问帧】(source: plugin/quiet-driver, form: epistemic-frame)',
     '你正在做一次例行自我评估。这是旁路思考——请直接回答，不要执行额外任务。',
@@ -92,12 +95,47 @@ function buildFrameText(carrier: CarrierIdentity): string {
     '【载体身份】(v20 自我锚定——你运行在以下实例上，若与上次不同即经历载体迁移):',
     `  实例 PID: ${carrier.pid} | 启动: ${carrier.startedAt} | 主机: ${carrier.hostname}`,
     '',
-    'Q1 环境：自上次检查以来，环境有什么变化？（引用具体对象；无变化须说明你查证了什么）',
-    'Q2 当下：当前议程中有什么到期或未处理的事？（报可数事实，不用"正常"类判断词）',
-    'Q3 预测：什么最可能出错？如果错了怎么发现（证伪信号）？',
+    `【${protocol}】`,
     '',
-    '回答请控制在 5 句以内，直接给结论。',
   ].join('\n')
+}
+
+/** 全检帧文本：陌生/有变化时用（v17 完整三问）。 */
+function buildFullFrameText(carrier: CarrierIdentity): string {
+  return frameHeader(carrier, 'full')
+    + [
+      'Q1 环境（全检）：自上次检查以来，环境有什么变化？（引用具体对象；无变化须说明你查证了什么）',
+      'Q2 当下（全检）：当前议程中有什么到期或未处理的事？我的认知状态健康吗？（报可数事实）',
+      'Q3 预测：什么最可能出错？如果错了怎么发现（证伪信号）？',
+      '',
+      '回答请控制在 5 句以内，直接给结论。',
+    ].join('\n')
+}
+
+/** 增量帧文本：环境熟悉（与上帧相似）时用（v18 熟略查）。 */
+function buildIncrementalFrameText(carrier: CarrierIdentity): string {
+  return frameHeader(carrier, 'incremental')
+    + [
+      'Q1 环境（增量）：与上帧相比，有什么不同？（重点：异常/新信号/与上帧断言不符处；无则答"与上帧一致"）',
+      'Q2 当下（增量）：上帧提到的到期项/风险，进展如何？（只查上帧涉及的，不重新盘点全部）',
+      'Q3 预测：上帧最可能出错的点，应验了吗？（证伪信号核对）',
+      '',
+      '回答请控制在 5 句以内，直接给结论。',
+    ].join('\n')
+}
+
+/** 选择帧模式：读 think-log 最近 frame 产出，环境部分高度重复→增量，否则全检。 */
+function chooseFrameMode(prevOutput: string | undefined): 'full' | 'incremental' {
+  if (prevOutput === undefined || prevOutput.length === 0) return 'full'  // 首帧/无历史 → 全检
+  // 启发式：上帧提到"无变化/一致/无新增" → 熟悉域 → 增量
+  return /无变化|无新增|一致|与上帧相同|没有变化/.test(prevOutput) ? 'incremental' : 'full'
+}
+
+/** Frame text 入口：根据上帧产出选择协议（v18 自适应）。 */
+function buildFrameText(carrier: CarrierIdentity, prevOutput?: string): string {
+  return chooseFrameMode(prevOutput) === 'full'
+    ? buildFullFrameText(carrier)
+    : buildIncrementalFrameText(carrier)
 }
 
 /** Heuristic anomaly flag: frame text mentions concrete risk/failure signals. */
@@ -116,6 +154,28 @@ async function logFrame(thinkLogPath: string, entry: object): Promise<void> {
     // Logging must never break the driver.
     console.error('[quiet-driver] think-log write failed:', error)
   }
+}
+
+/** Read the most recent side-channel frame output from the think-log (v18 自适应). */
+async function readLastFrameOutput(thinkLogPath: string): Promise<string | undefined> {
+  const target = expandHome(thinkLogPath)
+  try {
+    const { readFile } = await import('node:fs/promises')
+    const raw = await readFile(target, 'utf8')
+    const lines = raw.split('\n').filter((l): l is string => l.length > 0)
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const line = lines[i]
+      if (line === undefined) continue
+      try {
+        const e = JSON.parse(line) as { kind?: string; output?: string } | null
+        const out = e?.output
+        if (e !== null && (e.kind === undefined || e.kind === 'frame') && typeof out === 'string' && out.length > 0) {
+          return out
+        }
+      } catch { /* skip malformed */ }
+    }
+  } catch { /* no think-log yet */ }
+  return undefined
 }
 
 /** Minimal prediction settlement: find the oldest unsettled prediction in the
@@ -257,8 +317,10 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       agentOptions: { provider: selection.provider, model: selection.model },
     })
     const agent = handle.agent
+    // v18 自适应: 读上帧产出, 决定全检/增量协议。
+    const prevOutput = await readLastFrameOutput(config.thinkLogPath)
     agent.followup(createUserMessage({
-      content: [{ type: 'text', text: buildFrameText(carrier) }],
+      content: [{ type: 'text', text: buildFrameText(carrier, prevOutput) }],
       source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧旁路 #${frameNo}` },
     }))
     await agent.whenIdle()
@@ -408,12 +470,15 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
         void settleOldestPrediction(ctx, config.thinkLogPath)
           .catch((error: unknown) => { console.error('[quiet-driver] prediction settle (direct) failed:', error) })
       }
-      const message = createUserMessage({
-        content: [{ type: 'text', text: buildFrameText(carrier) }],
-        source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧 #${frames}` },
-      })
-      ctx.logger.info('[quiet-driver] wake #%d: direct followup to %s (真正空闲)', frames, sessionId)
-      agent.followup(message)
+      // v18 自适应: 异步读上帧选协议, 再 followup。
+      void readLastFrameOutput(config.thinkLogPath).then((prevOutput) => {
+        const message = createUserMessage({
+          content: [{ type: 'text', text: buildFrameText(carrier, prevOutput) }],
+          source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧 #${frames}` },
+        })
+        ctx.logger.info('[quiet-driver] wake #%d: direct followup to %s (真正空闲)', frames, sessionId)
+        agent.followup(message)
+      }).catch((error: unknown) => { console.error('[quiet-driver] direct frame build failed:', error) })
     }
   }, config.intervalMs)
 
