@@ -121,6 +121,18 @@
   margin-left: 0;
 }
 
+/* The main-conversation badge on the designated session row. */
+.designatedBadge {
+  flex: none;
+  margin: 0 6px 0 0;
+  border: 1px solid var(--dsh-accent-color, #4f8cff);
+  color: var(--dsh-accent-color, #4f8cff);
+  border-radius: 3px;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 16px;
+}
+
 @keyframes row-in {
   from { opacity: 0; }
 }
@@ -339,6 +351,16 @@
 
 .iconButton:hover {
   color: var(--dsw-alias-label-primary);
+}
+
+/* Touch devices: a 16px button is unusable — grow to a thumb-friendly tap
+   target (the glyph keeps its own size, centered). */
+@media (hover: none) {
+  .iconButton {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+  }
 }
 
 /* Chevrons ride the caption grey (#ADB2B8); the folder glyph stays one step

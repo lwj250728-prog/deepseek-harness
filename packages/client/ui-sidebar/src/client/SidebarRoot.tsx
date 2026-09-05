@@ -169,10 +169,28 @@ export function SidebarRoot({
         </button>
       </Tooltip>
 
+      {/* The digital-life strip sits above the browsing region: the main
+          conversation's current state and recent trajectory. */}
+      <div className={css.lifeArea}>
+        {renderSlot('sidebar.life', {
+          wide,
+          expandSidebar: () => { if (collapsed) toggleSidebar() },
+        })}
+      </div>
+
       {/* The browsing region fills the column between the controls and the
           foot in both states; its rail icon column rides the same slot. */}
       <div className={css.regionArea}>
         {renderSlot('sidebar.workspaces', {
+          wide,
+          expandSidebar: () => { if (collapsed) toggleSidebar() },
+        })}
+      </div>
+
+      {/* The learning area sits between the browsing region and the foot:
+          the cognitive pipeline's exploration task queue. */}
+      <div className={css.learningArea}>
+        {renderSlot('sidebar.learning', {
           wide,
           expandSidebar: () => { if (collapsed) toggleSidebar() },
         })}

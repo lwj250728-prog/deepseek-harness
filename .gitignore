@@ -46,3 +46,13 @@ data/settings.yaml
 data/sessions/
 data/storages/
 logs/
+
+# local junk / dev artifacts (sync hygiene)
+nohup.out
+.venv/
+.dsh_session
+.acp_session
+.user-notes/
+frp_0.61.1_linux_amd64
+frp_0.61.1_linux_amd64.tar.gz
+*.bak*

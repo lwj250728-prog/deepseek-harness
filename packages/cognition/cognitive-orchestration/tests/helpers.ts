@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
+import Timer from '@deepseek-ai/cordis-plugin-timer'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Inbox } from '@deepseek-ai/dsh-agent'
@@ -25,7 +26,12 @@ import type {
   SubagentStopReason,
 } from '@deepseek-ai/dsh-subagent'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import SessionStore from '@deepseek-ai/dsh-session'
 import * as cognitivePipeline from '@deepseek-ai/dsh-cognitive-pipeline'
+import {
+  CognitiveOrchestrator,
+  resolveOrchestrationConfig,
+} from '../src/orchestrator.ts'
 import * as cognitiveOrchestration from '../src/index.ts'
 
 /** A scripted delegate provider capturing every prompt it received. */
@@ -67,18 +73,27 @@ export async function harness(
   ctx: Context
   delegate: FakeDelegate
   parent: Agent
+  orchestrator: CognitiveOrchestrator
   teardown: () => Promise<void>
 }> {
   const root = mkdtempSync(join(tmpdir(), 'cognition-orch-'))
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
+  await ctx.plugin(Timer)
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AgentRegistry)
+  await ctx.plugin(SessionStore)
   await ctx.plugin(SubagentRuntime)
   await ctx.plugin(cognitivePipeline, { root })
   const delegate = new FakeDelegate()
   ctx.subagents.registerProvider(delegate)
+  const orchestrator = new CognitiveOrchestrator(
+    ctx,
+    ctx.cognitivePipeline,
+    ctx.sessions,
+    resolveOrchestrationConfig({ delegate: 'delegate', providerName: 'cognitive', ...config }),
+  )
   await ctx.plugin(cognitiveOrchestration, { delegate: 'delegate', providerName: 'cognitive', ...config })
   const session = Session.create(SessionId('orch-parent'))
   const parent: Agent = {
@@ -100,7 +115,7 @@ export async function harness(
   const teardown = async (): Promise<void> => {
     rmSync(root, { recursive: true, force: true })
   }
-  return { ctx, delegate, parent, teardown }
+  return { ctx, delegate, parent, orchestrator, teardown }
 }
 
 /** Run one wrapped child with the given prompt and resolve its result. */

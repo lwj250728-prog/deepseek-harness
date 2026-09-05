@@ -263,6 +263,10 @@
     - id: ui-settings-plugins
       name: '@deepseek-ai/dsh-client-ui-settings-plugins'
 
+    # Fiscal map: the national public-budget choropleth Settings section.
+    - id: ui-fiscal-map
+      name: '@deepseek-ai/dsh-client-ui-fiscal-map'
+
     # Plan control: the composer plan seat over the plan projection + /plan channel.
     - id: ui-plan
       name: '@deepseek-ai/dsh-client-ui-plan'
@@ -272,6 +276,11 @@
 
     - id: ui-trajectory
       name: '@deepseek-ai/dsh-client-ui-trajectory'
+
+    # Learning area: the cognitive pipeline's exploration task queue in the
+    # sidebar between the browsing region and the foot.
+    - id: ui-cognition
+      name: '@deepseek-ai/dsh-client-ui-cognition'
 
 # ── the agent plane moves behind agent presets ─────────────────────────────
 #

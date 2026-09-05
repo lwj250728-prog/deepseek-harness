@@ -396,3 +396,73 @@ describe('AppFrame — unmount with an in-flight resize frame', () => {
     expect(tracks(frame)).toEqual([280, 330])
   })
 })
+
+describe('AppFrame — phone overlay drawers', () => {
+  it('phone mount keeps the rail plus the full center, no drag handles', () => {
+    frameWidth = 390
+    const { frame, slotCalls } = mountFrame()
+    expect(tracks(frame)).toEqual([SIDEBAR_COLLAPSED, 0])
+    expect(frame.hasAttribute('data-phone-sidebar')).toBe(false)
+    expect(slotCalls.filter(c => c.key === 'sidebar').at(-1)!.props).toEqual({ collapsed: true, width: SIDEBAR_COLLAPSED })
+    expect(frame.querySelectorAll('[class*="handle"]')).toHaveLength(0)
+  })
+
+  it('phone toggle opens an overlay drawer without squeezing the center', () => {
+    frameWidth = 390
+    const { frame, instance, slotCalls } = mountFrame()
+    act(() => { instance.actions.toggleSidebar() }) // narrow toggle → narrowExpanded
+    act(() => { vi.advanceTimersByTime(20) }) // off → open (rAF step)
+    expect(frame.getAttribute('data-phone-sidebar')).toBe('open')
+    // The center column keeps the full width: the drawer overlays instead of
+    // squeezing (grid stays rail + full center).
+    expect(tracks(frame)).toEqual([SIDEBAR_COLLAPSED, 0])
+    expect(slotCalls.filter(c => c.key === 'sidebar').at(-1)!.props).toEqual({ collapsed: false, width: 300 })
+    expect(frame.querySelectorAll('[class*="handle"]')).toHaveLength(0)
+    // Scrim is the tap-to-close target.
+    expect(frame.querySelector('[data-for="sidebar"]')).toBeTruthy()
+
+    // Closing plays the slide-out, then the column returns to its in-flow rail.
+    act(() => { instance.actions.toggleSidebar() })
+    expect(frame.getAttribute('data-phone-sidebar')).toBe('off')
+    act(() => { vi.advanceTimersByTime(400) })
+    expect(frame.hasAttribute('data-phone-sidebar')).toBe(false)
+    expect(slotCalls.filter(c => c.key === 'sidebar').at(-1)!.props).toEqual({ collapsed: true, width: SIDEBAR_COLLAPSED })
+  })
+
+  it('phone details open renders the details drawer over the full center', () => {
+    frameWidth = 390
+    const { frame, instance } = mountFrame()
+    act(() => { instance.actions.openDetails() })
+    act(() => { vi.advanceTimersByTime(20) })
+    expect(frame.getAttribute('data-phone-details')).toBe('open')
+    expect(tracks(frame)).toEqual([SIDEBAR_COLLAPSED, 0])
+    expect(frame.querySelector('[data-for="details"]')).toBeTruthy()
+
+    act(() => { instance.actions.closeDetails() })
+    expect(frame.hasAttribute('data-phone-details')).toBe(false)
+  })
+
+  it('tablet (narrow but not phone) also gets the details drawer', () => {
+    frameWidth = 980
+    const { frame, instance } = mountFrame()
+    act(() => { instance.actions.openDetails() })
+    act(() => { vi.advanceTimersByTime(20) })
+    expect(frame.getAttribute('data-phone-details')).toBe('open')
+    expect(tracks(frame)).toEqual([SIDEBAR_COLLAPSED, 0])
+  })
+
+  it('phone drawer auto-closes when the current session changes while open', () => {
+    frameWidth = 390
+    const { frame, instance, rerenderFrame } = mountFrame()
+    act(() => { instance.actions.toggleSidebar() })
+    act(() => { vi.advanceTimersByTime(20) })
+    expect(frame.getAttribute('data-phone-sidebar')).toBe('open')
+    // Selecting another session from the drawer changes the current id.
+    selectedSession.current = 's-other' as SessionId
+    act(() => { rerenderFrame() })
+    act(() => { vi.advanceTimersByTime(20) })
+    expect(frame.getAttribute('data-phone-sidebar')).toBe('off')
+    act(() => { vi.advanceTimersByTime(400) })
+    expect(frame.hasAttribute('data-phone-sidebar')).toBe(false)
+  })
+})

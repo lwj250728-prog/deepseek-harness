@@ -135,6 +135,12 @@ export type WorkspaceBrowserInjected = DirectoryPickingInjected & {
   insertSessionBefore: (workspaceId: WorkspaceId, sessionId: SessionId, beforeSessionId?: SessionId) => Promise<void>
   /** Adopt a picked host directory as a real Workspace before targeting a Session. */
   createWorkspace: (input: { path: string }) => Promise<WorkspaceView>
+  /**
+   * Resolve the designated main conversation's session id (the digital-life
+   * `life.overview` read; null when the host has no chain yet or the RPC is
+   * unavailable). The browser pins that session to the top of the list.
+   */
+  loadDesignatedSessionId: () => Promise<SessionId | null>
 }
 
 /** Full browser props: shell owner share + viewing store + injected actions + the locale seat. */

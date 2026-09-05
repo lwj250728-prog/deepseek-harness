@@ -3,8 +3,9 @@ import type {
   SessionId, SessionListState, SessionSummary, WorkspaceId, WorkspaceView,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import {
+  splitDesignated,
   deriveFlat, deriveGroups, deriveSearchResults, workspaceLabel, relativeTime,
-  UNGROUPED_KEY, UNGROUPED_LABEL,
+  UNGROUPED_KEY, UNGROUPED_LABEL, type SessionNode,
 } from '../src/client/tree.ts'
 import { createWorkspaceViewStore } from '../src/client/stores.ts'
 
@@ -446,5 +447,28 @@ describe('relativeTime', () => {
     expect(relativeTime(now - 2 * 86_400_000, now)).toEqual({ unit: 'days', n: 2 })
     expect(relativeTime(now - 60 * 86_400_000, now)).toEqual({ unit: 'months', n: 2 })
     expect(relativeTime(0, now)).toEqual({ unit: 'years', n: 1 })
+  })
+})
+
+describe('splitDesignated', () => {
+  function node(id: string): SessionNode {
+    return {
+      id: sid(id), title: id, blank: false, running: false,
+      runningSubagentCount: 0, completed: false, updatedAt: 1,
+    }
+  }
+
+  it('pins the designated row out of the middle, preserving rest order', () => {
+    const rows = [node('a'), node('b'), node('c')]
+    const { pinned, rest } = splitDesignated(rows, sid('b'))
+    expect(pinned?.id).toBe('b')
+    expect(rest.map(r => r.id)).toEqual(['a', 'c'])
+  })
+
+  it('returns no pin when the designated id is absent or undefined', () => {
+    const rows = [node('a'), node('b')]
+    expect(splitDesignated(rows, sid('zzz')).pinned).toBeUndefined()
+    expect(splitDesignated(rows, undefined).pinned).toBeUndefined()
+    expect(splitDesignated(rows, undefined).rest.map(r => r.id)).toEqual(['a', 'b'])
   })
 })

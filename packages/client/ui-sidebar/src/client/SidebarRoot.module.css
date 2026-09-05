@@ -241,6 +241,36 @@
   padding-left: 0;
 }
 
+/* Digital-life strip: the main conversation's state card + trajectory, a
+   compact seat above the browsing region. Collapses to a rail icon. */
+.lifeArea {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  width: 100%;
+}
+
+.collapsed .lifeArea {
+  align-items: center;
+  width: auto;
+}
+
+/* Learning area: a compact seat between the browsing region and the foot.
+   It shrinks to a rail icon while collapsed, like the footer controls. */
+.learningArea {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  width: 100%;
+}
+
+.collapsed .learningArea {
+  align-items: center;
+  width: auto;
+}
+
 /* Footer seats: additive actions stack above Settings. Each occupant owns its
    button geometry and hover chrome. */
 .footArea {

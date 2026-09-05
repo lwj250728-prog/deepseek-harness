@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-09-03-digital-life-m3-cross-session-attribution.md
+2026-09-03-digital-life-m3-cross-session-attribution.md: 1efc0c8d3a18459c9ed83378e102af22d7abe079
+2026-09-03-digital-life-m3-cross-session-attribution.zh.md: c2a5b925d4074605553d791acdec35ac4b10a0f6

@@ -117,3 +117,73 @@
 .overlayLayer > * {
   pointer-events: auto;
 }
+
+/* ---- Phone/narrow overlay drawers -------------------------------------
+   Below the phone breakpoint the expanded sidebar and an opened details
+   panel stop sharing the center column: the grid keeps the rail + full
+   center and the panels render as absolutely positioned drawers that slide
+   over it. CSS cannot transition an element between in-flow and absolute,
+   so AppFrame drives a two-step phase ('off' → absolute off-screen, 'open'
+   → slid in; the sidebar closes by sliding back out before returning to its
+   in-flow rail). */
+
+.frame[data-phone-sidebar='off'] .sidebarCol,
+.frame[data-phone-sidebar='open'] .sidebarCol {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 30;
+  /* The slot root carries the drawer's inline width; shrink-wrap to it. */
+  width: max-content;
+  box-shadow: var(--dsw-shadow-lv3);
+  transition: transform var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+
+.frame[data-phone-sidebar='off'] .sidebarCol {
+  transform: translateX(-100%);
+}
+
+.frame[data-phone-sidebar='open'] .sidebarCol {
+  transform: translateX(0);
+}
+
+.frame[data-phone-details='off'] .detailsCol,
+.frame[data-phone-details='open'] .detailsCol {
+  position: absolute;
+  inset: 0 0 0 auto;
+  z-index: 28;
+  width: min(100%, var(--dsh-details-drawer-width, 480px));
+  /* The DetailsPanel paints its own left border; only elevate the drawer. */
+  box-shadow: var(--dsw-shadow-lv2);
+  transition: transform var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+
+.frame[data-phone-details='off'] .detailsCol {
+  transform: translateX(100%);
+}
+
+.frame[data-phone-details='open'] .detailsCol {
+  transform: translateX(0);
+}
+
+/* Drawer scrims: the dimmed center is the tap-to-close target. The sidebar
+   drawer stacks above the details drawer, so its scrim does too. */
+.scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 27;
+  background: var(--dsw-alias-bg-mask-1);
+  backdrop-filter: var(--dsw-mask-blur);
+}
+
+.scrim[data-for='sidebar'] {
+  z-index: 29;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .frame[data-phone-sidebar='off'] .sidebarCol,
+  .frame[data-phone-sidebar='open'] .sidebarCol,
+  .frame[data-phone-details='off'] .detailsCol,
+  .frame[data-phone-details='open'] .detailsCol {
+    transition: none;
+  }
+}

@@ -24,7 +24,9 @@
 }
 
 .source {
-  flex: none;
+  /* Shrinks with the row (flex: none kept the intrinsic width and overflowed
+     narrow columns — the ellipsis below needs a shrinkable box). */
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   color: var(--dsw-alias-label-tertiary);

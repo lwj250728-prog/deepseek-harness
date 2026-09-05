@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-09-03-digital-life-m4-sidebar-life-strip.md
+2026-09-03-digital-life-m4-sidebar-life-strip.md: bddfb2c2ab2714ebec5125dfdec2714dafc230a4
+2026-09-03-digital-life-m4-sidebar-life-strip.zh.md: 94469bdb6231522c18ba161f71c90ba5ea490fab

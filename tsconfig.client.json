@@ -65,6 +65,7 @@
     { "path": "./packages/client/ui-layout" },
     { "path": "./packages/client/ui-sidebar" },
     { "path": "./packages/client/ui-conversation" },
+    { "path": "./packages/client/ui-cognition" },
     { "path": "./packages/client/ui-tool" },
     { "path": "./packages/client/ui-deliverables" },
     { "path": "./packages/client/ui-workflow-run" },
@@ -91,6 +92,7 @@
     { "path": "./packages/client/ui-settings-general" },
     { "path": "./packages/client/ui-settings-models" },
     { "path": "./packages/client/ui-settings-plugin-inventory" },
+    { "path": "./packages/client/ui-fiscal-map" },
     { "path": "./packages/client/locale" },
     { "path": "./packages/client/web" },
     { "path": "./apps/web" }

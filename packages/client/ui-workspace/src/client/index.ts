@@ -10,6 +10,8 @@
  */
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
+import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { WorkspaceBrowserInjected, WorkspacePickerInjected } from './contract/slots.ts'
@@ -99,6 +101,19 @@ export function apply(ctx: ClientContext): void {
       await ctx.workspaces.insertSessionBefore(workspaceId, sessionId, beforeSessionId)
     },
     createWorkspace: input => ctx.workspaces.create(input),
+    loadDesignatedSessionId: async () => {
+      // Digital-life designation read: the main conversation's session id
+      // (life.overview). Absent host/plugin/chain → null → no pin.
+      try {
+        const { api } = ctx.get('connection') as ConnectionHandle
+        const response = await api.life.overview({})
+        if (!response.result.ok) return null
+        const id = response.result.value.designatedSessionId
+        return id === null || id.length === 0 ? null : id as SessionId
+      } catch (_error) {
+        return null
+      }
+    },
     hooks: { directoryFlow: browserFlowSource },
   })
   const pickerInjected = (): WorkspacePickerInjected => ({

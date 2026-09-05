@@ -34,3 +34,10 @@
 .sessionLogButton span {
   white-space: nowrap;
 }
+
+/* Phones: the header utility grows to a thumb-friendly height. */
+@media (max-width: 640px) {
+  .sessionLogButton {
+    height: 36px;
+  }
+}

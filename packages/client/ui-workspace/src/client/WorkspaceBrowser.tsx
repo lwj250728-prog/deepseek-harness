@@ -20,8 +20,8 @@ import type {
 } from '@deepseek-ai/dsh-client-runtime/client'
 import type { WorkspaceBrowserProps } from './contract/slots.ts'
 import type { SessionNode, SessionOrderBy } from './tree.ts'
-import { deriveFlat, deriveGroups, deriveSearchResults, UNGROUPED_KEY } from './tree.ts'
-import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './rows/Rows.tsx'
+import { deriveFlat, deriveGroups, deriveSearchResults, splitDesignated, UNGROUPED_KEY } from './tree.ts'
+import { ProjectRowItem, SearchResultItem, SessionNodeItem, type RowDragProps } from './rows/Rows.tsx'
 import { FLAT_SESSION_ORDER_KEY } from './stores.ts'
 import { WorkspacePickFlow } from './WorkspacePicker.tsx'
 import css from './WorkspaceBrowser.module.css'
@@ -243,6 +243,8 @@ type SessionTreeProps = Pick<
   onSessionArchive: (sessionId: SessionNode['id']) => void
   /** Session order behavior: fixed after edits, or additionally promoted by user activity. */
   orderBy: SessionOrderBy
+  /** The designated main conversation's session id (pinned row), if any. */
+  designatedSessionId: SessionId | undefined
 }
 
 /** The scrolling session tree; unmounting drops the sessions subscription and expand-all state. */
@@ -251,7 +253,8 @@ function SessionTree({
   onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive,
   insertWorkspaceBefore, insertSessionBefore, orderBy,
   groupExpansion, setGroupExpanded,
-  sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t,
+  sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder,
+  designatedSessionId, t,
 }: SessionTreeProps) {
   const list = useSessions(s => s)
   const current = list.current
@@ -477,36 +480,15 @@ function SessionTree({
                     },
                   }}
               />
-              {(expandedSessionGroups.includes(group.key)
-                ? group.sessions
-                : group.sessions.slice(0, COLLAPSED_SESSION_LIMIT)
-              ).map((node) => {
-              // Session drag never leaves its group. Ungrouped writes only the
-              // browser-local account; real Workspaces may also write Host order.
-                const sameGroupDrag = drag !== null && drag.accountKey === group.key
-                const dragProps = {
-                  start: () => {
-                    sessionDropCommitted.current = false
-                    setDrag({ accountKey: group.key, sessionId: node.id, over: null })
-                  },
-                  active: sameGroupDrag,
-                  marker: sameGroupDrag && drag.over?.id === node.id ? drag.over.half : null,
-                  hover: (half: 'before' | 'after') => {
-                  /* v8 ignore next -- narrowing guard: Rows gates hover on `active`, which is false while the drag state is null. */
-                    setDrag(d => (d === null ? d : { ...d, over: { id: node.id, half } }))
-                  },
-                  drop: (half: 'before' | 'after') => {
-                  /* v8 ignore next -- narrowing guard: Rows gates drop on `active`, which is false while the drag state is null. */
-                    if (drag === null) return
-                    commitSessionDrag(drag, { id: node.id, half })
-                  },
-                  end: () => {
-                    if (drag?.over !== null && drag?.over !== undefined) commitSessionDrag(drag, drag.over)
-                    else setDrag(null)
-                    sessionDropCommitted.current = false
-                  },
-                }
-                return (
+              {(() => {
+                const visibleRows = expandedSessionGroups.includes(group.key)
+                  ? group.sessions
+                  : group.sessions.slice(0, COLLAPSED_SESSION_LIMIT)
+                // The designated main conversation is pinned at the top of its
+                // group, rendered non-draggable; the rest keeps its order and
+                // drag behavior untouched.
+                const { pinned, rest } = splitDesignated(visibleRows, designatedSessionId)
+                const row = (node: SessionNode, dragProps: RowDragProps | undefined) => (
                   <SessionNodeItem
                     key={node.id}
                     node={node}
@@ -516,11 +498,47 @@ function SessionTree({
                     onRename={onSessionRename}
                     onFork={forkSession}
                     onArchive={onSessionArchive}
+                    designated={node.id === designatedSessionId}
                     drag={dragProps}
                     t={t}
                   />
                 )
-              })}
+                const draggableRow = (node: SessionNode) => {
+                  // Session drag never leaves its group. Ungrouped writes only
+                  // the browser-local account; real Workspaces may also write
+                  // Host order.
+                  const sameGroupDrag = drag !== null && drag.accountKey === group.key
+                  const dragProps: RowDragProps = {
+                    start: () => {
+                      sessionDropCommitted.current = false
+                      setDrag({ accountKey: group.key, sessionId: node.id, over: null })
+                    },
+                    active: sameGroupDrag,
+                    marker: sameGroupDrag && drag.over?.id === node.id ? drag.over.half : null,
+                    hover: (half: 'before' | 'after') => {
+                    /* v8 ignore next -- narrowing guard: Rows gates hover on `active`, which is false while the drag state is null. */
+                      setDrag(d => (d === null ? d : { ...d, over: { id: node.id, half } }))
+                    },
+                    drop: (half: 'before' | 'after') => {
+                    /* v8 ignore next -- narrowing guard: Rows gates drop on `active`, which is false while the drag state is null. */
+                      if (drag === null) return
+                      commitSessionDrag(drag, { id: node.id, half })
+                    },
+                    end: () => {
+                      if (drag?.over !== null && drag?.over !== undefined) commitSessionDrag(drag, drag.over)
+                      else setDrag(null)
+                      sessionDropCommitted.current = false
+                    },
+                  }
+                  return row(node, dragProps)
+                }
+                return (
+                  <>
+                    {pinned !== undefined && row(pinned, undefined)}
+                    {rest.map(node => draggableRow(node))}
+                  </>
+                )
+              })()}
               {group.sessions.length > COLLAPSED_SESSION_LIMIT && (
                 <button
                   type="button"
@@ -545,7 +563,8 @@ function SessionTree({
 /** The flat "In one list" body: every session is one draggable top-level row. */
 function FlatList({
   useSessions, open, forkSession, onSessionRename, onSessionArchive, archivedSessionIds,
-  orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t,
+  orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder,
+  designatedSessionId, t,
 }: Pick<
   SessionTreeProps,
   | 'useSessions'
@@ -559,6 +578,7 @@ function FlatList({
   | 'sessionUpdatedAtByAccount'
   | 'syncSessionOrderAccount'
   | 'setSessionOrder'
+  | 'designatedSessionId'
   | 't'
 >) {
   const list = useSessions(s => s)
@@ -594,6 +614,9 @@ function FlatList({
         return row === undefined ? [] : [row]
       })
   }, [baseRows, sessionOrderByAccount, sessionIds])
+  // The designated main conversation is pinned at the top, non-draggable; the
+  // rest keeps its order and drag behavior untouched.
+  const { pinned: flatPinned, rest: flatRest } = splitDesignated(rows, designatedSessionId)
   const [drag, setDrag] = useState<DragState | null>(null)
   const dropCommitted = useRef(false)
   useNativeDragAcceptance(drag !== null)
@@ -620,7 +643,22 @@ function FlatList({
         {rows.length === 0 && (
           <div className={css.empty}>{t('empty.none')}</div>
         )}
-        {rows.map((node) => {
+        {flatPinned !== undefined && (
+          <SessionNodeItem
+            key={flatPinned.id}
+            node={flatPinned}
+            currentId={list.current}
+            now={now}
+            onOpen={open}
+            onRename={onSessionRename}
+            onFork={forkSession}
+            onArchive={onSessionArchive}
+            flat
+            designated
+            t={t}
+          />
+        )}
+        {flatRest.map((node) => {
           const active = drag !== null
           return (
             <SessionNodeItem
@@ -633,6 +671,7 @@ function FlatList({
               onFork={forkSession}
               onArchive={onSessionArchive}
               flat
+              designated={node.id === designatedSessionId}
               drag={{
                 start: () => {
                   dropCommitted.current = false
@@ -757,6 +796,7 @@ export function WorkspaceBrowser({
   createWorkspace,
   searchSessions,
   searchResultLimit,
+  loadDesignatedSessionId,
   useDirectoryFlow,
   renderSlot,
   t,
@@ -793,6 +833,16 @@ export function WorkspaceBrowser({
   })
   const searchRoot = useRef<HTMLDivElement | null>(null)
   const searchInput = useRef<HTMLInputElement | null>(null)
+  // The designated main conversation: fetched once; null until resolved (no
+  // chain / older host) keeps the list unpinned.
+  const [designatedSessionId, setDesignatedSessionId] = useState<SessionId | undefined>(undefined)
+  useEffect(() => {
+    let alive = true
+    void loadDesignatedSessionId()
+      .then(id => { if (alive) setDesignatedSessionId(id ?? undefined) })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [loadDesignatedSessionId])
   // Section-header ＋ opens the picker menu (same popover in wide and rail
   // states; the menu anchors on this button).
   const [wsPickerOpen, setWsPickerOpen] = useState(false)
@@ -1130,6 +1180,7 @@ export function WorkspaceBrowser({
                 sessionUpdatedAtByAccount={sessionUpdatedAtByAccount}
                 syncSessionOrderAccount={actions.syncSessionOrderAccount}
                 setSessionOrder={actions.setSessionOrder}
+                designatedSessionId={designatedSessionId}
                 t={t}
               />
             )
@@ -1152,6 +1203,7 @@ export function WorkspaceBrowser({
                 insertWorkspaceBefore={insertWorkspaceBefore}
                 insertSessionBefore={insertSessionBefore}
                 orderBy={orderBy}
+                designatedSessionId={designatedSessionId}
                 t={t}
                 onRenameRequest={(workspaceId, currentTitle) => {
                   setRenameTarget({ workspaceId, currentTitle })

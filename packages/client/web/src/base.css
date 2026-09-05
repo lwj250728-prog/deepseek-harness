@@ -15,6 +15,15 @@ body,
   margin: 0;
 }
 
+/* Mobile browsers: the dynamic viewport height tracks the URL-bar
+   collapse/expand, so a docked composer never sits under browser chrome.
+   Unsupported engines keep the 100% chain above. */
+@supports (height: 100dvh) {
+  #root {
+    height: 100dvh;
+  }
+}
+
 body {
   font-family: var(--dsw-font-family);
   /* Grayscale antialiasing over subpixel rendering: WebKit/Blink and the
@@ -33,4 +42,15 @@ input,
 select,
 textarea {
   font-family: inherit;
+}
+
+/* Touch: kill the legacy double-tap-zoom delay on interactive elements
+   (pinch zoom stays enabled; the app has no double-tap gesture). */
+button,
+a,
+select,
+textarea,
+input,
+[role='button'] {
+  touch-action: manipulation;
 }

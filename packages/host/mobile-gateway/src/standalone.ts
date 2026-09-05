@@ -16,6 +16,8 @@
  * | `DSH_MOBILE_GATEWAY_TOKENS` | — | bare token list, names auto `user-1`… |
  * | `DSH_MOBILE_GATEWAY_SECRET` | random | stable session HMAC secret |
  * | `DSH_MOBILE_GATEWAY_TTL_SECONDS` | `604800` | session lifetime |
+ * | `DSH_MOBILE_GATEWAY_RATE_LIMIT_WINDOW_MS` | `300000` | login throttle window |
+ * | `DSH_MOBILE_GATEWAY_RATE_LIMIT_MAX_FAILURES` | `10` | login failures per window |
  * | `DSH_MOBILE_GATEWAY_TLS_KEY` | — | PEM key path (pair with CERT) |
  * | `DSH_MOBILE_GATEWAY_TLS_CERT` | — | PEM cert path |
  * @module @deepseek-ai/dsh-mobile-gateway/standalone
@@ -34,6 +36,14 @@ function envInt(name: string, fallback: number): number {
   if (raw === undefined || raw === '') return fallback
   const value = Number(raw)
   return Number.isFinite(value) && value >= 0 && value <= 65535 ? value : fallback
+}
+
+/** Positive integer env read without the port cap (rate-limit window ms). */
+function envPosInt(name: string, fallback: number): number {
+  const raw = env(name)
+  if (raw === undefined || raw === '') return fallback
+  const value = Number(raw)
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback
 }
 
 /** Bare-token env (`DSH_MOBILE_GATEWAY_TOKENS`) becomes auto-named users. */
@@ -59,6 +69,10 @@ const gateway = await createGateway({
   users,
   secret: env('DSH_MOBILE_GATEWAY_SECRET'),
   sessionTtlSeconds: envInt('DSH_MOBILE_GATEWAY_TTL_SECONDS', 7 * 24 * 60 * 60),
+  loginRateLimit: {
+    windowMs: envPosInt('DSH_MOBILE_GATEWAY_RATE_LIMIT_WINDOW_MS', 5 * 60 * 1000),
+    maxFailures: envInt('DSH_MOBILE_GATEWAY_RATE_LIMIT_MAX_FAILURES', 10),
+  },
   tls,
 })
 

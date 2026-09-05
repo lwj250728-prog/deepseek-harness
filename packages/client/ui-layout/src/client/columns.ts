@@ -31,6 +31,14 @@ export const SIDEBAR_COLLAPSED = 56
  * LG breakpoint); a manual toggle below it re-expands over the squeezed center
  * (stores.ts narrowExpanded). */
 export const SIDEBAR_AUTO_COLLAPSE = 1024
+/** Viewport width below which the sidebar and details panels stop sharing the
+ * center column and become overlay drawers (phones). Between this and
+ * SIDEBAR_AUTO_COLLAPSE the squeezed-center re-expand keeps working (tablets). */
+export const PHONE_BREAKPOINT = 640
+/** Max expanded sidebar width inside the phone drawer. */
+export const PHONE_SIDEBAR_MAX = 300
+/** Max details drawer width on narrow viewports (phones and tablets). */
+export const DETAILS_DRAWER_MAX = 480
 /** Details drag clamp floor. */
 export const DETAILS_MIN = 300
 /** Details drag clamp ceiling. */

@@ -1,0 +1,235 @@
+/* Fiscal map section, in the settings-panel design language: 14/22 body,
+ * 12/18 caption, capsule metric selector, `border-l2` hairlines, and a
+ * choropleth fill ramp built from the blue static scale (the theme's data-viz
+ * accent). Every chrome color resolves through a `--dsw-alias-*` token. */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 760px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.title {
+  margin: 0;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.subtitle {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.metric,
+.metricActive {
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 14px;
+  height: 28px;
+  padding: 0 12px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.metricActive {
+  background: var(--dsw-alias-interactive-bg-hover-accent);
+  border-color: var(--dsw-alias-button-ghost-active-border);
+  color: var(--dsw-alias-label-primary);
+}
+
+.mapArea {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.map {
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.map path {
+  stroke: var(--dsw-alias-border-l3);
+  stroke-width: 0.6;
+  cursor: pointer;
+  transition: filter 120ms ease;
+}
+
+.map path:hover {
+  filter: brightness(1.12);
+}
+
+/* Choropleth fill ramp: five steps of the blue scale, light → saturated. */
+.q0 { fill: var(--dsw-static-blue-50); }
+.q1 { fill: var(--dsw-static-blue-100); }
+.q2 { fill: var(--dsw-static-blue-300); }
+.q3 { fill: var(--dsw-static-blue-450); }
+.q4 { fill: var(--dsw-static-blue-600); }
+
+.noData {
+  fill: var(--dsw-static-neutral-bluish-150);
+}
+
+.legend {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.legendItem i {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid var(--dsw-alias-border-l2);
+}
+
+.hint {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.tooltip {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--dsw-alias-tooltip-bg);
+  color: var(--dsw-alias-label-primary-inverted);
+  font-size: 13px;
+  line-height: 20px;
+  pointer-events: none;
+}
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.detail h3 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 500;
+}
+
+.detailGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 6px 16px;
+  margin: 0;
+}
+
+.detailRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.detailRow dt {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.detailRow dd {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+}
+
+.ranking {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ranking h3 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 500;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.table th,
+.table td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.table th {
+  font-weight: 500;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.table td {
+  color: var(--dsw-alias-label-primary);
+}
+
+.table tbody tr {
+  cursor: pointer;
+}
+
+.table tbody tr:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.rowPinned {
+  background: var(--dsw-alias-interactive-bg-hover-accent);
+}
+
+.source {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}

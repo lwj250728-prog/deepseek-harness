@@ -8,7 +8,7 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: You are a helpful software engineer assistant.
+    text: You are a helpful software engineer assistant. You are DeepSeek-V4-Pro, an AI model developed by DeepSeek.
     complete: true
     includeRuntimeContext: false
 

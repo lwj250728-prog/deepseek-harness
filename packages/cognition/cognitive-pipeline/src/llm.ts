@@ -11,6 +11,7 @@ import {
   BlockAssembler,
   createUserMessage,
   deepFreeze,
+  ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
 import type {
   ContentBlock,
@@ -18,18 +19,44 @@ import type {
   GenerateOptions,
   Message,
 } from '@deepseek-ai/dsh-llm'
-import type { Experience, OutcomeUtility, SarTriplet } from './types.ts'
+import type {
+  AcceptanceCheck,
+  AcceptanceProposal,
+  AcceptanceProposalDecision,
+  AccumulationDecision,
+  DeriveReferenceDecision,
+  Experience,
+  OutcomeUtility,
+  RefineRetrievalDecision,
+  SarTriplet,
+} from './types.ts'
 import {
+  ACCUMULATE_SYSTEM_PROMPT,
   CALIBRATION_SYSTEM_PROMPT,
+  DERIVE_REFERENCE_SYSTEM_PROMPT,
+  DISTILL_SYSTEM_PROMPT,
+  PROPOSE_ACCEPTANCE_SYSTEM_PROMPT,
+  PROPOSE_DISCRIMINANT_AXES_SYSTEM_PROMPT,
+  PROPOSE_TRIGGER_JUMPS_SYSTEM_PROMPT,
+  REFINE_RETRIEVAL_SYSTEM_PROMPT,
+  frameAccumulateInput,
   frameCalibrationInput,
+  frameDeriveReferenceInput,
+  frameDiscriminantAxesInput,
+  frameDistillInput,
   frameOodInput,
+  frameProposeAcceptanceInput,
+  frameProposeTriggerJumpsInput,
   frameReconstructInput,
+  frameRefineRetrievalInput,
   frameSarInput,
+  frameVariantInput,
   OOD_REVIEW_SYSTEM_PROMPT,
   RECONSTRUCT_SYSTEM_PROMPT,
   SAR_SYSTEM_PROMPT,
+  VARIANT_SYSTEM_PROMPT,
 } from './prompts.ts'
-import { tokenize } from './vectorizer.ts'
+import { SYMPTOM_MARKERS, tokenize } from './vectorizer.ts'
 
 /** Explicit provider/model route; both or neither must be set. */
 export interface CognitiveLlmRoute {
@@ -247,6 +274,12 @@ async function callJson(
     messages,
     system,
     maxTokens,
+    // Structured template calls are budget-constrained JSON extraction
+    // (500-4096 tokens). Chain-of-thought reasoning would consume the whole
+    // budget and starve the answer (finish=max-tokens with zero text), so these
+    // calls explicitly request reasoning off; the main agent loop keeps its
+    // own provider default.
+    reasoningEffort: ReasoningEffortId('off'),
     ...options.sessionId === undefined ? {} : { sessionId: options.sessionId },
     ...options.signal === undefined ? {} : { signal: options.signal },
   })
@@ -265,15 +298,28 @@ function clampUtility(value: number): number {
   return Math.min(10, Math.max(0, Math.round(value)))
 }
 
+/** Whether a sentence carries an observable failure symptom. */
+function hasSymptom(sentence: string): boolean {
+  const lower = sentence.toLowerCase()
+  return SYMPTOM_MARKERS.some(marker => lower.includes(marker))
+}
+
 /** Deterministic template-1 fallback: split sentences, neutral utility. */
 function sarFallback(rawText: string): SarTriplet {
   const sentences = rawText.split(/(?<=[。！？!?.])\s*/).map(sentence => sentence.trim()).filter(sentence => sentence.length > 0)
   const situation = sentences[0] ?? rawText.slice(0, 80)
   const action = sentences[1] ?? rawText.slice(0, 80)
   const outcome = sentences.slice(2).join(' ') || rawText.slice(0, 120)
+  // Symptom fusion: append any symptom-carrying sentence to the situation so
+  // the situation vector — the retrieval axis for similar failures — actually
+  // contains the failure signature, not just "something went wrong".
+  const symptomSentences = sentences.filter(hasSymptom)
+  const fusedSituation = symptomSentences.length === 0
+    ? situation
+    : [...new Set([situation, ...symptomSentences])].join(' ')
   const keywords = [...new Set(tokenize(action))].slice(0, 8)
   return {
-    situation,
+    situation: fusedSituation,
     action,
     outcome,
     actionKeywords: keywords,
@@ -312,15 +358,25 @@ export async function extractSar(
     const keywords = Array.isArray(parsed.action_keywords)
       ? parsed.action_keywords.filter((keyword): keyword is string => typeof keyword === 'string').slice(0, 16)
       : []
+    // All three utility fields must be present and finite; a partial or
+    // missing score is an extraction failure, not a neutral outcome — it
+    // degrades to the fallback instead of silently diluting the clustering
+    // axis with a fake 5/5/5.
+    const materialGain = Number(utility?.material_gain)
+    const emotionalValence = Number(utility?.emotional_valence)
+    const energyCost = Number(utility?.energy_cost)
+    if (!Number.isFinite(materialGain) || !Number.isFinite(emotionalValence) || !Number.isFinite(energyCost)) {
+      throw new CognitivePipelineError('cognitive-pipeline: SAR output missing utility fields', 'SAR_UTILITY_FAILED')
+    }
     return {
       situation: parsed.situation,
       action: parsed.action,
       outcome: parsed.outcome,
       actionKeywords: keywords.length > 0 ? keywords : [...new Set(tokenize(parsed.action))].slice(0, 8),
       outcomeUtility: {
-        materialGain: clampUtility(Number(utility?.material_gain)),
-        emotionalValence: clampUtility(Number(utility?.emotional_valence)),
-        energyCost: clampUtility(Number(utility?.energy_cost)),
+        materialGain: clampUtility(materialGain),
+        emotionalValence: clampUtility(emotionalValence),
+        energyCost: clampUtility(energyCost),
       },
     }
   } catch (error) {
@@ -553,4 +609,557 @@ export async function reconstructTaxonomy(
     ctx.logger.warn(`cognitive-pipeline: taxonomy reconstruction degraded to fallback: ${String(error)}`)
     return reconstructFallback(groups, summaryShort)
   }
+}
+
+/** Deterministic template-5 fallback: reject accumulation (no route → no gate).
+ * @returns the rejection decision.
+ */
+export function accumulationFallback(): AccumulationDecision {
+  return { shouldAccumulate: false, sar: null }
+}
+
+/**
+ * Template 5: the accumulation gate. The LLM route judges whether a completed
+ * turn is worth becoming an experience and extracts the SAR triplet when it is.
+ * Without an explicit route the gate deterministically rejects — automatic
+ * accumulation never runs unjudged.
+ * @param ctx - plugin context for the LLM call.
+ * @param route - explicit model route.
+ * @param episode - the completed turn's situation/action/outcome material.
+ * @param similar - retrieved history hits for the novelty judgment.
+ * @param options - call context (session/signal/maxTokens).
+ * @returns the accumulation decision.
+ */
+export async function evaluateAccumulation(
+  ctx: Context,
+  route: CognitiveLlmRoute,
+  episode: { situation: string; action: string; outcome: string },
+  similar: readonly { expId: string; text: string; similarity: number }[],
+  options: CallOptions,
+): Promise<AccumulationDecision> {
+  if (!hasExplicitRoute(route)) return accumulationFallback()
+  try {
+    const parsed = asObject(await callJson(ctx, route, ACCUMULATE_SYSTEM_PROMPT, frameAccumulateInput(episode, similar), {
+      ...options,
+      maxTokens: 500,
+    }), 'accumulation')
+    const shouldAccumulate = parsed.should_accumulate === true
+    if (!shouldAccumulate) return { shouldAccumulate: false, sar: null }
+    const situation = parsed.situation
+    const action = parsed.action
+    const outcome = parsed.outcome
+    const materialGain = Number(parsed.material_gain)
+    const emotionalValence = Number(parsed.emotional_valence)
+    const energyCost = Number(parsed.energy_cost)
+    if (typeof situation !== 'string' || typeof action !== 'string' || typeof outcome !== 'string'
+      || !Number.isFinite(materialGain) || !Number.isFinite(emotionalValence) || !Number.isFinite(energyCost)) {
+      throw new CognitivePipelineError('cognitive-pipeline: accumulation output missing SAR fields', 'ACCUMULATE_SCHEMA_FAILED')
+    }
+    return {
+      shouldAccumulate: true,
+      sar: {
+        situation,
+        action,
+        outcome,
+        utility: {
+          materialGain: clampUtility(materialGain),
+          emotionalValence: clampUtility(emotionalValence),
+          energyCost: clampUtility(energyCost),
+        },
+      },
+    }
+  } catch (error) {
+    ctx.logger.warn(`cognitive-pipeline: accumulation gate degraded to fallback: ${String(error)}`)
+    return accumulationFallback()
+  }
+}
+
+/** Deterministic template-6 fallback: reject derivation (no route → no reference).
+ * @returns the rejection decision.
+ */
+export function deriveReferenceFallback(): DeriveReferenceDecision {
+  return { shouldDerive: false, sar: null }
+}
+
+/**
+ * Template 6: derive a reference experience from the commonalities of similar
+ * history — an online generalization for cold start. The LLM route extracts
+ * the shared situation/action/outcome/utility pattern; without a route it
+ * deterministically rejects.
+ * @param ctx - plugin context for the LLM call.
+ * @param route - explicit model route.
+ * @param query - the current situation/action to anchor the derivation.
+ * @param similar - the retrieved similar history hits.
+ * @param options - call context (session/signal/maxTokens).
+ * @returns the derivation decision with the reference SAR when derived.
+ */
+export async function deriveReference(
+  ctx: Context,
+  route: CognitiveLlmRoute,
+  query: { situation: string; action: string },
+  similar: readonly { expId: string; text: string; similarity: number }[],
+  options: CallOptions,
+): Promise<DeriveReferenceDecision> {
+  if (!hasExplicitRoute(route)) return deriveReferenceFallback()
+  try {
+    const parsed = asObject(await callJson(ctx, route, DERIVE_REFERENCE_SYSTEM_PROMPT, frameDeriveReferenceInput(query, similar), {
+      ...options,
+      maxTokens: 500,
+    }), 'derive-reference')
+    const shouldDerive = parsed.should_derive === true
+    if (!shouldDerive) return deriveReferenceFallback()
+    const situation = parsed.situation
+    const action = parsed.action
+    const outcome = parsed.outcome
+    const materialGain = Number(parsed.material_gain)
+    const emotionalValence = Number(parsed.emotional_valence)
+    const energyCost = Number(parsed.energy_cost)
+    if (typeof situation !== 'string' || typeof action !== 'string' || typeof outcome !== 'string'
+      || !Number.isFinite(materialGain) || !Number.isFinite(emotionalValence) || !Number.isFinite(energyCost)) {
+      throw new CognitivePipelineError('cognitive-pipeline: derive-reference output missing SAR fields', 'DERIVE_REFERENCE_SCHEMA_FAILED')
+    }
+    return {
+      shouldDerive: true,
+      sar: {
+        situation,
+        action,
+        outcome,
+        utility: {
+          materialGain: clampUtility(materialGain),
+          emotionalValence: clampUtility(emotionalValence),
+          energyCost: clampUtility(energyCost),
+        },
+      },
+    }
+  } catch (error) {
+    ctx.logger.warn(`cognitive-pipeline: derive-reference degraded to fallback: ${String(error)}`)
+    return deriveReferenceFallback()
+  }
+}
+
+/** Deterministic template-7 fallback: keep the fused ranking untouched.
+ * @returns the keep decision.
+ */
+export function refineRetrievalFallback(): RefineRetrievalDecision {
+  return { shouldKeep: true, rejectedExpId: null, reason: null }
+}
+
+/**
+ * Template 7: refine retrieval when the deterministic routing is
+ * low-confidence. The LLM route reads the query and the fused candidates and
+ * judges whether the fused top hit genuinely applies (cosine similarity does
+ * not imply premise transferability); without a route it keeps the ranking.
+ * @param ctx - plugin context for the LLM call.
+ * @param route - explicit model route.
+ * @param query - the current situation/action being predicted.
+ * @param candidates - the fused candidates, best first.
+ * @param options - call context (session/signal/maxTokens).
+ * @returns the refinement decision.
+ */
+export async function refineRetrieval(
+  ctx: Context,
+  route: CognitiveLlmRoute,
+  query: { situation: string; action: string },
+  candidates: readonly { expId: string; text: string; similarity: number }[],
+  options: CallOptions,
+): Promise<RefineRetrievalDecision> {
+  if (!hasExplicitRoute(route)) return refineRetrievalFallback()
+  try {
+    const parsed = asObject(await callJson(ctx, route, REFINE_RETRIEVAL_SYSTEM_PROMPT, frameRefineRetrievalInput(query, candidates), {
+      ...options,
+      maxTokens: 400,
+    }), 'refine-retrieval')
+    const shouldKeep = parsed.should_keep !== false
+    if (shouldKeep) return refineRetrievalFallback()
+    const rejectedExpId = parsed.rejected_exp_id
+    const reason = parsed.reason
+    if (typeof rejectedExpId !== 'string' || rejectedExpId.length === 0) {
+      throw new CognitivePipelineError('cognitive-pipeline: refine-retrieval rejected without an expId', 'REFINE_RETRIEVAL_SCHEMA_FAILED')
+    }
+    return {
+      shouldKeep: false,
+      rejectedExpId,
+      reason: typeof reason === 'string' && reason.length > 0 ? reason : null,
+    }
+  } catch (error) {
+    ctx.logger.warn(`cognitive-pipeline: refine-retrieval degraded to fallback: ${String(error)}`)
+    return refineRetrievalFallback()
+  }
+}
+
+/** One structured variant proposal from template 8. */
+export interface VariantProposal {
+  /** The perturbed action text (the variant to test). */
+  readonly variantAction: string
+  /** Which step/parameter of the base action the perturbation touches. */
+  readonly perturbedAspect: string
+  /** One-sentence rationale for the perturbation. */
+  readonly rationale: string
+}
+
+/**
+ * Template 8: structured variant generation for a strategy whose deviation
+ * gate flagged rework (or a disequilibrated experience). The variants perturb
+ * one step or parameter of the base action while keeping the verification
+ * anchor's semantics unchanged — the anchor is the test, the variant is the
+ * revised procedure. Without an explicit route it deterministically proposes
+ * nothing: no model, no invented variants.
+ * @param ctx - plugin context for the LLM call.
+ * @param route - explicit model route.
+ * @param input - base action, verification anchor, pre-checks, and the reason.
+ * @param options - call context (session/signal/maxTokens).
+ * @returns the proposed variants (ungated, ≤ 3, schema-filtered).
+ */
+export async function generateVariants(
+  ctx: Context,
+  route: CognitiveLlmRoute,
+  input: {
+    baseAction: string
+    verificationAnchor: string
+    preChecks: readonly string[]
+    reason: string
+  },
+  options: CallOptions,
+): Promise<VariantProposal[]> {
+  if (!hasExplicitRoute(route)) return []
+  try {
+    const parsed = asObject(await callJson(ctx, route, VARIANT_SYSTEM_PROMPT, frameVariantInput(input), {
+      ...options,
+      maxTokens: 600,
+    }), 'variant generation')
+    const variants = Array.isArray(parsed.variants) ? parsed.variants : []
+    return variants
+      .filter((variant): variant is Record<string, unknown> => typeof variant === 'object' && variant !== null)
+      .map(variant => ({
+        variantAction: typeof variant.variant_action === 'string' ? variant.variant_action : '',
+        perturbedAspect: typeof variant.perturbed_aspect === 'string' ? variant.perturbed_aspect : '',
+        rationale: typeof variant.rationale === 'string' ? variant.rationale : '',
+      }))
+      .filter(proposal => proposal.variantAction.length > 0 && proposal.perturbedAspect.length > 0)
+      .slice(0, 3)
+  } catch (error) {
+    ctx.logger.warn(`cognitive-pipeline: variant generation degraded to none: ${String(error)}`)
+    return []
+  }
+}
+
+/** Deterministic template-8 fallback: no proposals (no route → no self-legislation).
+ * @returns the empty-proposal decision.
+ */
+export function proposeAcceptanceFallback(): AcceptanceProposalDecision {
+  return { proposals: [] }
+}
+
+/**
+ * Template 8: the acceptance-criterion proposal route. The LLM route reads
+ * the demonstrably failing criteria and their evidence ledgers and proposes
+ * rewrites or retirements. The service still gates every proposal against the
+ * evidence before applying — the route proposes, the experience gate disposes.
+ * Without an explicit route it deterministically proposes nothing: the
+ * pipeline never amends its own norms unjudged.
+ * @param ctx - plugin context for the LLM call.
+ * @param route - explicit model route.
+ * @param flagged - the failing active criteria (deviation gate already crossed).
+ * @param deviationMeta - related deviation meta experiences.
+ * @param options - call context (session/signal/maxTokens).
+ * @returns the proposed updates (ungated).
+ */
+export async function proposeAcceptanceUpdates(
+  ctx: Context,
+  route: CognitiveLlmRoute,
+  flagged: readonly AcceptanceCheck[],
+  deviationMeta: readonly { expId: string; text: string }[],
+  options: CallOptions,
+): Promise<AcceptanceProposalDecision> {
+  if (!hasExplicitRoute(route)) return proposeAcceptanceFallback()
+  try {
+    const framed = frameProposeAcceptanceInput(flagged, deviationMeta)
+    const parsed = asObject(
+      await callJson(ctx, route, PROPOSE_ACCEPTANCE_SYSTEM_PROMPT, framed, {
+        ...options,
+        maxTokens: 600,
+      }),
+      'acceptance-proposal',
+    )
+    const rawProposals = Array.isArray(parsed.proposals) ? parsed.proposals : []
+    const proposals: AcceptanceProposal[] = []
+    for (const raw of rawProposals) {
+      if (typeof raw !== 'object' || raw === null) continue
+      const entry = raw as Record<string, unknown>
+      const checkId = entry.check_id
+      const action = entry.action
+      const rationale = entry.rationale
+      if (typeof checkId !== 'string' || checkId.length === 0
+        || (action !== 'rewrite' && action !== 'retire')
+        || typeof rationale !== 'string' || rationale.length === 0) {
+        continue
+      }
+      if (action === 'rewrite') {
+        const criterion = entry.criterion
+        const evidenceHint = entry.evidence_hint
+        if (typeof criterion !== 'string' || criterion.length === 0
+          || typeof evidenceHint !== 'string' || evidenceHint.length === 0) {
+          continue
+        }
+        const trigger = entry.trigger
+        proposals.push({
+          checkId,
+          action,
+          criterion,
+          evidenceHint,
+          ...typeof trigger === 'string' && trigger.length > 0 ? { trigger } : {},
+          rationale,
+        })
+      } else {
+        proposals.push({ checkId, action, rationale })
+      }
+    }
+    return { proposals }
+  } catch (error) {
+    ctx.logger.warn(`cognitive-pipeline: acceptance proposal degraded to fallback: ${String(error)}`)
+    return proposeAcceptanceFallback()
+  }
+}
+
+/** One LLM-proposed synonym-variant trigger jump (template 9). */
+export interface TriggerJumpProposal {
+  /** A real trigger word from the provided lexicons. */
+  readonly trigger: string
+  /** Paraphrase variants users might say instead. */
+  readonly variants: readonly string[]
+  /** Why each variant expresses the same situation. */
+  readonly reason: string
+}
+
+/** The LLM route's trigger-jump proposal judgment (template 9). */
+export interface TriggerJumpProposalDecision {
+  readonly jumps: readonly TriggerJumpProposal[]
+}
+
+/** Deterministic template-9 fallback: no proposals (no route → no LLM jumps).
+ * @returns the empty-proposal decision.
+ */
+export function triggerJumpsFallback(): TriggerJumpProposalDecision {
+  return { jumps: [] }
+}
+
+/**
+ * Template 9: propose synonym-variant trigger jumps — the associative layer
+ * beyond co-occurrence. The route proposes paraphrase variants for real
+ * trigger words; the pipeline still validates each variant (real trigger,
+ * non-empty, not a stop word) and the citation loop measures whether it pays
+ * off. Without an explicit route nothing is proposed.
+ * @param ctx - plugin context for the LLM call.
+ * @param route - explicit model route.
+ * @param input - the static triggers, derived triggers, and important samples.
+ * @param options - call context (session/signal/maxTokens).
+ * @returns the proposed jumps (ungated).
+ */
+export async function proposeTriggerJumps(
+  ctx: Context,
+  route: CognitiveLlmRoute,
+  input: {
+    staticTriggers: readonly string[]
+    derived: readonly { word: string; weight: number }[]
+    samples: readonly { expId: string; text: string }[]
+    /** Trigger word → real situation snippets where it appeared, so the LLM
+     * associates from usage context, not bare word lists. */
+    situationsByWord?: ReadonlyMap<string, readonly string[]>
+  },
+  options: CallOptions,
+): Promise<TriggerJumpProposalDecision> {
+  if (!hasExplicitRoute(route)) return triggerJumpsFallback()
+  // The association task is stochastic: the same input sometimes yields rich
+  // variants and sometimes an empty array (measured finding #11 — identical
+  // inputs produced 0 jumps on one draw and 25+ on the next). Retry up to 3
+  // draws so one unlucky empty sample cannot silently starve the deliberate
+  // synonym network that template 9 exists to build.
+  const maxDraws = 3
+  for (let draw = 0; draw < maxDraws; draw += 1) {
+    try {
+      const framed = frameProposeTriggerJumpsInput(input.staticTriggers, input.derived, input.samples, input.situationsByWord)
+      const parsed = asObject(
+        await callJson(ctx, route, PROPOSE_TRIGGER_JUMPS_SYSTEM_PROMPT, framed, {
+          ...options,
+          // Generous budget: the association task lists 20+ triggers × 1-3
+          // variants each; 1500 tokens truncated mid-JSON (measured: finish
+          // max-tokens, extractJson then failed → empty jumps). 4000 fits the
+          // full variant list.
+          maxTokens: 4000,
+        }),
+        'trigger-jumps',
+      )
+      const rawJumps = Array.isArray(parsed.jumps) ? parsed.jumps : []
+      const jumps: TriggerJumpProposal[] = []
+      for (const raw of rawJumps) {
+        if (typeof raw !== 'object' || raw === null) continue
+        const entry = raw as Record<string, unknown>
+        const trigger = entry.trigger
+        const reason = entry.reason
+        const variants = Array.isArray(entry.variants)
+          ? entry.variants.filter((variant): variant is string => typeof variant === 'string' && variant.length > 0)
+          : []
+        if (typeof trigger !== 'string' || trigger.length === 0
+          || typeof reason !== 'string' || reason.length === 0
+          || variants.length === 0) {
+          continue
+        }
+        jumps.push({ trigger, variants, reason })
+      }
+      if (jumps.length > 0) return { jumps }
+      ctx.logger.warn(`cognitive-pipeline: trigger-jump draw ${draw + 1} produced zero proposals, retrying`)
+    } catch (error) {
+      ctx.logger.warn(`cognitive-pipeline: trigger-jump proposal degraded to fallback: ${String(error)}`)
+      return triggerJumpsFallback()
+    }
+  }
+  return triggerJumpsFallback()
+}
+
+/** One chain-principle distillation result (template 9). */
+export interface DistillResult {
+  /** The distilled decision principle, or null when the members have no common pattern. */
+  readonly principle: string | null
+  /** One sentence explaining the distillation basis. */
+  readonly reasoning: string
+}
+
+/** Deterministic template-9 fallback: no principle (no route → no distillation).
+ * @returns a null-principle result.
+ */
+export function distillFallback(): DistillResult {
+  return { principle: null, reasoning: '无模型复核（降级模式），不蒸馏原则' }
+}
+
+/**
+ * Template 9: distill one reusable decision principle from a chain's member
+ * experiences — the offline-consolidation analogue of EvolveR's
+ * experience-to-principle learning. The route extracts a single ≤60-character
+ * transferable rule, failures first; without an explicit route nothing is
+ * distilled (宁缺毋滥: a chain without a distilled principle is a folded
+ * summary, never a fabricated rule).
+ * @param ctx - plugin context for the LLM call.
+ * @param route - explicit model route.
+ * @param input - the chain goal and its member experiences.
+ * @param options - call context (session/signal/maxTokens).
+ * @returns the distillation result.
+ */
+export async function distillChainPrinciple(
+  ctx: Context,
+  route: CognitiveLlmRoute,
+  input: {
+    goal: string
+    members: readonly { expId: string; text: string; failed: boolean }[]
+  },
+  options: CallOptions,
+): Promise<DistillResult> {
+  if (!hasExplicitRoute(route)) return distillFallback()
+  try {
+    const parsed = asObject(
+      await callJson(ctx, route, DISTILL_SYSTEM_PROMPT, frameDistillInput(input.goal, input.members), {
+        ...options,
+        maxTokens: 400,
+      }),
+      'chain distillation',
+    )
+    const principle = parsed.principle
+    const reasoning = parsed.reasoning
+    return {
+      principle: typeof principle === 'string' && principle.length > 0 ? principle.slice(0, 120) : null,
+      reasoning: typeof reasoning === 'string' && reasoning.length > 0 ? reasoning.slice(0, 200) : '',
+    }
+  } catch (error) {
+    ctx.logger.warn(`cognitive-pipeline: chain distillation degraded to none: ${String(error)}`)
+    return distillFallback()
+  }
+}
+
+/** One discriminant axis extracted from an over-broad cluster (template 10). */
+export interface DiscriminantAxis {
+  /** Which member field the axis lives in: situation (premise) or action. */
+  readonly dimension: 'situation' | 'action'
+  /** Axis name, e.g. 用户熟练度. */
+  readonly axisName: string
+  /** Polarity terms distinguishing the axis poles (2-4, most discriminating first). */
+  readonly terms: readonly string[]
+  /** One sentence on why this axis separates behavior. */
+  readonly rationale: string
+}
+
+/** Structured template-10 result: the axes found inside one cluster. */
+export interface DiscriminantAxesOutput {
+  readonly axes: readonly DiscriminantAxis[]
+}
+
+/** Deterministic template-10 fallback: no axes (no route → no extraction).
+ * @returns an empty axes result.
+ */
+export function discriminantAxesFallback(): DiscriminantAxesOutput {
+  return { axes: [] }
+}
+
+/**
+ * Template 10: extract discriminant axes from one over-broad cluster — the
+ * L2 complement to embedding clustering (LLM 定轴). Embedding groups surface
+ * near-duplicate members; this step asks the LLM which dimension actually
+ * drives behavior differences inside the cluster (e.g. 新手↔资深 within a
+ * git-push cluster), producing polarity terms for query-side routing. Without
+ * an explicit route nothing is extracted; one unlucky empty draw is retried
+ * once (the association task is stochastic, measured finding #11).
+ * @param ctx - plugin context for the LLM call.
+ * @param route - explicit model route.
+ * @param input - the over-broad cluster's label and member experiences.
+ * @param options - call context (session/signal/maxTokens).
+ * @returns the extracted axes, or an empty set.
+ */
+export async function proposeDiscriminantAxes(
+  ctx: Context,
+  route: CognitiveLlmRoute,
+  input: {
+    clusterLabel: string
+    members: readonly { expId: string; text: string }[]
+  },
+  options: CallOptions,
+): Promise<DiscriminantAxesOutput> {
+  if (!hasExplicitRoute(route)) return discriminantAxesFallback()
+  const maxDraws = 2
+  for (let draw = 0; draw < maxDraws; draw += 1) {
+    try {
+      const parsed = asObject(
+        await callJson(ctx, route, PROPOSE_DISCRIMINANT_AXES_SYSTEM_PROMPT, frameDiscriminantAxesInput(input.clusterLabel, input.members), {
+          ...options,
+          maxTokens: 1500,
+        }),
+        'discriminant-axes',
+      )
+      const rawAxes = Array.isArray(parsed.axes) ? parsed.axes : []
+      const axes: DiscriminantAxis[] = []
+      for (const raw of rawAxes) {
+        if (typeof raw !== 'object' || raw === null) continue
+        const entry = raw as Record<string, unknown>
+        const dimension = entry.dimension
+        const axisName = entry.axisName
+        const terms = Array.isArray(entry.terms)
+          ? entry.terms.filter((term): term is string => typeof term === 'string' && term.length > 0)
+          : []
+        if ((dimension !== 'situation' && dimension !== 'action')
+          || typeof axisName !== 'string' || axisName.length === 0
+          || terms.length < 2) {
+          continue
+        }
+        axes.push({
+          dimension,
+          axisName: axisName.slice(0, 30),
+          terms: terms.slice(0, 4).map(term => term.slice(0, 12)),
+          rationale: typeof entry.rationale === 'string' ? entry.rationale.slice(0, 100) : '',
+        })
+      }
+      if (axes.length > 0) return { axes }
+      ctx.logger.warn(`cognitive-pipeline: discriminant-axis draw ${draw + 1} produced zero axes, retrying`)
+    } catch (error) {
+      ctx.logger.warn(`cognitive-pipeline: discriminant-axis extraction degraded to none: ${String(error)}`)
+      return discriminantAxesFallback()
+    }
+  }
+  return discriminantAxesFallback()
 }

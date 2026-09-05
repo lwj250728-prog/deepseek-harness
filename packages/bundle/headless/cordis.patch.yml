@@ -14,6 +14,38 @@
 - id: hmr
   disabled: true
 
+# ── 极简模式工具裁剪 ──────────────────────────────────────────────
+# minimal preset 只需 bash + str_replace_editor（agent 层），再加上认知流水线
+# 插件的 5 个工具。禁用 base bundle 的其余工具，避免 global 工具稀释极简效果。
+- id: tool-web
+  disabled: true
+- id: tool-skill
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-subagent-report
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-ralph
+  disabled: true
+- id: tool-todo
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: tool-jobs
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+- id: repeat-tool-reminder
+  disabled: true
+
 - id: tools
   config:
     # Keep the same temporary process-wide Code Mode opt-in as the Web surface.
@@ -27,9 +59,17 @@
     - id: headless-startup
       name: '@deepseek-ai/dsh-headless/startup'
 
+    # The preset roster: mounted so headless sessions can join a minimal/standard
+    # composition. default: minimal (极简模式 — fixed prompt + 2 tools).
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: minimal
+
     # Reads its task from the ordinary headlessStartup provider.
     - id: headless-runner
       name: '@deepseek-ai/dsh-headless'
       inject: [headlessStartup]
       config:
         task: !!js ctx.headlessStartup.task
+        resumeSessionId: !!js ctx.headlessStartup.resumeSessionId

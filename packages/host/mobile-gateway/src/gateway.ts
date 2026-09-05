@@ -32,10 +32,22 @@ import {
   SESSION_COOKIE,
   type GatewayUser,
 } from './auth.ts'
+import { FixedWindowLimiter } from './rate-limit.ts'
 import { GATEWAY_VERSION, PREFIX, loginPageHtml, manifestFile, serviceWorkerFile, iconFile, webMetaSnippet } from './static.ts'
 
 /** One named phone user (re-exported for plugin config convenience). */
 export type { GatewayUser } from './auth.ts'
+
+/** Login rate-limit tuning: failures per sliding-fixed window before 429. */
+export interface LoginRateLimit {
+  /** Window length in ms. */
+  windowMs: number
+  /** Failures per window that trip the limit (the exceeding failure trips it). */
+  maxFailures: number
+}
+
+/** Default login rate limit: 10 failures per 5 minutes per caller address. */
+export const DEFAULT_LOGIN_RATE_LIMIT: LoginRateLimit = { windowMs: 5 * 60 * 1000, maxFailures: 10 }
 
 /** TLS material for the optional https listener. */
 export interface GatewayTls {
@@ -61,6 +73,8 @@ export interface GatewayOptions {
   secret?: string | undefined
   /** Signed-session lifetime in seconds; defaults to 7 days. */
   sessionTtlSeconds?: number
+  /** Login attempt throttling; defaults to {@link DEFAULT_LOGIN_RATE_LIMIT}. */
+  loginRateLimit?: LoginRateLimit | undefined
   /** Optional TLS termination. */
   tls?: GatewayTls | undefined
   /** Log sink; defaults to `console.log` with a stable prefix. */
@@ -95,6 +109,7 @@ interface GatewayState {
   secret: string
   ttlSeconds: number
   users: readonly GatewayUser[]
+  limiter: FixedWindowLimiter
   log: (line: string) => void
   upgradedSockets: Set<Duplex>
 }
@@ -176,20 +191,35 @@ function authorize(state: GatewayState, req: IncomingMessage): string | null {
   return verifySession(state.secret, readCookie(req, SESSION_COOKIE), state.users)
 }
 
+// The gateway IS the TLS edge: cloud port-forward (DNAT) preserves the client
+// source address, so a client-supplied X-Forwarded-For is never trusted for
+// audit or rate limiting — a spoofed header would launder the caller's IP.
 function remoteAddress(req: IncomingMessage): string {
-  const forwarded = req.headers['x-forwarded-for']
-  if (typeof forwarded === 'string' && forwarded !== '') return (forwarded.split(',')[0] ?? forwarded).trim()
   return req.socket.remoteAddress ?? 'unknown'
 }
 
-function writeJson(res: ServerResponse, status: number, body: unknown): void {
+/** Headers every gateway response carries; HSTS only makes sense on TLS. */
+function securityHeaders(state: GatewayState): Record<string, string> {
+  return {
+    'x-content-type-options': 'nosniff',
+    ...(state.options.tls !== undefined
+      ? { 'strict-transport-security': 'max-age=31536000' }
+      : {}),
+  }
+}
+
+function writeJson(res: ServerResponse, status: number, body: unknown, extraHeaders?: Record<string, string>): void {
   const payload = JSON.stringify(body)
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': String(Buffer.byteLength(payload)) })
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': String(Buffer.byteLength(payload)),
+    ...extraHeaders,
+  })
   res.end(payload)
 }
 
-function redirect(res: ServerResponse, location: string): void {
-  res.writeHead(302, { location })
+function redirect(res: ServerResponse, location: string, extraHeaders?: Record<string, string>): void {
+  res.writeHead(302, { location, ...extraHeaders })
   res.end()
 }
 
@@ -200,42 +230,65 @@ function handleLocal(state: GatewayState, req: IncomingMessage, res: ServerRespo
     void (async () => {
       const raw = await readBody(req, MAX_LOGIN_BODY)
       const { user, token } = parseLoginBody(raw, req.headers['content-type'])
+      const peer = remoteAddress(req)
+      // Rate limit first: an IP already over the limit is rejected without
+      // even checking credentials (no timing oracle beyond the limiter).
+      if (state.limiter.isLimited(peer)) {
+        state.log(`login throttled from ${peer}`)
+        const retryAfter = state.limiter.retryAfterSeconds(peer)
+        writeJson(res, 429, { error: 'too many login attempts' }, {
+          'retry-after': String(retryAfter),
+          'cache-control': 'no-store',
+          ...securityHeaders(state),
+        })
+        return
+      }
       const found = (user !== undefined && user !== '' && token !== undefined)
         ? authenticate(state.users, user, token)
         : token !== undefined
           ? authenticateByToken(state.users, token)
           : undefined
       if (found === undefined) {
-        state.log(`login failed from ${remoteAddress(req)} for user=${user ?? '(token-only)'}`)
+        state.log(`login failed from ${peer} for user=${user ?? '(token-only)'}`)
+        const limited = state.limiter.recordFailure(peer)
         const wantsJson = (req.headers.accept ?? '').includes('application/json')
+        const baseHeaders = { 'cache-control': 'no-store', ...securityHeaders(state) }
+        if (limited) {
+          writeJson(res, 429, { error: 'too many login attempts' }, {
+            'retry-after': String(state.limiter.retryAfterSeconds(peer)),
+            ...baseHeaders,
+          })
+          return
+        }
         if (wantsJson) {
-          writeJson(res, 401, { error: 'invalid credentials' })
+          writeJson(res, 401, { error: 'invalid credentials' }, baseHeaders)
         } else {
-          res.writeHead(401, { 'content-type': 'text/html; charset=utf-8' })
+          res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', ...baseHeaders })
           res.end(loginPageHtml(GATEWAY_VERSION, secure).replace('{{ERROR}}', '登录失败：用户名或访问令牌不正确'))
         }
         return
       }
+      state.limiter.clear(peer)
       const cookie = createSession(state.secret, found.name, state.ttlSeconds)
-      state.log(`login ok: ${found.name} from ${remoteAddress(req)}`)
-      res.writeHead(302, {
-        location: '/',
+      state.log(`login ok: ${found.name} from ${peer}`)
+      redirect(res, '/', {
         'set-cookie': sessionCookieHeader(cookie, secure, state.ttlSeconds),
+        'cache-control': 'no-store',
+        ...securityHeaders(state),
       })
-      res.end()
     })().catch((error: unknown) => {
       state.log(`login handler error: ${String(error)}`)
-      if (!res.headersSent) writeJson(res, 400, { error: 'bad request' })
+      if (!res.headersSent) writeJson(res, 400, { error: 'bad request' }, securityHeaders(state))
     })
     return
   }
 
   if (pathname === `${PREFIX}/logout`) {
-    res.writeHead(302, {
-      location: `${PREFIX}/login`,
+    redirect(res, `${PREFIX}/login`, {
       'set-cookie': sessionCookieHeader('', secure, 0),
+      'cache-control': 'no-store',
+      ...securityHeaders(state),
     })
-    res.end()
     return
   }
 
@@ -246,27 +299,27 @@ function handleLocal(state: GatewayState, req: IncomingMessage, res: ServerRespo
       version: GATEWAY_VERSION,
       target: `http://${state.options.targetHost}:${state.options.targetPort}`,
       users: state.users.length,
-    })
+    }, securityHeaders(state))
     return
   }
 
   if (pathname === `${PREFIX}/manifest.webmanifest`) {
     const file = manifestFile()
-    res.writeHead(200, { 'content-type': file.contentType, 'content-length': String(file.bytes.length) })
+    res.writeHead(200, { 'content-type': file.contentType, 'content-length': String(file.bytes.length), ...securityHeaders(state) })
     res.end(file.bytes)
     return
   }
 
   if (pathname === `${PREFIX}/sw.js`) {
     const file = serviceWorkerFile()
-    res.writeHead(200, { 'content-type': file.contentType, 'content-length': String(file.bytes.length) })
+    res.writeHead(200, { 'content-type': file.contentType, 'content-length': String(file.bytes.length), ...securityHeaders(state) })
     res.end(file.bytes)
     return
   }
 
   if (pathname === `${PREFIX}/icon-192.png` || pathname === `${PREFIX}/icon-512.png`) {
     const file = iconFile(pathname.endsWith('512.png') ? 512 : 192)
-    res.writeHead(200, { 'content-type': file.contentType, 'content-length': String(file.bytes.length) })
+    res.writeHead(200, { 'content-type': file.contentType, 'content-length': String(file.bytes.length), ...securityHeaders(state) })
     res.end(file.bytes)
     return
   }
@@ -275,7 +328,7 @@ function handleLocal(state: GatewayState, req: IncomingMessage, res: ServerRespo
   if ((req.method === 'GET' || req.method === 'HEAD')
     && (pathname === PREFIX || pathname === `${PREFIX}/` || pathname === `${PREFIX}/login`)) {
     if (authorize(state, req) !== null) {
-      redirect(res, '/')
+      redirect(res, '/', { ...securityHeaders(state) })
       return
     }
     const body = loginPageHtml(GATEWAY_VERSION, secure).replace('{{ERROR}}', '')
@@ -283,12 +336,13 @@ function handleLocal(state: GatewayState, req: IncomingMessage, res: ServerRespo
       'content-type': 'text/html; charset=utf-8',
       'content-length': String(Buffer.byteLength(body)),
       'cache-control': 'no-store',
+      ...securityHeaders(state),
     })
     res.end(body)
     return
   }
 
-  writeJson(res, 404, { error: 'not found' })
+  writeJson(res, 404, { error: 'not found' }, securityHeaders(state))
 }
 
 /**
@@ -325,7 +379,11 @@ function forward(
   const headers: Record<string, string> = {}
   for (const [name, value] of Object.entries(req.headers)) {
     const lower = name.toLowerCase()
-    if (HOP_BY_HOP.has(lower) || lower === 'host' || lower === 'origin') continue
+    // HOP_BY_HOP plus the trust-relevant names the gateway owns: host/origin
+    // are rewritten below, and a client-supplied x-forwarded-for/x-real-ip is
+    // never trusted — the gateway is the edge, so the true peer replaces them.
+    if (HOP_BY_HOP.has(lower) || lower === 'host' || lower === 'origin'
+      || lower === 'x-forwarded-for' || lower === 'x-real-ip') continue
     if (typeof value === 'string') headers[name] = value
     else if (Array.isArray(value)) headers[name] = value.join(', ')
   }
@@ -333,6 +391,8 @@ function forward(
   // to the loopback authority so the forwarded request is exactly a local one.
   headers.host = `${targetHost}:${targetPort}`
   if (req.headers.origin !== undefined) headers.origin = `http://${targetHost}:${targetPort}`
+  const peer = req.socket.remoteAddress
+  if (peer !== undefined) headers['x-forwarded-for'] = peer
 
   const upstream = httpRequest(
     {
@@ -350,6 +410,7 @@ function forward(
         if (typeof value === 'string') outHeaders[name] = value
         else if (Array.isArray(value)) outHeaders[name] = value.join(', ')
       }
+      Object.assign(outHeaders, securityHeaders(state))
       const inject = (state.options.injectWebMeta ?? true) && qualifiesForInjection(req, upRes)
       if (inject) {
         const chunks: Buffer[] = []
@@ -386,10 +447,10 @@ function deny(state: GatewayState, req: IncomingMessage, res: ServerResponse, pa
   state.log(`denied ${remoteAddress(req)} ${req.method} ${pathname}`)
   const accept = req.headers.accept ?? ''
   if (accept.includes('text/html') && req.method === 'GET') {
-    redirect(res, `${PREFIX}/login`)
+    redirect(res, `${PREFIX}/login`, { ...securityHeaders(state) })
     return
   }
-  writeJson(res, 401, { error: 'unauthorized', login: `${PREFIX}/login` })
+  writeJson(res, 401, { error: 'unauthorized', login: `${PREFIX}/login` }, securityHeaders(state))
 }
 
 /** Forward one authenticated WebSocket upgrade to the DSH event mux. */
@@ -398,11 +459,14 @@ function forwardUpgrade(state: GatewayState, req: IncomingMessage, socket: Duple
   const headers: Record<string, string> = {}
   for (const [name, value] of Object.entries(req.headers)) {
     const lower = name.toLowerCase()
-    if (lower === 'host' || lower === 'origin') continue
+    if (lower === 'host' || lower === 'origin'
+      || lower === 'x-forwarded-for' || lower === 'x-real-ip') continue
     if (typeof value === 'string') headers[name] = value
   }
   headers.host = `${targetHost}:${targetPort}`
   if (req.headers.origin !== undefined) headers.origin = `http://${targetHost}:${targetPort}`
+  const peer = req.socket.remoteAddress
+  if (peer !== undefined) headers['x-forwarded-for'] = peer
   headers.connection = 'Upgrade'
   headers.upgrade = 'websocket'
 
@@ -452,11 +516,13 @@ function forwardUpgrade(state: GatewayState, req: IncomingMessage, socket: Duple
  * failed fiber.
  */
 export function createGateway(options: GatewayOptions): Promise<GatewayHandle> {
+  const limit = options.loginRateLimit ?? DEFAULT_LOGIN_RATE_LIMIT
   const state: GatewayState = {
     options,
     secret: options.secret !== undefined && options.secret !== '' ? options.secret : randomSecret(),
     ttlSeconds: options.sessionTtlSeconds ?? 7 * 24 * 60 * 60,
     users: options.users,
+    limiter: new FixedWindowLimiter(limit.windowMs, limit.maxFailures),
     log: options.log ?? defaultLog,
     upgradedSockets: new Set(),
   }

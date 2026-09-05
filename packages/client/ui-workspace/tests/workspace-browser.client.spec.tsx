@@ -72,6 +72,7 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
     searchSessions: vi.fn(async () => ({ items: [], hasMore: false })),
     searchResultLimit: 20,
     renameSession: vi.fn(async () => {}),
+    loadDesignatedSessionId: vi.fn(async () => null),
     forkSession: vi.fn(),
     renameWorkspace: vi.fn(async () => {}),
     deleteWorkspace: vi.fn(async () => {}),
@@ -210,6 +211,32 @@ describe('WorkspaceBrowser', () => {
       expect.stringContaining('three'),
       expect.stringContaining('one'),
     ])
+  })
+
+
+  it('pins the designated main conversation to the top with a badge', async () => {
+    const sessions = sessionState([summary('one', 3), summary('two', 2), summary('three', 1)])
+    const workspaces = workspaceState([workspace('alpha', ['one', 'two', 'three'])])
+    const b = mount({
+      useSessions: hook(sessions),
+      useWorkspaces: hook(workspaces),
+      loadDesignatedSessionId: vi.fn(async () => sid('two')),
+    })
+    fireEvent.click(screen.getByRole('button', { name: '视图选项' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '单列表' }))
+    // The designated row renders first with the 主对话 badge; the rest keeps
+    // its order.
+    await waitFor(() => {
+      const rows = screen.getAllByRole('treeitem').map(row => row.textContent)
+      expect(rows[0]).toContain('two')
+      expect(rows[0]).toContain('主对话')
+    })
+    expect(screen.getAllByRole('treeitem').map(row => row.textContent)).toEqual([
+      expect.stringContaining('two'),
+      expect.stringContaining('one'),
+      expect.stringContaining('three'),
+    ])
+    b.view.unmount()
   })
 
   it('expands a group on click and opens a session row', () => {

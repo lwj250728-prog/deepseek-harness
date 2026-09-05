@@ -1,0 +1,18 @@
+# 认知流水线 + v4-pro 模型 patch — 挂载到 DSH profile
+# 用法: dsh --profile <web|headless> --patch /home/ubuntu/dsh-fork/cognitive-patch.yml
+- insert:
+    - id: cognitive-pipeline
+      name: '@deepseek-ai/dsh-cognitive-pipeline'
+      config:
+        root: !!js dshHomePath('cognitive-pipeline')
+        provider: deepseek
+        model: deepseek-v4-flash
+
+    - id: cognitive-orchestration
+      name: '@deepseek-ai/dsh-cognitive-orchestration'
+
+# 默认模型切换为 deepseek-v4-pro
+- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: deepseek-v4-pro

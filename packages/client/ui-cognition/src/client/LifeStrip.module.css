@@ -1,0 +1,178 @@
+/* Digital-life strip: the sidebar.life occupant. */
+.root {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  width: 100%;
+  padding: 4px 10px 4px 6px;
+  border-bottom: 1px solid var(--dsh-border-color, rgba(128, 128, 128, 0.18));
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 26px;
+}
+
+.heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.heading:hover {
+  background: rgba(128, 128, 128, 0.12);
+}
+
+.headingGlyph {
+  color: var(--dsh-accent-color, #4f8cff);
+}
+
+.refresh {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+
+.refresh:hover:not(:disabled) {
+  background: rgba(128, 128, 128, 0.12);
+}
+
+.refresh:disabled {
+  opacity: 0.4;
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.empty,
+.error {
+  font-size: 11px;
+  color: var(--dsh-text-muted, rgba(128, 128, 128, 0.9));
+  padding: 2px 4px;
+}
+
+.error {
+  color: var(--dsh-danger-color, #d64545);
+}
+
+.stateCard {
+  border: 1px solid rgba(128, 128, 128, 0.22);
+  border-radius: 6px;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: rgba(128, 128, 128, 0.06);
+}
+
+.stateText {
+  font-size: 11.5px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.stateMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: 10.5px;
+  color: var(--dsh-text-muted, rgba(128, 128, 128, 0.9));
+}
+
+.designatedBadge {
+  border: 1px solid var(--dsh-accent-color, #4f8cff);
+  color: var(--dsh-accent-color, #4f8cff);
+  border-radius: 3px;
+  padding: 0 4px;
+  font-size: 10px;
+}
+
+.trace {
+  list-style: none;
+  margin: 0;
+  padding: 0 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.traceRow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 10.5px;
+  padding: 2px 0;
+  min-width: 0;
+}
+
+.traceDot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  align-self: center;
+  background: rgba(128, 128, 128, 0.5);
+}
+
+.traceRow[data-kind='commit'] .traceDot {
+  background: var(--dsh-accent-color, #4f8cff);
+}
+
+.traceWord {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsh-text-muted, rgba(128, 128, 128, 0.95));
+}
+
+.traceNode {
+  font-family: var(--dsh-mono-font, monospace);
+  font-size: 9.5px;
+  color: var(--dsh-text-muted, rgba(128, 128, 128, 0.7));
+}
+
+.traceAge {
+  margin-left: auto;
+  flex: none;
+  font-size: 10px;
+  color: var(--dsh-text-muted, rgba(128, 128, 128, 0.7));
+}
+
+/* Rail trigger: a lone life icon that expands the sidebar column. */
+.railTrigger {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.railTrigger:hover {
+  background: rgba(128, 128, 128, 0.12);
+  color: var(--dsh-accent-color, #4f8cff);
+}

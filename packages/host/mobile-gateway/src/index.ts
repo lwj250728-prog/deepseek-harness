@@ -18,7 +18,7 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { parseUsersEnv, type GatewayUser } from './auth.ts'
-import { createGateway } from './gateway.ts'
+import { createGateway, DEFAULT_LOGIN_RATE_LIMIT, type LoginRateLimit } from './gateway.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'mobile-gateway'
@@ -40,6 +40,8 @@ export interface Config {
   users: GatewayUser[]
   /** Signed-session lifetime in seconds. */
   sessionTtlSeconds: number
+  /** Login attempt throttling (failures per window per caller address). */
+  loginRateLimit: LoginRateLimit
   /** Optional stable HMAC secret; empty mints a per-process random secret. */
   secret: string
   /** Optional PEM private key path; must be set together with `tlsCertPath`. */
@@ -58,6 +60,10 @@ export const Config: z<Config> = z.object({
     token: z.string().required(),
   })).default([]),
   sessionTtlSeconds: z.natural().default(7 * 24 * 60 * 60),
+  loginRateLimit: z.object({
+    windowMs: z.natural().default(DEFAULT_LOGIN_RATE_LIMIT.windowMs),
+    maxFailures: z.natural().default(DEFAULT_LOGIN_RATE_LIMIT.maxFailures),
+  }).default({ windowMs: DEFAULT_LOGIN_RATE_LIMIT.windowMs, maxFailures: DEFAULT_LOGIN_RATE_LIMIT.maxFailures }),
   secret: z.string().default(''),
   tlsKeyPath: z.string().default(''),
   tlsCertPath: z.string().default(''),
@@ -95,6 +101,7 @@ export function apply(ctx: Context, config: Config): Promise<() => void> {
     users,
     secret: config.secret === '' ? undefined : config.secret,
     sessionTtlSeconds: config.sessionTtlSeconds,
+    loginRateLimit: config.loginRateLimit,
     tls,
   }).then((gateway) => {
     // ctx.effect runs its disposer on fiber disposal (profile reload, shutdown).

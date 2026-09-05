@@ -221,6 +221,24 @@ export class FakeApiClient implements IApiClient {
       this.record('workspace.archiveSession', payload, this.onWorkspaceArchiveSession(payload)),
   }
 
+  // The learning-area seat's RPC: exploration-task list, defaulting to empty
+  // (mirrors the connection fixture's cognition.list wire shape).
+  readonly cognition: IApiClient['cognition'] = {
+    list: (payload: unknown) => this.record('cognition.list', payload, Promise.resolve(ok({
+      tasks: [],
+      counts: { pending: 0, running: 0, completed: 0, failed: 0 },
+    }))),
+  }
+
+  // The digital-life strip's RPC: life overview, defaulting to an empty chain.
+  readonly life: IApiClient['life'] = {
+    overview: (payload: unknown) => this.record('life.overview', payload, Promise.resolve(ok({
+      chainHead: null,
+      traceTail: [],
+      designatedSessionId: null,
+    }))),
+  }
+
   // Payloads stay `unknown` (lint-lane note above); response rows are the real
   // wire shapes so cases can program requires-bearing catalogs and dual-address
   // skill lists without casts.

@@ -18,6 +18,9 @@
       "path": "../../core/agent"
     },
     {
+      "path": "../../credentials/credentials"
+    },
+    {
       "path": "../../util/home-paths"
     },
     {
@@ -31,6 +34,9 @@
     },
     {
       "path": "../../core/tools"
+    },
+    {
+      "path": "../../shell/shell"
     }
   ]
 }

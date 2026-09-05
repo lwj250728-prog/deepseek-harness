@@ -2990,6 +2990,33 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
     // Satisfies the ApiProxy contract type only: the browser export button
     // hands GET /api/session.export to the native download manager, so this
     // stub is never reached through the fixture's dispatch.
+    cognition: {
+      list: request => ok(request, { tasks: [], counts: { pending: 0, running: 0, completed: 0, failed: 0 } }),
+    },
+
+    life: {
+      overview: request => ok(request, {
+        chainHead: {
+          nodeId: 'sstate-3',
+          seq: 3,
+          situation: '正在推进数字生命路线：主对话自持回路已闭环',
+          sessionId: sid('fx-alpha'),
+          createdAt: Date.now() - 300_000,
+        },
+        traceTail: [
+          {
+            traceId: 'trace-2', kind: 'commit', nodeId: 'sstate-3', sessionId: sid('fx-alpha'),
+            situation: '正在推进数字生命路线：主对话自持回路已闭环', createdAt: Date.now() - 300_000, origin: 'turn-end',
+          },
+          {
+            traceId: 'trace-1', kind: 'inject', nodeId: 'sstate-2', sessionId: sid('fx-alpha'),
+            situation: 'M1 交付完成', createdAt: Date.now() - 3_600_000, position: 'seq:42',
+          },
+        ],
+        designatedSessionId: sid('fx-alpha'),
+      }),
+    },
+
     downloads: {
       sessionLog: () => Promise.resolve(new Response('fixture mode does not serve session export', { status: 404 })),
     },
@@ -3129,6 +3156,8 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'llm.providers': return this.api.llm.providers(request)
       case 'llm.models': return this.api.llm.models(request)
       case 'llm.discoverModels': return this.api.llm.discoverModels(request, signal)
+      case 'cognition.list': return this.api.cognition.list(request)
+      case 'life.overview': return this.api.life.overview(request)
     }
   }
 

@@ -52,10 +52,26 @@ exports[`sidebar shell snapshots > renders the collapsed rail after the crossfad
       />
     </button>
     <div
+      class="lifeArea"
+    >
+      <div
+        data-slot="sidebar.life"
+        style="display: contents;"
+      />
+    </div>
+    <div
       class="regionArea"
     >
       <div
         data-slot="sidebar.workspaces"
+        style="display: contents;"
+      />
+    </div>
+    <div
+      class="learningArea"
+    >
+      <div
+        data-slot="sidebar.learning"
         style="display: contents;"
       />
     </div>
@@ -145,10 +161,26 @@ exports[`sidebar shell snapshots > renders the expanded column (wordmark, capsul
       </span>
     </button>
     <div
+      class="lifeArea"
+    >
+      <div
+        data-slot="sidebar.life"
+        style="display: contents;"
+      />
+    </div>
+    <div
       class="regionArea"
     >
       <div
         data-slot="sidebar.workspaces"
+        style="display: contents;"
+      />
+    </div>
+    <div
+      class="learningArea"
+    >
+      <div
+        data-slot="sidebar.learning"
         style="display: contents;"
       />
     </div>
@@ -238,10 +270,26 @@ exports[`sidebar shell snapshots > renders the expanded column in the default lo
       </span>
     </button>
     <div
+      class="lifeArea"
+    >
+      <div
+        data-slot="sidebar.life"
+        style="display: contents;"
+      />
+    </div>
+    <div
       class="regionArea"
     >
       <div
         data-slot="sidebar.workspaces"
+        style="display: contents;"
+      />
+    </div>
+    <div
+      class="learningArea"
+    >
+      <div
+        data-slot="sidebar.learning"
         style="display: contents;"
       />
     </div>

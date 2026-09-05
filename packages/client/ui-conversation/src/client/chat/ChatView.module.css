@@ -100,6 +100,19 @@
   -webkit-text-fill-color: var(--dsw-alias-label-caption);
 }
 
+/* Phones: the one-line status must never push the message column sideways —
+   drop the elapsed clock (the "Deep diving..." label always fits) and clip. */
+@media (max-width: 640px) {
+  .turnStatus {
+    max-width: 100%;
+    overflow: hidden;
+  }
+
+  .turnStatusClock {
+    display: none;
+  }
+}
+
 @keyframes dsh-turn-status-shimmer {
   to {
     background-position: 0 0;

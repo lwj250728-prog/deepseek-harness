@@ -125,6 +125,14 @@
   text-decoration-color: currentColor;
 }
 
+/* Touch devices have no hover: the file link gets a taller tap target. */
+@media (hover: none) {
+  .fileLink {
+    padding: 6px 0;
+    line-height: 24px;
+  }
+}
+
 /* Error row's collapsed summary: the failure's first line in the error color. */
 .errorSummary {
   color: var(--dsw-alias-state-error-primary);
@@ -163,6 +171,18 @@
 .root:hover .inspectButton,
 .inspectButton:focus-visible {
   opacity: 1;
+}
+
+/* Touch devices have no hover: the inspect affordance stays visible (it
+   still only acts on tap) and grows to a thumb-friendly size. */
+@media (hover: none) {
+  .inspectButton {
+    opacity: 1;
+    margin: 6px 0 2px 4px;
+    padding: 7px 12px;
+    font-size: 12px;
+    line-height: 16px;
+  }
 }
 
 /* Solid hover fill (a translucent token would let content bleed through). */

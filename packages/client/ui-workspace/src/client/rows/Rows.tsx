@@ -350,7 +350,7 @@ export function SearchResultItem({ result, currentId, onOpen, t }: {
  * @param props.t - the browser root's locale seat.
  * @returns the session row.
  */
-export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork, onArchive, drag, flat = false, t }: {
+export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork, onArchive, drag, flat = false, designated = false, t }: {
   node: SessionNode
   currentId: string | undefined
   now: number
@@ -365,6 +365,8 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
   drag?: RowDragProps | undefined
   /** The row is rendered without a parent Workspace header. */
   flat?: boolean | undefined
+  /** The row is the designated main conversation (pinned with a badge). */
+  designated?: boolean | undefined
   t: RowTranslate
 }) {
   const row = node
@@ -428,6 +430,7 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
         </span>
       )}
       <span className={css.title}>{title}</span>
+      {designated && <span className={css.designatedBadge}>{t('session.designated')}</span>}
       {/* A blank New Session row is a provisional placeholder: nothing has
           happened in it yet, so a "now" timestamp and the row verbs
           (rename/fork/archive) would all act on content that does not

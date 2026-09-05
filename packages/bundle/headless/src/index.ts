@@ -31,10 +31,13 @@ export const inject = ['agentDefaultModel', 'agents', 'sessions']
 export interface Config {
   /** The prompt text for the single run. */
   task: string
+  /** Optional persisted session id to resume instead of creating fresh. */
+  resumeSessionId?: string
 }
 
 export const Config: z<Config> = z.object({
   task: z.string().required(),
+  resumeSessionId: z.string(),
 })
 
 /** Outcome of one owned run interval. */
@@ -88,12 +91,13 @@ function fail(io: HeadlessIo, error: unknown): void {
 }
 
 /**
- * Run one task through a freshly created Agent and request process exit.
+ * Run one task through a created or resumed Agent and request process exit.
  * @param ctx - plugin context carrying the Agent, default model, Session, and launcher IO services.
  * @param task - one-shot task text.
+ * @param resumeSessionId - optional persisted session id to resume instead of creating fresh.
  * @param io - process-facing effects.
  */
-async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
+async function run(ctx: Context, task: string, resumeSessionId: string | undefined, io: HeadlessIo): Promise<void> {
   // Loader siblings mount concurrently. Await the complete application before
   // creating an Agent so its scoped tools and adapters are not half-composed.
   await ctx.get('loader')?.await()
@@ -104,20 +108,39 @@ async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
   if (agents === undefined || defaultModel === undefined || sessions === undefined) return
 
   const selection = defaultModel.currentSelection()
-  // This bundle composes no preset roster, so the model-facing rows sit in the
-  // host plane and the agent reads them from the global layer. A deployment
-  // that DOES configure one has to join it here first
-  // (@deepseek-ai/dsh-agent-presets README, "Composing a child agent").
-  const { agent } = await agents.create({
-    sessionId: SessionId(`session-${randomUUID()}`),
-    meta: { cwd: process.cwd() },
-    agentOptions: { provider: selection.provider, model: selection.model },
-    setup: (agentCtx) => {
-      const selected: ModelSelectionRef = { current: selection, assembled: undefined }
-      installModelSelection(agentCtx, selected)
-    },
-  })
+  // Mount the minimal preset (极简模式) into the agent's scoped world: a fixed
+  // persona plus the persistent-bash and str_replace_editor tools, no
+  // compaction, no runtime-context snapshot. The roster lives in the host
+  // plane; the setup hook is the one supported call site for the join.
+  const mountMinimal = async (agentCtx: Context): Promise<void> => {
+    const selected: ModelSelectionRef = { current: selection, assembled: undefined }
+    installModelSelection(agentCtx, selected)
+    const agentPresets = ctx.get('agentPresets')
+    if (agentPresets !== undefined) {
+      await agentPresets.mount(agentCtx, 'minimal')
+    }
+  }
+  let agent: Awaited<ReturnType<typeof agents.create>>['agent']
+  if (resumeSessionId !== undefined && resumeSessionId !== '') {
+    const handle = await agents.resume({
+      resumeSessionId: SessionId(resumeSessionId),
+      agentOptions: { provider: selection.provider, model: selection.model },
+      setup: mountMinimal,
+    })
+    agent = handle.agent
+  } else {
+    const created = await agents.create({
+      sessionId: SessionId(`session-${randomUUID()}`),
+      meta: { cwd: process.cwd() },
+      agentOptions: { provider: selection.provider, model: selection.model },
+      setup: mountMinimal,
+    })
+    agent = created.agent
+  }
   await agent.whenIdle()
+  // Announce the session id on stderr (stdout is reserved for the answer) so
+  // schedulers/wrappers can capture it and resume with --resume later.
+  io.stderr.write(`session: ${agent.session.id}\n`)
   const firstSeq = agent.session.seq
   agent.followup(createUserMessage({
     content: [{ type: 'text', text: task }],
@@ -146,5 +169,5 @@ export function apply(ctx: Context, config: Config): void {
     throw new Error('headless-runner: the launcher must provide ctx.appExit before the tree mounts')
   }
   const io: HeadlessIo = { stdout: internals.stdout, stderr: internals.stderr, exit }
-  void run(ctx, config.task, io).catch((error: unknown) => { fail(io, error) })
+  void run(ctx, config.task, config.resumeSessionId, io).catch((error: unknown) => { fail(io, error) })
 }

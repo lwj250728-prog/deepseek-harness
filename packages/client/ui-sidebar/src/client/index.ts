@@ -46,6 +46,8 @@ export function apply(ctx: ClientContext): void {
       // registers the foot trigger + settings panel.
       children: {
         'sidebar.workspaces': { kind: 'single', scope: 'root' },
+        'sidebar.life': { kind: 'single', scope: 'root' },
+        'sidebar.learning': { kind: 'single', scope: 'root' },
         'sidebar.settings': { kind: 'single', scope: 'root' },
         'sidebar.footer.action': { kind: 'list', scope: 'root' },
       },

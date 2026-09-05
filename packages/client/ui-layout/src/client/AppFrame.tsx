@@ -13,9 +13,15 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { PropsRenderSlots, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
-import { computeColumns, SIDEBAR_AUTO_COLLAPSE, SIDEBAR_DEFAULT } from './columns.ts'
+import {
+  computeColumns, PHONE_BREAKPOINT, PHONE_SIDEBAR_MAX,
+  SIDEBAR_AUTO_COLLAPSE, SIDEBAR_DEFAULT,
+} from './columns.ts'
 import type { createLayoutStore } from './stores.ts'
 import css from './AppFrame.module.css'
+
+/** Drawer slide duration; matches --ds-transition-duration-slow (0.3s). */
+const DRAWER_SETTLE_MS = 300
 
 /** Full composed props: runtime share + child-slot render share + store share. */
 export type AppFrameProps =
@@ -134,14 +140,76 @@ export function AppFrame({
   // (or the default when the wide preference is closed) and the center
   // absorbs the squeeze.
   const narrow = viewport < SIDEBAR_AUTO_COLLAPSE
+  const phone = viewport < PHONE_BREAKPOINT
   useEffect(() => { actions.setNarrow(narrow) }, [actions, narrow])
   const sidebarCollapsed = narrow ? !panels.narrowExpanded : panels.sidebar === 0
+  // Below the phone breakpoint the side panels stop sharing the center
+  // column: the grid always solves with both closed (rail + full center) and
+  // the expanded sidebar / opened details render as overlay drawers on top.
+  // Between PHONE_BREAKPOINT and SIDEBAR_AUTO_COLLAPSE the squeeze stays.
+  const sidebarDrawer = phone && !sidebarCollapsed
+  const detailsDrawer = narrow && detailsSession !== undefined && panels.details > 0
   const sidebarPreference = sidebarCollapsed
     ? 0
     : panels.sidebar === 0 ? SIDEBAR_DEFAULT : panels.sidebar
-  const cols = computeColumns(viewport, sidebarPreference, detailsSession === undefined ? 0 : panels.details)
+  const cols = computeColumns(
+    viewport,
+    sidebarDrawer ? 0 : sidebarPreference,
+    detailsDrawer ? 0 : detailsSession === undefined ? 0 : panels.details,
+  )
   const colsRef = useRef(cols)
   colsRef.current = cols
+
+  // Drawer phases: CSS cannot transition an element between in-flow and
+  // absolutely positioned, so each drawer opens in two steps — mount off-
+  // screen (absolute), then slide in on the next frame; closing plays the
+  // slide-out before the sidebar returns to its in-flow rail (details snaps
+  // back to its zero track, which is already invisible).
+  const [sidebarPhase, setSidebarPhase] = useState<'in-flow' | 'off' | 'open'>('in-flow')
+  useEffect(() => {
+    if (!phone) { setSidebarPhase('in-flow'); return }
+    if (sidebarDrawer) {
+      if (sidebarPhase === 'in-flow') { setSidebarPhase('off'); return }
+      if (sidebarPhase === 'off') {
+        const raf = requestAnimationFrame(() => { setSidebarPhase('open') })
+        return () => { cancelAnimationFrame(raf) }
+      }
+      return
+    }
+    if (sidebarPhase === 'open') { setSidebarPhase('off'); return }
+    if (sidebarPhase === 'off') {
+      const timer = window.setTimeout(() => { setSidebarPhase('in-flow') }, DRAWER_SETTLE_MS)
+      return () => { window.clearTimeout(timer) }
+    }
+  }, [phone, sidebarDrawer, sidebarPhase])
+
+  const [detailsPhase, setDetailsPhase] = useState<'in-flow' | 'off' | 'open'>('in-flow')
+  useEffect(() => {
+    if (!detailsDrawer) { setDetailsPhase('in-flow'); return }
+    if (detailsPhase === 'in-flow') { setDetailsPhase('off'); return }
+    if (detailsPhase === 'off') {
+      const raf = requestAnimationFrame(() => { setDetailsPhase('open') })
+      return () => { cancelAnimationFrame(raf) }
+    }
+  }, [detailsDrawer, detailsPhase])
+
+  // On phones the drawer is the whole navigation surface: picking a session
+  // from it (the current-session id changes while it is open) closes it so
+  // the conversation is immediately usable. The baseline is captured on
+  // open/close so a phase change alone never trips the comparison.
+  const lastDrawerSession = useRef(detailsSession)
+  useEffect(() => {
+    if (!phone || sidebarPhase === 'in-flow') {
+      lastDrawerSession.current = detailsSession
+      return
+    }
+    if (lastDrawerSession.current !== detailsSession) {
+      lastDrawerSession.current = detailsSession
+      actions.toggleSidebar()
+    }
+  }, [phone, sidebarPhase, detailsSession, actions])
+
+  const phoneSidebarWidth = Math.min(Math.round(viewport * 0.84), PHONE_SIDEBAR_MAX)
 
   // The drag base is the rendered width captured at drag start (grabbing a
   // concession-clamped panel must not jump back to the stored preference);
@@ -169,16 +237,19 @@ export function AppFrame({
       data-sidebar-collapsed={sidebarCollapsed || undefined}
       data-details-collapsed={cols.details === 0 || undefined}
       data-dragging={dragging || undefined}
+      data-phone-sidebar={phone && sidebarPhase !== 'in-flow' ? sidebarPhase : undefined}
+      data-phone-details={detailsPhase !== 'in-flow' ? detailsPhase : undefined}
     >
       <div className={css.sidebarCol}>
         {/* Render-site slot call with live concession output: a closed
             sidebar keeps the mounted slot at the compact-rail width, and the
             component sees its rendered state as owner params decided here
             (collapsed follows the resolved rail, so a derived auto-collapse
-            renders the rail UI too). */}
+            renders the rail UI too). Inside the phone drawer the slot renders
+            its expanded content at the drawer width. */}
         {renderSlot('sidebar', {
           collapsed: sidebarCollapsed,
-          width: cols.sidebar,
+          width: sidebarDrawer ? phoneSidebarWidth : cols.sidebar,
         })}
       </div>
       <>
@@ -190,12 +261,21 @@ export function AppFrame({
         <CenterColumn>{renderSlot('conversation', {})}</CenterColumn>
         <DetailsColumn>{renderSlot('details', {})}</DetailsColumn>
       </>
+      {/* Drawer scrims: tapping the dimmed center closes the drawer on top
+          (the sidebar when both happen to be open). */}
+      {phone && sidebarPhase !== 'in-flow' && (
+        <div className={css.scrim} data-for="sidebar" onClick={() => { actions.toggleSidebar() }} />
+      )}
+      {detailsPhase !== 'in-flow' && (
+        <div className={css.scrim} data-for="details" onClick={() => { actions.closeDetails() }} />
+      )}
       <div className={css.overlayLayer} data-shell-overlay>
         {renderSlot('shell.overlay', {})}
       </div>
-      {/* The collapsed rail is fixed-width: no resize handle while closed. */}
-      {!sidebarCollapsed && <DragHandle side="sidebar" left={cols.sidebar} onStart={onSidebarStart} onDrag={onSidebarDrag} onEnd={onDragEnd} />}
-      {cols.details > 0 && <DragHandle side="details" left={viewport - cols.details} onStart={onDetailsStart} onDrag={onDetailsDrag} onEnd={onDragEnd} />}
+      {/* The collapsed rail is fixed-width: no resize handle while closed;
+          drawers on phones are fixed-width too. */}
+      {!phone && !sidebarCollapsed && <DragHandle side="sidebar" left={cols.sidebar} onStart={onSidebarStart} onDrag={onSidebarDrag} onEnd={onDragEnd} />}
+      {!phone && cols.details > 0 && <DragHandle side="details" left={viewport - cols.details} onStart={onDetailsStart} onDrag={onDetailsDrag} onEnd={onDragEnd} />}
     </div>
   )
 }

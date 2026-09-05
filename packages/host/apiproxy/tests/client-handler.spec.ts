@@ -28,6 +28,8 @@ function scriptedApi(overrides: {
   settings?: Partial<ApiProxy['settings']>
   credentials?: Partial<ApiProxy['credentials']>
   llm?: Partial<ApiProxy['llm']>
+  cognition?: Partial<ApiProxy['cognition']>
+  life?: Partial<ApiProxy['life']>
   respond?: ApiProxy['respond']
 } = {}): ApiProxy {
   async function *empty<F>(): AsyncGenerator<RpcRequest<F>> { /* no frames */ }
@@ -128,6 +130,14 @@ function scriptedApi(overrides: {
       discoverModels: err,
       ...overrides.llm,
     },
+    cognition: {
+      list: r => ok(r, { tasks: [], counts: { pending: 0, running: 0, completed: 0, failed: 0 } }),
+      ...overrides.cognition,
+    },
+    life: {
+      overview: r => ok(r, { chainHead: null, traceTail: [], designatedSessionId: null }),
+      ...overrides.life,
+    },
     events: { mux: () => empty<MuxFrame>(), host: () => empty<HostFrame>(), ...overrides.events },
     respond: overrides.respond ?? (() => Promise.resolve({ accepted: false as const, reason: 'not-pending' as const })),
     downloads: { sessionLog: async () => new Response('stub', { status: 404 }) },
@@ -164,6 +174,47 @@ describe('unary round trip', () => {
     expect(seen?.rpcId).toBeTruthy()
     expect(response.rpcId).toBe(seen?.rpcId)
     expect(response.result).toEqual({ ok: true, value: { items: [{ sessionId: 's1', updatedAt: 7, running: false, blank: false }] } })
+  })
+
+  it('round-trips the life overview (chain head + trace tail + designation)', async () => {
+    let seen: RpcRequest<Record<string, never>> | undefined
+    const api = scriptedApi({
+      life: {
+        overview: (r) => {
+          seen = r
+          return ok(r, {
+            chainHead: {
+              nodeId: 'sstate-3',
+              seq: 3,
+              situation: '正在推进数字生命路线',
+              sessionId: sid('life-session'),
+              createdAt: 1234,
+            },
+            traceTail: [{
+              traceId: 'trace-2', kind: 'commit', nodeId: 'sstate-3', sessionId: sid('life-session'),
+              situation: '正在推进数字生命路线', createdAt: 1234, origin: 'turn-end',
+            }],
+            designatedSessionId: sid('life-session'),
+          })
+        },
+      },
+    })
+    const response = await client(api).life.overview({})
+    expect(seen?.payload).toEqual({})
+    expect(response.result).toEqual({
+      ok: true,
+      value: {
+        chainHead: {
+          nodeId: 'sstate-3', seq: 3, situation: '正在推进数字生命路线',
+          sessionId: 'life-session', createdAt: 1234,
+        },
+        traceTail: [{
+          traceId: 'trace-2', kind: 'commit', nodeId: 'sstate-3', sessionId: 'life-session',
+          situation: '正在推进数字生命路线', createdAt: 1234, origin: 'turn-end',
+        }],
+        designatedSessionId: 'life-session',
+      },
+    })
   })
 
   it('round-trips a trimmed session search query and its bounded result metadata', async () => {

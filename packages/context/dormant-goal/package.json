@@ -1,0 +1,13 @@
+{
+  "name": "@deepseek-ai/dsh-dormant-goal",
+  "description": "Dormant-goal sentinel: at each agent pre-step, scan the dormant-goal pool by rep-vector cosine; on a hit, refine kernel/focus layers and inject a 【目标孵化提醒】 block so a resting long-term goal can be awakened by an intersecting situation.",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": { "types": "./lib/types/index.d.ts", "default": "./lib/index.js" },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib"]
+}

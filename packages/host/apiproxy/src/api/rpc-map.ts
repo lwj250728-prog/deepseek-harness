@@ -14,6 +14,8 @@ import type { SettingsApi } from './settings.ts'
 import type { CredentialsApi } from './credentials.ts'
 import type { LlmApi } from './llm.ts'
 import type { SubagentsApi } from './subagents.ts'
+import type { CognitionApi } from './cognition.ts'
+import type { LifeApi } from './life.ts'
 import type { RpcResponse } from './rpc.ts'
 
 /**
@@ -74,6 +76,8 @@ export interface RpcMethodMap {
   'llm.providers': LlmApi['providers']
   'llm.models': LlmApi['models']
   'llm.discoverModels': LlmApi['discoverModels']
+  'cognition.list': CognitionApi['list']
+  'life.overview': LifeApi['overview']
 }
 
 /** Business request payload of method K (reaches through the RpcRequest narrow form to payload). */

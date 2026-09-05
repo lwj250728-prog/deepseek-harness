@@ -13,7 +13,8 @@ import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import { Inbox } from '@deepseek-ai/dsh-agent'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import { CallId, LlmAdapter } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -23,11 +24,13 @@ import type { CognitivePipelineConfig } from '../src/service.ts'
 /** A text-chunk adapter that yields one scripted response per call. */
 export class ScriptedAdapter extends LlmAdapter {
   private cursor = 0
+  private readonly optionsLog: GenerateOptions[] = []
   constructor(private readonly responses: readonly string[]) {
     super()
   }
 
-  async * stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+  async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.optionsLog.push(options)
     const text = this.responses[this.cursor] ?? '{}'
     this.cursor += 1
     yield { type: 'block-start', index: 0, blockType: 'text' }
@@ -36,9 +39,36 @@ export class ScriptedAdapter extends LlmAdapter {
     yield { type: 'finish', reason: { kind: 'stop' } }
   }
 
+  override resolveModel(
+    provider: string,
+    model: string,
+    _signal?: AbortSignal,
+  ): Promise<LlmResolvedModelInfo> {
+    // Declare reasoning support (including "off") like a real budget-aware
+    // provider, so request-level reasoningEffort assertions exercise the same
+    // validation path the deepseek route does.
+    return Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      reasoning: {
+        efforts: [
+          { id: ReasoningEffortId('off'), name: 'Off' },
+          { id: ReasoningEffortId('high'), name: 'High' },
+        ],
+        defaultEffort: ReasoningEffortId('off'),
+      },
+    })
+  }
+
   /** How many calls were consumed so far. */
   get consumed(): number {
     return this.cursor
+  }
+
+  /** Options of the most recent call (for request-level assertions). */
+  get lastOptions(): GenerateOptions | undefined {
+    return this.optionsLog[this.optionsLog.length - 1]
   }
 }
 

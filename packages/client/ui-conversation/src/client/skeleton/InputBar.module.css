@@ -474,3 +474,28 @@
   text-decoration: line-through;
   opacity: 0.7;
 }
+
+/* Phones: thumb-friendly controls, a wrapping toolbar row, and home-indicator
+   clearance on notched devices (the docked card sits on the viewport edge).
+   Kept LAST so these overrides win over the base .add/.primary/.root rules
+   above (the bundler preserves source order). */
+@media (max-width: 640px) {
+  .root {
+    padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .row {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .add {
+    width: 36px;
+    height: 36px;
+  }
+
+  .primary {
+    width: 40px;
+    height: 40px;
+  }
+}

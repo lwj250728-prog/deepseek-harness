@@ -492,7 +492,7 @@ export interface OrchestrationConfig {
 }
 ```
 
-Source: [`packages/cognition/cognitive-orchestration/src/index.ts:31`](../packages/cognition/cognitive-orchestration/src/index.ts)
+Source: [`packages/cognition/cognitive-orchestration/src/index.ts:32`](../packages/cognition/cognitive-orchestration/src/index.ts)
 
 <a id="deepseek-aidsh-cognitive-pipeline"></a>
 
@@ -744,6 +744,8 @@ Requires: `agentDefaultModel` · `agents` · `sessions`
 export interface Config {
   /** The prompt text for the single run. */
   task: string
+  /** Optional persisted session id to resume instead of creating fresh. */
+  resumeSessionId?: string
 }
 ```
 
@@ -1385,6 +1387,56 @@ export interface Config {
 ```
 
 Source: [`packages/feedback/message-feedback/src/index.ts:49`](../packages/feedback/message-feedback/src/index.ts)
+
+<a id="deepseek-aidsh-mobile-gateway"></a>
+
+## `@deepseek-ai/dsh-mobile-gateway`
+
+Requires: `webServer`
+
+```ts config-catalog
+/** Plugin config: the gateway's own listener plus the loopback forward target. */
+export interface Config {
+  /** Gateway listen address; `0.0.0.0` exposes the AUTHENTICATED gateway to the LAN. */
+  bind: string
+  /** Gateway listen port. */
+  port: number
+  /** Upstream host (normally the loopback DSH web server). */
+  targetHost: string
+  /** Upstream port; 0 resolves from `ctx.webServer.port` at activation. */
+  targetPort: number
+  /** The phone-user whitelist; empty denies every login (fail closed). */
+  users: GatewayUser[]
+  /** Signed-session lifetime in seconds. */
+  sessionTtlSeconds: number
+  /** Login attempt throttling (failures per window per caller address). */
+  loginRateLimit: LoginRateLimit
+  /** Optional stable HMAC secret; empty mints a per-process random secret. */
+  secret: string
+  /** Optional PEM private key path; must be set together with `tlsCertPath`. */
+  tlsKeyPath: string
+  /** Optional PEM certificate path; must be set together with `tlsKeyPath`. */
+  tlsCertPath: string
+}
+
+/** One named phone user: the whitelist entry the gateway is configured with. */
+export interface GatewayUser {
+  /** Human-readable name; appears in the audit log (never sent to DSH). */
+  name: string
+  /** Secret shared with this user's phone. Use `openssl rand -hex 24`-grade entropy. */
+  token: string
+}
+
+/** Login rate-limit tuning: failures per sliding-fixed window before 429. */
+export interface LoginRateLimit {
+  /** Window length in ms. */
+  windowMs: number
+  /** Failures per window that trip the limit (the exceeding failure trips it). */
+  maxFailures: number
+}
+```
+
+Source: [`packages/host/mobile-gateway/src/index.ts:30`](../packages/host/mobile-gateway/src/index.ts)
 
 <a id="deepseek-aidsh-permission-presets"></a>
 

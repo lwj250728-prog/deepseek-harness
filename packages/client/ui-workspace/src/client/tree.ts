@@ -15,6 +15,26 @@ export const UNGROUPED_KEY = ''
 /** Display label for the ungrouped bucket row. */
 export const UNGROUPED_LABEL = 'Ungrouped'
 
+/** Split one row list around the designated main conversation: the
+ * designated row comes out pinned (rendered first, non-draggable) and the
+ * rest keeps its order. A list without the designated id returns no pin.
+ * @param rows - the ordered row list.
+ * @param designated - the designated session id, if any.
+ * @returns the pinned row (when present) and the remaining rows in order.
+ */
+export function splitDesignated(
+  rows: readonly SessionNode[],
+  designated: SessionId | undefined,
+): { pinned: SessionNode | undefined; rest: SessionNode[] } {
+  if (designated === undefined) return { pinned: undefined, rest: [...rows] }
+  const index = rows.findIndex(row => row.id === designated)
+  if (index === -1) return { pinned: undefined, rest: [...rows] }
+  return {
+    pinned: rows[index],
+    rest: [...rows.slice(0, index), ...rows.slice(index + 1)],
+  }
+}
+
 /** One top-level session row in a group or the flat list. */
 export interface SessionNode {
   id: SessionId

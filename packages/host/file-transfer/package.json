@@ -1,0 +1,16 @@
+{
+  "name": "@deepseek-ai/dsh-host-file-transfer",
+  "description": "Web file-transfer seam for the DeepSeek Harness GUI: download workspace files and upload into them straight from the browser",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib"]
+}

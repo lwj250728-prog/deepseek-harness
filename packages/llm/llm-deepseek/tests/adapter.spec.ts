@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
+import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import LlmRuntime, { createUserMessage,
   CONTEXT_WINDOW_EXCEEDED_CODE,
   ProviderRequestId,
@@ -47,13 +49,29 @@ async function harness(baseURL: string, config: object = {}) {
 }
 
 /** Direct adapter over the plugin's real resolve step, with a static key. */
-function adapterOf(config: Partial<LlmDeepSeek.Config> & { apiKey?: string } = {}): DeepSeekAdapter {
+function adapterOf(
+  config: Partial<LlmDeepSeek.Config> & { apiKey?: string } = {},
+  attachments?: AttachmentStore,
+): DeepSeekAdapter {
   const { apiKey, ...rest } = config
   return new DeepSeekAdapter({
     options: () => resolveAdapterOptions(rest),
     resolveApiKey: () => Promise.resolve(apiKey ?? 'k'),
     resolveUserId: () => TEST_USER_ID,
+    resolveAttachments: () => attachments,
   })
+}
+
+async function drain(stream: AsyncIterable<unknown>): Promise<void> {
+  for await (const _chunk of stream) { /* drain */ }
+}
+
+const imageRef: ImageAttachmentRef = {
+  attachmentId: AttachmentId(`sha256:${'a'.repeat(64)}`),
+  mediaType: 'image/png',
+  bytes: 3,
+  width: 1,
+  height: 1,
 }
 
 describe('DeepSeekAdapter against a mock server', () => {
@@ -88,6 +106,93 @@ describe('DeepSeekAdapter against a mock server', () => {
     expect(server.headers[0]).not.toHaveProperty('x-openrouter-title')
     expect(server.headers[0]).not.toHaveProperty('x-openrouter-categories')
     expect(server.headers[0]).not.toHaveProperty('x-deepseek-harness-compact')
+  })
+
+  it('sends a durable image as a base64 data URL for the vision model', async () => {
+    const server = await mockServer([{ kind: 'sse', events: textEvents }])
+    const signalSeen: (AbortSignal | undefined)[] = []
+    const attachments = {
+      readImage: vi.fn((ref: ImageAttachmentRef, signal?: AbortSignal) => {
+        signalSeen.push(signal)
+        return Promise.resolve({ ref, data: Uint8Array.of(1, 2, 3) })
+      }),
+    } as unknown as AttachmentStore
+    const adapter = adapterOf({ baseURL: server.url }, attachments)
+
+    await drain(adapter.stream({
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-flash-vision-exp',
+      messages: [createUserMessage({
+        content: [
+          { type: 'text', text: 'describe ' },
+          { type: 'image', attachment: imageRef },
+        ],
+        source: { kind: 'plugin', plugin: 'test' },
+      })],
+    }))
+
+    expect(server.requests[0]).toMatchObject({
+      model: 'deepseek-v4-flash-vision-exp',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'describe ' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+        ],
+      }],
+    })
+    expect(signalSeen[0]).toBeInstanceOf(AbortSignal)
+  })
+
+  it.each(['deepseek-v4-flash', 'unlisted-pass-through'])(
+    'rejects image input for text-only model %s before credentials, attachments, or fetch',
+    async (model) => {
+      const server = await mockServer([])
+      const resolveApiKey = vi.fn(() => Promise.resolve('k'))
+      const resolveAttachments = vi.fn(() => ({}) as AttachmentStore)
+      const adapter = new DeepSeekAdapter({
+        options: () => resolveAdapterOptions({ baseURL: server.url }),
+        resolveApiKey,
+        resolveUserId: () => TEST_USER_ID,
+        resolveAttachments,
+      })
+
+      await expect(drain(adapter.stream({
+        provider: 'deepseek-official',
+        model,
+        messages: [createUserMessage({
+          content: [{ type: 'image', attachment: imageRef }],
+          source: { kind: 'plugin', plugin: 'test' },
+        })],
+      }))).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
+      expect(resolveApiKey).not.toHaveBeenCalled()
+      expect(resolveAttachments).not.toHaveBeenCalled()
+      expect(server.requests).toHaveLength(0)
+    },
+  )
+
+  it('rejects vision input without an attachment provider before credentials or fetch', async () => {
+    const server = await mockServer([])
+    const resolveApiKey = vi.fn(() => Promise.resolve('k'))
+    const adapter = new DeepSeekAdapter({
+      options: () => resolveAdapterOptions({
+        baseURL: server.url,
+        models: [{ id: 'deepseek-v4-flash-vision-exp', inputModalities: ['text', 'image'] }],
+      }),
+      resolveApiKey,
+      resolveUserId: () => TEST_USER_ID,
+    })
+
+    await expect(drain(adapter.stream({
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-flash-vision-exp',
+      messages: [createUserMessage({
+        content: [{ type: 'image', attachment: imageRef }],
+        source: { kind: 'plugin', plugin: 'test' },
+      })],
+    }))).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
+    expect(resolveApiKey).not.toHaveBeenCalled()
+    expect(server.requests).toHaveLength(0)
   })
 
   it('streams raw chunks through ctx.llm.stream', async () => {
@@ -386,7 +491,7 @@ describe('DeepSeekAdapter against a mock server', () => {
       .toBe(CONTEXT_WINDOW_EXCEEDED_CODE)
     expect(httpErrorCode(400, { message: 'invalid input: temperature exceeds maximum allowed value' }))
       .toBe('INVALID_REQUEST')
-    expect(httpErrorCode(413, { code: 'context_length_exceeded' })).toBe('HTTP_413')
+    expect(httpErrorCode(413, { code: 'context_length_exceeded' })).toBe('INVALID_REQUEST')
   })
 
   it('distinguishes terminal quota exhaustion from transient HTTP 429 throttling', () => {
@@ -660,6 +765,7 @@ describe('plugin registration and config', () => {
     await expect(ctx.llm.listModels('deepseek-official')).resolves.toEqual([
       { provider: 'deepseek-official', id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', inputModalities: ['text'] },
       { provider: 'deepseek-official', id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', inputModalities: ['text'] },
+      { provider: 'deepseek-official', id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek-V4-Flash-Vision-Exp', inputModalities: ['text', 'image'] },
     ])
     await expect(ctx.llm.resolveModelInfo('deepseek-official', 'deepseek-v4-flash'))
       .resolves.toMatchObject({
@@ -755,6 +861,7 @@ describe('plugin registration and config', () => {
     await expect(ctx.llm.listModels('deepseek-official')).resolves.toEqual([
       { provider: 'deepseek-official', id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', inputModalities: ['text'] },
       { provider: 'deepseek-official', id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', inputModalities: ['text'] },
+      { provider: 'deepseek-official', id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek-V4-Flash-Vision-Exp', inputModalities: ['text', 'image'] },
     ])
   })
 
@@ -918,7 +1025,7 @@ describe('plugin registration and config', () => {
     // First-boot onboarding: the route registers so models stay discoverable;
     // only the request itself needs a key.
     expect(ctx.llm.listProviders()).toEqual([{ id: 'deepseek-official', name: 'DeepSeek' }])
-    await expect(ctx.llm.listModels('deepseek-official')).resolves.toHaveLength(2)
+    await expect(ctx.llm.listModels('deepseek-official')).resolves.toHaveLength(3)
     const first = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
     expect(first.finish).toMatchObject({ kind: 'error', failure: { code: 'MISSING_CREDENTIAL' } })
     // The guidance leads with the managed credential store.
@@ -1006,7 +1113,7 @@ describe('plugin registration and config', () => {
     expect(adapter).toBeInstanceOf(DeepSeekAdapter)
     // Direct embedding shares the plugin's one resolve step, so it advertises
     // the same default catalog instead of a divergent empty one.
-    await expect(adapter.listModels('deepseek-official')).resolves.toHaveLength(2)
+    await expect(adapter.listModels('deepseek-official')).resolves.toHaveLength(3)
   })
 
   it('resolves connection facts and the credential exactly once per stream call', async () => {

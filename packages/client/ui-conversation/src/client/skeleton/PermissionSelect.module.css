@@ -22,6 +22,13 @@
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
+/* Phones: the access chip grows to a thumb-friendly height. */
+@media (max-width: 640px) {
+  .trigger {
+    height: 36px;
+  }
+}
+
 .trigger:focus-visible {
   box-shadow: 0 0 0 2px var(--dsw-alias-border-l3);
 }

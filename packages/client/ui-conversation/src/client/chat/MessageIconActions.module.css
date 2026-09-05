@@ -65,6 +65,15 @@
   color: var(--dsw-alias-label-secondary);
 }
 
+/* Phones: message actions grow to thumb-friendly targets. */
+@media (max-width: 640px) {
+  .action {
+    width: 36px;
+    height: 36px;
+    padding: 8px;
+  }
+}
+
 /* Unavailable stays focusable and hoverable so Tooltip can explain why. */
 .action[data-unavailable] {
   cursor: default;

@@ -22,6 +22,8 @@ export const HEADLESS_STARTUP_SERVICE = 'headlessStartup'
 export interface HeadlessStartupValues {
   /** The task text this invocation asked for. */
   task: string
+  /** Optional persisted session id to resume instead of creating fresh. */
+  resumeSessionId?: string
 }
 
 /**
@@ -34,9 +36,11 @@ function headlessCommand(): Command {
     .description('Answer one task, print the final assistant message, and exit.')
     .helpOption('-h, --help', 'show this help')
     .argument('[task...]', 'the task text; multiple words are joined by spaces')
+    .option('--resume <sessionId>', 'resume a persisted session instead of creating a new one')
     .addHelpText('after', `
 Examples:
   dsh --profile headless "run the tests"     answer one task and exit
+  dsh --profile headless --resume <id> "..."  continue a persisted session
 `)
 }
 
@@ -51,7 +55,10 @@ export function apply(ctx: Context): void {
   program.action(() => {
     const task = program.args.join(' ')
     if (task.trim() === '') program.error('error: a task is required, for example: dsh --profile headless "run the tests"')
-    ctx.provide(HEADLESS_STARTUP_SERVICE, { task } satisfies HeadlessStartupValues)
+    const opts = program.opts<{ resume?: string }>()
+    const values: HeadlessStartupValues = { task }
+    if (opts.resume !== undefined) values.resumeSessionId = opts.resume
+    ctx.provide(HEADLESS_STARTUP_SERVICE, values)
   })
   parseCmdline(ctx, program)
 }
