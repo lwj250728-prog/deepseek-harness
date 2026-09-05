@@ -127,8 +127,9 @@ function buildIncrementalFrameText(carrier: CarrierIdentity): string {
 /** 选择帧模式：读 think-log 最近 frame 产出，环境部分高度重复→增量，否则全检。 */
 function chooseFrameMode(prevOutput: string | undefined): 'full' | 'incremental' {
   if (prevOutput === undefined || prevOutput.length === 0) return 'full'  // 首帧/无历史 → 全检
-  // 启发式：上帧提到"无变化/一致/无新增" → 熟悉域 → 增量
-  return /无变化|无新增|一致|与上帧相同|没有变化/.test(prevOutput) ? 'incremental' : 'full'
+  // 启发式：上帧提到"无变化/一致/实质相同"等 → 熟悉域 → 增量。
+  // 覆盖常见表述：无变化/没有变化/未变/没变/无新增/无实质变化/实质相同/与上帧相同/一致/无异常。
+  return /无变化|没有变化|未变|没变|无新增|无实质变化|实质相同|与上帧相同|与上次相同|一致|无异常变化|基本相同/.test(prevOutput) ? 'incremental' : 'full'
 }
 
 /** Frame text 入口：根据上帧产出选择协议（v18 自适应）。 */
@@ -156,7 +157,10 @@ async function logFrame(thinkLogPath: string, entry: object): Promise<void> {
   }
 }
 
-/** Read the most recent side-channel frame output from the think-log (v18 自适应). */
+/** Read the most recent frame context from the think-log (v18 自适应).
+ *  Returns the last frame's output text, or a sentinel that forces incremental
+ *  when the last record was a direct frame already run in incremental mode.
+ *  Priority: last frame with output > last direct-frame (mode preserved). */
 async function readLastFrameOutput(thinkLogPath: string): Promise<string | undefined> {
   const target = expandHome(thinkLogPath)
   try {
@@ -167,10 +171,16 @@ async function readLastFrameOutput(thinkLogPath: string): Promise<string | undef
       const line = lines[i]
       if (line === undefined) continue
       try {
-        const e = JSON.parse(line) as { kind?: string; output?: string } | null
-        const out = e?.output
-        if (e !== null && (e.kind === undefined || e.kind === 'frame') && typeof out === 'string' && out.length > 0) {
+        const e = JSON.parse(line) as { kind?: string; output?: string; mode?: string } | null
+        if (e === null) continue
+        const out = e.output
+        // 旁路/普通帧：有产出文本 → 返回文本（由 chooseFrameMode 判定）。
+        if ((e.kind === undefined || e.kind === 'frame') && typeof out === 'string' && out.length > 0) {
           return out
+        }
+        // 直驱帧：无产出文本但记录了 mode → 直接返回该 mode 的判定（增量延续）。
+        if (e.kind === 'direct-frame' && e.mode === 'incremental') {
+          return '与上帧一致'  // 触发增量判定的哨兵文本
         }
       } catch { /* skip malformed */ }
     }
@@ -471,13 +481,19 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
           .catch((error: unknown) => { console.error('[quiet-driver] prediction settle (direct) failed:', error) })
       }
       // v18 自适应: 异步读上帧选协议, 再 followup。
-      void readLastFrameOutput(config.thinkLogPath).then((prevOutput) => {
+      void readLastFrameOutput(config.thinkLogPath).then(async (prevOutput) => {
+        const mode = chooseFrameMode(prevOutput)
         const message = createUserMessage({
           content: [{ type: 'text', text: buildFrameText(carrier, prevOutput) }],
           source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧 #${frames}` },
         })
-        ctx.logger.info('[quiet-driver] wake #%d: direct followup to %s (真正空闲)', frames, sessionId)
+        ctx.logger.info('[quiet-driver] wake #%d: direct followup to %s (真正空闲, %s)', frames, sessionId, mode)
         agent.followup(message)
+        // 记录直驱帧到 think-log（含协议模式），供 v18 下帧参考。
+        await logFrame(config.thinkLogPath, {
+          ts: Date.now(), kind: 'direct-frame', frameNo: frames, mode,
+          session: sessionId, output: '',
+        })
       }).catch((error: unknown) => { console.error('[quiet-driver] direct frame build failed:', error) })
     }
   }, config.intervalMs)
