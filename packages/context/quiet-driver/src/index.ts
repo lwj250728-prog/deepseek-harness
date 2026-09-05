@@ -13,6 +13,7 @@
  * @module @deepseek-ai/dsh-quiet-driver
  */
 
+import { hostname } from 'node:os'
 import { appendFile, mkdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -74,11 +75,22 @@ function expandHome(p: string): string {
   return p.startsWith('~') ? join(homedir(), p.slice(1)) : p
 }
 
-/** Frame text: v17/v18 精简三问。 */
-function buildFrameText(): string {
+/** 载体身份（v20 自我锚定）：帧感知自己在哪个进程实例上运行。 */
+interface CarrierIdentity {
+  pid: number
+  /** 进程启动时间（apply 时刻近似），重启后变化 → 载体迁移可识别。 */
+  startedAt: string
+  hostname: string
+}
+
+/** Frame text: v17/v18 精简三问 + v20 载体身份。 */
+function buildFrameText(carrier: CarrierIdentity): string {
   return [
     '【三问帧】(source: plugin/quiet-driver, form: epistemic-frame)',
     '你正在做一次例行自我评估。这是旁路思考——请直接回答，不要执行额外任务。',
+    '',
+    '【载体身份】(v20 自我锚定——你运行在以下实例上，若与上次不同即经历载体迁移):',
+    `  实例 PID: ${carrier.pid} | 启动: ${carrier.startedAt} | 主机: ${carrier.hostname}`,
     '',
     'Q1 环境：自上次检查以来，环境有什么变化？（引用具体对象；无变化须说明你查证了什么）',
     'Q2 当下：当前议程中有什么到期或未处理的事？（报可数事实，不用"正常"类判断词）',
@@ -167,6 +179,14 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
   const sessionId = SessionId(config.targetSessionId)
   const targetAgent = (): Agent | undefined => ctx.agents.get(sessionId)
 
+  // --- v20 自我锚定: 记录载体身份(重启后变化=载体迁移可识别)。
+  const carrier: CarrierIdentity = {
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    hostname: hostname(),
+  }
+  ctx.logger.info('[quiet-driver] carrier identity: pid=%s started=%s', carrier.pid, carrier.startedAt)
+
   // --- Latest side-channel finding, injected back into the main session at pre-step.
   let latestFinding: { ts: number; frameNo: number; output: string; anomaly: boolean } | null = null
   let lastInjectedAt = 0
@@ -238,7 +258,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     })
     const agent = handle.agent
     agent.followup(createUserMessage({
-      content: [{ type: 'text', text: buildFrameText() }],
+      content: [{ type: 'text', text: buildFrameText(carrier) }],
       source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧旁路 #${frameNo}` },
     }))
     await agent.whenIdle()
@@ -389,7 +409,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
           .catch((error: unknown) => { console.error('[quiet-driver] prediction settle (direct) failed:', error) })
       }
       const message = createUserMessage({
-        content: [{ type: 'text', text: buildFrameText() }],
+        content: [{ type: 'text', text: buildFrameText(carrier) }],
         source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧 #${frames}` },
       })
       ctx.logger.info('[quiet-driver] wake #%d: direct followup to %s (真正空闲)', frames, sessionId)
