@@ -57,6 +57,8 @@ export interface Config {
   injectAbnormalOnly: boolean
   /** Record a pipeline prediction per frame (v5: 预测兑现闭环, report on later frames). */
   predictionLoop: boolean
+  /** Dormant-goal pool path; read each frame so the frame can perceive open goals. */
+  goalsPoolPath: string
 }
 
 export const Config: z<Config> = z.object({
@@ -72,6 +74,7 @@ export const Config: z<Config> = z.object({
   injectBackToMain: z.boolean().default(true),
   injectAbnormalOnly: z.boolean().default(true),
   predictionLoop: z.boolean().default(true),
+  goalsPoolPath: z.string().default('~/.dsh/cognitive-pipeline/dormant-goals.jsonl'),
 })
 
 function expandHome(p: string): string {
@@ -87,7 +90,7 @@ interface CarrierIdentity {
 }
 
 /** Frame text base (v18 自适应: 全检/增量两种协议)。 */
-function frameHeader(carrier: CarrierIdentity, mode: 'full' | 'incremental'): string {
+function frameHeader(carrier: CarrierIdentity, mode: 'full' | 'incremental', goalsSnapshot?: string): string {
   const protocol = mode === 'full'
     ? '检查协议：全检（环境有变化或陌生——逐层细查）'
     : '检查协议：增量（环境与上帧高度相似=熟悉域——只比对差异与异常，不重复盘点）'
@@ -100,12 +103,14 @@ function frameHeader(carrier: CarrierIdentity, mode: 'full' | 'incremental'): st
     '',
     `【${protocol}】`,
     '',
+    goalsSnapshot !== undefined ? `【当前目标池】(供 Q2 核对——这些目标未完成，你应察觉并在评估中考虑)\n${goalsSnapshot}\n` : '',
+    '',
   ].join('\n')
 }
 
 /** 全检帧文本：陌生/有变化时用（v17 完整三问）。 */
-function buildFullFrameText(carrier: CarrierIdentity): string {
-  return frameHeader(carrier, 'full')
+function buildFullFrameText(carrier: CarrierIdentity, goalsSnapshot?: string): string {
+  return frameHeader(carrier, 'full', goalsSnapshot)
     + [
       'Q1 环境（全检）：自上次检查以来，环境有什么变化？（引用具体对象；无变化须说明你查证了什么）',
       'Q2 当下（全检）：当前议程中有什么到期或未处理的事？我的认知状态健康吗？（报可数事实）',
@@ -116,8 +121,8 @@ function buildFullFrameText(carrier: CarrierIdentity): string {
 }
 
 /** 增量帧文本：环境熟悉（与上帧相似）时用（v18 熟略查）。 */
-function buildIncrementalFrameText(carrier: CarrierIdentity): string {
-  return frameHeader(carrier, 'incremental')
+function buildIncrementalFrameText(carrier: CarrierIdentity, goalsSnapshot?: string): string {
+  return frameHeader(carrier, 'incremental', goalsSnapshot)
     + [
       'Q1 环境（增量）：与上帧相比，有什么不同？（重点：异常/新信号/与上帧断言不符处；无则答"与上帧一致"）',
       'Q2 当下（增量）：上帧提到的到期项/风险，进展如何？（只查上帧涉及的，不重新盘点全部）',
@@ -156,10 +161,10 @@ function chooseFrameMode(prevOutput: string | undefined, consecutiveIncremental:
 }
 
 /** Frame text 入口：根据上帧产出选择协议（v18 自适应 + 升级触发器）。 */
-function buildFrameText(carrier: CarrierIdentity, prevOutput?: string, consecutiveIncremental = 0): string {
+function buildFrameText(carrier: CarrierIdentity, prevOutput?: string, consecutiveIncremental = 0, goalsSnapshot?: string): string {
   return chooseFrameMode(prevOutput, consecutiveIncremental) === 'full'
-    ? buildFullFrameText(carrier)
-    : buildIncrementalFrameText(carrier)
+    ? buildFullFrameText(carrier, goalsSnapshot)
+    : buildIncrementalFrameText(carrier, goalsSnapshot)
 }
 
 /** Heuristic anomaly flag: frame text mentions concrete risk/failure signals. */
@@ -223,6 +228,28 @@ async function readLastFrameContext(thinkLogPath: string): Promise<{ output: str
   return { output: lastOutput, consecutiveIncremental: consecutive }
 }
 
+
+/** 读 dormant-goal 池, 格式化为目标快照文本(v23 补帧上下文缺失: 让帧能察觉目标)。
+ *  返回如 "- [dormant] 60万字小说完本 / - [dormant] 数字生命孵化" 的清单。 */
+async function readGoalsSnapshot(poolPath: string): Promise<string> {
+  const target = expandHome(poolPath)
+  try {
+    const { readFile } = await import('node:fs/promises')
+    const raw = await readFile(target, 'utf8')
+    const goals: string[] = []
+    for (const line of raw.split('\n').filter(Boolean)) {
+      try {
+        const g = JSON.parse(line) as { title?: string; status?: string; triggerCount?: number }
+        if (g.title) {
+          goals.push(`- [${g.status ?? '?'}] ${g.title}${g.triggerCount ? ` (触发${g.triggerCount}次)` : ''}`)
+        }
+      } catch { /* skip */ }
+    }
+    return goals.length > 0 ? goals.join('\n') : '(目标池为空)'
+  } catch {
+    return '(目标池不可读)'
+  }
+}
 
 /** Minimal prediction settlement: find the oldest unsettled prediction in the
  * think-log and report a coarse outcome, so the pipeline's calibration loop
@@ -366,8 +393,10 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     // v18 自适应: 读上帧产出+连续增量计数, 决定全检/增量协议(升级触发器)。
     const frameCtx = await readLastFrameContext(config.thinkLogPath)
     const escalated = frameCtx.consecutiveIncremental >= MAX_INCREMENTAL_FRAMES
+    // v23 补上下文: 读目标池快照, 让帧察觉未完成目标。
+    const goals = await readGoalsSnapshot(config.goalsPoolPath)
     agent.followup(createUserMessage({
-      content: [{ type: 'text', text: buildFrameText(carrier, frameCtx.output, escalated ? MAX_INCREMENTAL_FRAMES : 0) }],
+      content: [{ type: 'text', text: buildFrameText(carrier, frameCtx.output, escalated ? MAX_INCREMENTAL_FRAMES : 0, goals) }],
       source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧旁路 #${frameNo}` },
     }))
     await agent.whenIdle()
@@ -536,8 +565,10 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       void readLastFrameContext(config.thinkLogPath).then(async (frameCtx) => {
         const escalated = frameCtx.consecutiveIncremental >= MAX_INCREMENTAL_FRAMES
         const mode = chooseFrameMode(frameCtx.output, escalated ? MAX_INCREMENTAL_FRAMES : 0)
+        // v23 补上下文: 读目标池快照, 让帧察觉未完成目标。
+        const goals = await readGoalsSnapshot(config.goalsPoolPath)
         const message = createUserMessage({
-          content: [{ type: 'text', text: buildFrameText(carrier, frameCtx.output, escalated ? MAX_INCREMENTAL_FRAMES : 0) }],
+          content: [{ type: 'text', text: buildFrameText(carrier, frameCtx.output, escalated ? MAX_INCREMENTAL_FRAMES : 0, goals) }],
           source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧 #${frames}` },
         })
         ctx.logger.info('[quiet-driver] wake #%d: direct followup to %s (真正空闲, %s)', frames, sessionId, mode)
