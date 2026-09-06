@@ -96,7 +96,12 @@ function frameHeader(carrier: CarrierIdentity, mode: 'full' | 'incremental', goa
     : '检查协议：增量（环境与上帧高度相似=熟悉域——只比对差异与异常，不重复盘点）'
   return [
     '【三问帧】(source: plugin/quiet-driver, form: epistemic-frame)',
-    '你正在做一次例行自我评估。这是旁路思考——请直接回答，不要执行额外任务。',
+    '你正在做一次例行自我评估。这是旁路思考。你有 bash 工具——需要具体信息时请自行查证，不要凭空推断。',
+    '可用资源（按需查证，不必全读）：',
+    '  · 目标池: ~/.dsh/cognitive-pipeline/dormant-goals.jsonl（含各目标的 status/notes/历史）',
+    '  · 我的经验: ~/.dsh/cognitive-pipeline/experiences.jsonl（我的过往经历）',
+    '  · 我的思考日志: ~/.dsh/cognitive-pipeline/quiet-driver-frames.jsonl（我过去的帧）',
+    '  · 设计文档: ~/.dsh/cognitive-pipeline/think-agenda-design-*.md（我的设计链）',
     '',
     '【载体身份】(v20 自我锚定——你运行在以下实例上，若与上次不同即经历载体迁移):',
     `  实例 PID: ${carrier.pid} | 启动: ${carrier.startedAt} | 主机: ${carrier.hostname}`,
@@ -239,9 +244,15 @@ async function readGoalsSnapshot(poolPath: string): Promise<string> {
     const goals: string[] = []
     for (const line of raw.split('\n').filter(Boolean)) {
       try {
-        const g = JSON.parse(line) as { title?: string; status?: string; triggerCount?: number }
+        const g = JSON.parse(line) as {
+          title?: string; status?: string; triggerCount?: number
+          resumeConditionMet?: boolean; pauseReason?: string
+        }
         if (g.title) {
-          goals.push(`- [${g.status ?? '?'}] ${g.title}${g.triggerCount ? ` (触发${g.triggerCount}次)` : ''}`)
+          // v25 P1: dormant 且解除条件已满足 → 标"可唤醒"(帧应具体判断该恢复)
+          const wakeable = g.status === 'dormant' && g.resumeConditionMet === true
+          const statusLabel = wakeable ? 'dormant→可唤醒' : (g.status ?? '?')
+          goals.push(`- [${statusLabel}] ${g.title}${g.triggerCount ? ` (触发${g.triggerCount}次)` : ''}${wakeable ? ` — 暂停理由已解除：${(g.pauseReason ?? '').slice(0, 40)}` : ''}`)
         }
       } catch { /* skip */ }
     }
@@ -421,10 +432,18 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       ctx.logger.warn('[quiet-driver] side-channel deps missing — skip')
       return
     }
+    // 挂 minimal preset(含 bash/str_replace_editor)让子会话能自取上下文。
+    const mountMinimal = async (agentCtx: Context): Promise<void> => {
+      const agentPresets = ctx.get('agentPresets') as { mount(c: Context, preset: string): Promise<void> } | undefined
+      if (agentPresets !== undefined) {
+        await agentPresets.mount(agentCtx, 'minimal')
+      }
+    }
     const handle = await agents.create({
       sessionId: SessionId(`quiet-frame-${randomUUID()}`),
       meta: { cwd: process.cwd(), origin: 'subagent' },
       agentOptions: { provider: selection.provider, model: selection.model },
+      setup: mountMinimal,
     })
     const agent = handle.agent
     // v18 自适应: 读上帧产出+连续增量计数, 决定全检/增量协议(升级触发器)。
