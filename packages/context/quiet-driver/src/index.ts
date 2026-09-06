@@ -251,6 +251,43 @@ async function readGoalsSnapshot(poolPath: string): Promise<string> {
   }
 }
 
+/** v24 目标回写: 若帧产出显示"推进了某目标"(进展措辞+目标关键词), 更新池 notes/status。
+ *  保守判定: 只在明确进展措辞时回写; 不确定不写(v8 反默认)。
+ *  只追加 notes + dormant→active, 不自动完成/降级(那些仍是有意识动作)。 */
+async function updateGoalOnProgress(poolPath: string, frameOutput: string): Promise<string | null> {
+  const target = expandHome(poolPath)
+  try {
+    const { readFile, writeFile } = await import('node:fs/promises')
+    const raw = await readFile(target, 'utf8')
+    const progressRe = /(?:已|已经|完成|落地|实现|推进到|达成|上线|修复)/.test(frameOutput)
+    if (!progressRe) return null
+    const goals: Array<Record<string, unknown>> = []
+    let updated: string | null = null
+    for (const line of raw.split('\n').filter(Boolean)) {
+      try {
+        const g = JSON.parse(line) as Record<string, unknown> & { title?: string; notes?: string[]; status?: string }
+        // 帧产出提到目标标题关键词 → 视为该目标有进展
+        if (g.title && frameOutput.includes(g.title.slice(0, 12))) {
+          const notes = Array.isArray(g.notes) ? g.notes : []
+          if (!notes.some((n: string) => n.includes(new Date().toISOString().slice(0, 10)))) {
+            notes.push(`${new Date().toISOString().slice(0, 10)}: 三问帧检测到推进——${frameOutput.slice(0, 80)}`)
+          }
+          g.notes = notes
+          if (g.status === 'dormant') g.status = 'active'  // 有推进的 dormant 目标 → active
+          updated = g.id as string
+        }
+        goals.push(g)
+      } catch { /* keep */ }
+    }
+    if (updated !== null) {
+      await writeFile(target, goals.map((g) => JSON.stringify(g)).join('\n') + '\n', 'utf8')
+    }
+    return updated
+  } catch {
+    return null
+  }
+}
+
 /** Minimal prediction settlement: find the oldest unsettled prediction in the
  * think-log and report a coarse outcome, so the pipeline's calibration loop
  * learns. The outcome is intentionally coarse — frame content correlation is
@@ -419,6 +456,15 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       ts: Date.now(), channel: 'sidecar', frameNo, reason,
       session: agent.session.id, output: text,
     })
+    // v24 目标回写: 若帧产出显示推进了某目标, 更新池 notes/status。
+    try {
+      const updatedGoal = await updateGoalOnProgress(config.goalsPoolPath, text)
+      if (updatedGoal !== null) {
+        ctx.logger.info('[quiet-driver] goal write-back: %s updated by frame #%d', updatedGoal, frameNo)
+      }
+    } catch (error: unknown) {
+      console.error('[quiet-driver] goal write-back failed:', error)
+    }
     // Record latest finding for pre-step injection back into the main session.
     latestFinding = {
       ts: Date.now(),
