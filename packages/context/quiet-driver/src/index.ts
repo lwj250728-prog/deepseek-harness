@@ -113,7 +113,7 @@ function buildFullFrameText(carrier: CarrierIdentity, goalsSnapshot?: string): s
   return frameHeader(carrier, 'full', goalsSnapshot)
     + [
       'Q1 环境（全检）：自上次检查以来，环境有什么变化？（引用具体对象；无变化须说明你查证了什么）',
-      'Q2 当下（全检）：当前议程中有什么到期或未处理的事？我的认知状态健康吗？（报可数事实）',
+      'Q2 当下（全检）：对照【当前目标池】——这些目标有推进吗？该唤醒或调整吗？另有到期/未处理的事吗？（报可数事实）',
       'Q3 预测：什么最可能出错？如果错了怎么发现（证伪信号）？',
       '',
       '回答请控制在 5 句以内，直接给结论。',
@@ -125,7 +125,7 @@ function buildIncrementalFrameText(carrier: CarrierIdentity, goalsSnapshot?: str
   return frameHeader(carrier, 'incremental', goalsSnapshot)
     + [
       'Q1 环境（增量）：与上帧相比，有什么不同？（重点：异常/新信号/与上帧断言不符处；无则答"与上帧一致"）',
-      'Q2 当下（增量）：上帧提到的到期项/风险，进展如何？（只查上帧涉及的，不重新盘点全部）',
+      'Q2 当下（增量）：上帧提到的到期项/风险进展如何？对照【当前目标池】——目标状态有无变化？（只查上帧涉及的+目标池）',
       'Q3 预测：上帧最可能出错的点，应验了吗？（证伪信号核对）',
       '',
       '回答请控制在 5 句以内，直接给结论。',
