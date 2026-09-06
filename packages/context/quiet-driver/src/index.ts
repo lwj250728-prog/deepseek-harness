@@ -127,6 +127,22 @@ function buildIncrementalFrameText(carrier: CarrierIdentity): string {
     ].join('\n')
 }
 
+/** 从帧产出中粗提取"未处理项"线索（v23 目标提议）。
+ *  启发式：匹配"未处理/待/未/到期/悬置/遗留"等后的名词短语。
+ *  返回候选短语列表——由主会话决定是否立目标（有意识动作，非自动）。 */
+function extractPendingItems(output: string): string[] {
+  const items: string[] = []
+    const re = /(?:未处理|待|未|到期|悬置|遗留|还[需要]|尚未)([^。；\n，,]{2,24})/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(output)) !== null) {
+    const phrase = m?.[1]?.trim() ?? ''
+    if (phrase.length >= 2 && !items.includes(phrase) && items.length < 5) {
+      items.push(phrase)
+    }
+  }
+  return items
+}
+
 /** 选择帧模式：读 think-log 最近 frame 产出，环境部分高度重复→增量，否则全检。
  *  v18 升级触发器：连续 incremental 达 MAX_INCREMENTAL 帧 → 强制 full（防渐变漏检）。 */
 function chooseFrameMode(prevOutput: string | undefined, consecutiveIncremental: number): 'full' | 'incremental' {
@@ -464,8 +480,13 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       const summary = latestFinding.anomaly
         ? `旁路三问 #${latestFinding.frameNo}：检测到风险信号`
         : `旁路三问 #${latestFinding.frameNo}：例行检查无异常`
+      // v23 目标提议: 提取本帧"未处理项", 提示主会话有意识决定是否立目标。
+      const pendingItems = extractPendingItems(latestFinding.output)
+      const goalProposal = pendingItems.length > 0
+        ? `\n\n【目标提议】(v23 有意识桥——由主会话裁决是否立目标)\n本帧提及未处理项：${pendingItems.join(' / ')}。若其跨帧反复出现且值得解决，请主会话考虑立为待办目标（create_goal）。`
+        : ''
       const text = latestFinding.anomaly
-        ? `【旁路三问发现】(来源: quiet-driver 旁路思考, 自动注回)\n旁路例行三问检测到值得注意的信号，供参考：\n${latestFinding.output}${noveltyNote}`
+        ? `【旁路三问发现】(来源: quiet-driver 旁路思考, 自动注回)\n旁路例行三问检测到值得注意的信号，供参考：\n${latestFinding.output}${noveltyNote}${goalProposal}`
         : `【旁路三问状态】旁路例行检查完成：无异常。${latestFinding.output.slice(0, 120)}`
       const block = createUserMessage({
         content: [{ type: 'text', text }],
