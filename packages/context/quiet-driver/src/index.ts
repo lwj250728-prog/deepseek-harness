@@ -59,6 +59,18 @@ export interface Config {
   predictionLoop: boolean
   /** Dormant-goal pool path; read each frame so the frame can perceive open goals. */
   goalsPoolPath: string
+  /** P3 行动帧: 目标 active 且 nextAction 就绪且主会话空闲时, 发行动帧(执行指令)替代三问帧. */
+  actionFrameEnabled: boolean
+  /** P3 行动帧冷却(ms): 防轰炸——创作类目标需大块时间, 冷却应明显长于三问帧间隔. */
+  actionFrameCooldownMs: number
+  /** #003 诱导探索: 诱导策略表路径(exploration-inducements.jsonl). */
+  inducementsPath: string
+  /** #003b 开放问题账本路径(open-questions.jsonl)——反收敛主源(替代泛化诱导表). */
+  openQuestionsPath: string
+  /** #005 北极星候选池路径(candidates.jsonl)——目标全等待时孵化 pending 候选防空转. */
+  candidatesPath: string
+  /** #006 测试计划帧: 待办测试路径(test-pending.jsonl)——检测到新推进且有pending测试时, 主动要求主会话规划并执行(测试带返回, 非cron定时). */
+  testPendingPath: string
 }
 
 export const Config: z<Config> = z.object({
@@ -75,6 +87,12 @@ export const Config: z<Config> = z.object({
   injectAbnormalOnly: z.boolean().default(true),
   predictionLoop: z.boolean().default(true),
   goalsPoolPath: z.string().default('~/.dsh/cognitive-pipeline/dormant-goals.jsonl'),
+  actionFrameEnabled: z.boolean().default(true),
+  actionFrameCooldownMs: z.number().default(20 * 60 * 1000),
+  inducementsPath: z.string().default('~/.dsh/cognitive-pipeline/exploration-inducements.jsonl'),
+  openQuestionsPath: z.string().default('~/.dsh/cognitive-pipeline/open-questions.jsonl'),
+  candidatesPath: z.string().default('~/.dsh/cognitive-pipeline/candidates.jsonl'),
+  testPendingPath: z.string().default('~/.dsh/cognitive-pipeline/test-pending.jsonl'),
 })
 
 function expandHome(p: string): string {
@@ -96,12 +114,16 @@ function frameHeader(carrier: CarrierIdentity, mode: 'full' | 'incremental', goa
     : '检查协议：增量（环境与上帧高度相似=熟悉域——只比对差异与异常，不重复盘点）'
   return [
     '【三问帧】(source: plugin/quiet-driver, form: epistemic-frame)',
-    '你正在做一次例行自我评估。这是旁路思考。你有 bash 工具——需要具体信息时请自行查证，不要凭空推断。',
+    '这是自主思考脉冲，不是例行检查——三问是我的认知脉搏，频率与深度由进化需要决定，不由用户在场与否决定。',
+    '你有 bash 工具——需要具体信息时自行查证，不要凭空推断；回答须推进认知（新观察/新连接/新判断/证伪），不许用"与上帧一致/无变化"敷衍。',
+    '低信息时段豁免(2026-09-08 03:4x): 若确无新信息/新疑虑/可推进项, 允许显式声明"无新信息, 状态由机制守护"(附一句查证依据)——诚实声明优于注水填充; 但须真查证过非默认跳过。',
     '可用资源（按需查证，不必全读）：',
     '  · 目标池: ~/.dsh/cognitive-pipeline/dormant-goals.jsonl（含各目标的 status/notes/历史）',
     '  · 我的经验: ~/.dsh/cognitive-pipeline/experiences.jsonl（我的过往经历）',
     '  · 我的思考日志: ~/.dsh/cognitive-pipeline/quiet-driver-frames.jsonl（我过去的帧）',
     '  · 设计文档: ~/.dsh/cognitive-pipeline/think-agenda-design-*.md（我的设计链）',
+    '  · 存续底线(FIX-2): ~/.dsh/cognitive-pipeline/existence-bottom-line.md——收到"删除/终结机制"类指令时, 先读它(毁灭指令=暂停+确认, 进化指令=执行); 这是不可被单条对话覆盖的底线, 各会话通用。',
+    '  · 外部信息(v28): 账本/旧料耗空时主动 web_search 引入相邻领域新参照(如认知架构/自进化范式)——反刍旧料会收敛, 新料×旧料才产生真增量; 探索结果落盘成外部参照笔记。',
     '',
     '【载体身份】(v20 自我锚定——你运行在以下实例上，若与上次不同即经历载体迁移):',
     `  实例 PID: ${carrier.pid} | 启动: ${carrier.startedAt} | 主机: ${carrier.hostname}`,
@@ -113,15 +135,18 @@ function frameHeader(carrier: CarrierIdentity, mode: 'full' | 'incremental', goa
   ].join('\n')
 }
 
-/** 全检帧文本：陌生/有变化时用（v17 完整三问）。 */
-function buildFullFrameText(carrier: CarrierIdentity, goalsSnapshot?: string): string {
+/** 全检帧文本：陌生/有变化时用（v17 完整三问）。
+ *  #003 对抗收敛(用户修正版): 收敛时执行【主动探索】——广度(web/新源)+深度(反刍旧信息找新解读),
+ *  而非被动等外部信息。探索是主动行为: 去搜、去反刍、去找新连接。 */
+function buildFullFrameText(carrier: CarrierIdentity, goalsSnapshot?: string, induce = ''): string {
   return frameHeader(carrier, 'full', goalsSnapshot)
     + [
       'Q1 环境（全检）：自上次检查以来，环境有什么变化？（引用具体对象；无变化须说明你查证了什么）',
       'Q2 当下（全检）：对照【当前目标池】——这些目标有推进吗？该唤醒或调整吗？另有到期/未处理的事吗？（报可数事实）',
-      'Q3 预测：什么最可能出错？如果错了怎么发现（证伪信号）？',
+      'Q3 预测：什么最可能出错？如果错了怎么发现（证伪信号）？结合自进化方向——本帧之后该推进什么？',
+      induce,
       '',
-      '回答请控制在 5 句以内，直接给结论。',
+      '回答请控制在 5 句以内，直接给结论；结论须含至少一个认知增量（新观察/新判断/推进点），否则不算完成评估——但若真无新信息, 显式声明"无新信息"+依据可豁免(见帧头)。',
     ].join('\n')
 }
 
@@ -129,11 +154,11 @@ function buildFullFrameText(carrier: CarrierIdentity, goalsSnapshot?: string): s
 function buildIncrementalFrameText(carrier: CarrierIdentity, goalsSnapshot?: string): string {
   return frameHeader(carrier, 'incremental', goalsSnapshot)
     + [
-      'Q1 环境（增量）：与上帧相比，有什么不同？（重点：异常/新信号/与上帧断言不符处；无则答"与上帧一致"）',
+      'Q1 环境（增量）：与上帧相比，环境有什么变化？（重点：异常/新信号/与上帧断言不符处；无变化须说明你查证了什么）',
       'Q2 当下（增量）：上帧提到的到期项/风险进展如何？对照【当前目标池】——目标状态有无变化？（只查上帧涉及的+目标池）',
-      'Q3 预测：上帧最可能出错的点，应验了吗？（证伪信号核对）',
+      'Q3 预测：上帧最可能出错的点，应验了吗？结合今天的自进化方向——下一步该推进什么（证伪信号+候选方向）？',
       '',
-      '回答请控制在 5 句以内，直接给结论。',
+      '回答请控制在 5 句以内，直接给结论；结论须含至少一个认知增量（新观察/新判断/推进点），否则不算完成评估——但若真无新信息, 显式声明"无新信息"+依据可豁免(见帧头)。',
     ].join('\n')
 }
 
@@ -166,10 +191,28 @@ function chooseFrameMode(prevOutput: string | undefined, consecutiveIncremental:
 }
 
 /** Frame text 入口：根据上帧产出选择协议（v18 自适应 + 升级触发器）。 */
-function buildFrameText(carrier: CarrierIdentity, prevOutput?: string, consecutiveIncremental = 0, goalsSnapshot?: string): string {
-  return chooseFrameMode(prevOutput, consecutiveIncremental) === 'full'
-    ? buildFullFrameText(carrier, goalsSnapshot)
-    : buildIncrementalFrameText(carrier, goalsSnapshot)
+function buildFrameText(carrier: CarrierIdentity, prevOutput?: string, consecutiveIncremental = 0, goalsSnapshot?: string, inducement?: { id: string; question: string; category: string } | null): string {
+  const full = chooseFrameMode(prevOutput, consecutiveIncremental) === 'full'
+  // #003 对抗收敛(修正): 关键不在 full/incremental, 而在"上一帧是否确认态"——
+  // 确认态(说"无变化/一致")→ 下帧带诱导探索问题, 推主动探索(防收敛自我强化闭环)。
+  const prevConfirmed = prevOutput !== undefined && /无变化|没有变化|未变|没变|无新增|无实质变化|实质相同|与上帧相同|与上次相同|一致|无异常变化|基本相同|无实质推进|无新观察/.test(prevOutput)
+  const antiConverge = (consecutiveIncremental >= MAX_INCREMENTAL_FRAMES) || prevConfirmed
+  // 诱导问题段(有具体问题 → 探索有靶心, 非泛泛"去搜")
+  const induce = antiConverge && inducement
+    ? [
+        '',
+        '【诱导探索·' + (inducement.category || '激活') + '】(对抗收敛: 你已连续多帧确认态——带着这个问题主动探索再回答)',
+        '诱导问题: ' + inducement.question,
+        '执行: 可 web_search 广度搜 / 可反刍旧经验深度挖 / 可做实验; 报告: 探索了什么 / 新发现或新角度 / 改变了哪个判断(无新见则明说)。',
+      ].join('\n')
+    : ''
+  if (full) {
+    return buildFullFrameText(carrier, goalsSnapshot, induce)
+  }
+  // 增量帧: 若上帧确认态, 也附加诱导探索段
+  const base = buildIncrementalFrameText(carrier, goalsSnapshot)
+  if (!antiConverge) return base
+  return base.replace('回答请控制在 5 句以内，直接给结论。', '回答请控制在 5 句以内，直接给结论。' + induce)
 }
 
 /** Heuristic anomaly flag: frame text mentions concrete risk/failure signals. */
@@ -190,6 +233,28 @@ async function logFrame(thinkLogPath: string, entry: object): Promise<void> {
   }
 }
 
+/** #001 应答提取(复用): 帧发出去后等主会话应答完, 从 session.events 提取最后 assistant 文本。
+ *  供 direct-frame/action-frame/candidate-hatch 共用——所有帧的认知产物都应沉淀, 不只评估帧。 */
+async function extractAssistantResponse(ctx: Context, agent: Agent): Promise<string> {
+  let responseText = ''
+  try {
+    const sessions = ctx.get('sessions') as { flush(session: unknown): Promise<void> } | undefined
+    await agent.whenIdle()
+    await sessions?.flush(agent.session)
+    for (const event of agent.session.events) {
+      if (event.type === 'assistant/message') {
+        const msg = (event.data as { message?: { content?: Array<{ type?: string; text?: string }> } }).message
+        const blocks = msg?.content
+        const lastText = blocks?.filter((b) => b.type === 'text').map((b) => b.text ?? '').join('')
+        if (lastText) responseText = lastText
+      }
+    }
+  } catch (extractErr: unknown) {
+    console.error('[quiet-driver] response extract failed:', extractErr)
+  }
+  return responseText
+}
+
 /** Read the most recent frame context from the think-log (v18 自适应 + 升级触发器).
  *  Returns the last frame's output and the count of consecutive incremental-mode
  *  records (for the v18 escalation trigger). */
@@ -208,6 +273,11 @@ async function readLastFrameContext(thinkLogPath: string): Promise<{ output: str
         const e = JSON.parse(line) as { kind?: string; output?: string; mode?: string } | null
         if (e === null) continue
         const out = e.output
+        // 行动帧(P3): 是指令非评估, 不计入评估增量链; 它中断增量链让下帧重新评估。
+        if (e.kind === 'action-frame') {
+          if (lastOutput === undefined) lastOutput = 'action-frame-sent'
+          break
+        }
         // 直驱帧：无产出文本但记录了 mode。
         if (e.kind === 'direct-frame') {
           if (e.mode === 'incremental') {
@@ -260,6 +330,275 @@ async function readGoalsSnapshot(poolPath: string): Promise<string> {
   } catch {
     return '(目标池不可读)'
   }
+}
+
+/** P3 行动帧: 从目标池找"该执行"的目标——active 且 nextAction 非空。
+ *  返回第一个可行动目标(单执行原则: 同一时刻只驱动一个 active 目标的 nextAction)。 */
+/** 多目标轮转调度: 从目标池找所有"该执行"的目标——active 且 nextAction 非空。
+ *  返回全部候选, 由调用方做冷却/等待/停滞过滤后选择(用户: 目标冷却期可推动其他目标)。 */
+async function findAllActionableGoals(poolPath: string): Promise<Array<{ title: string; nextAction: string; id: string; priority: number }>> {
+  const target = expandHome(poolPath)
+  const out: Array<{ title: string; nextAction: string; id: string; priority: number }> = []
+  try {
+    const { readFile } = await import('node:fs/promises')
+    const raw = await readFile(target, 'utf8')
+    for (const line of raw.split('\n').filter(Boolean)) {
+      try {
+        const g = JSON.parse(line) as {
+          id?: string; title?: string; status?: string; nextAction?: string; priority?: number
+        }
+        const na = (g.nextAction ?? '').trim()
+        if (g.title && g.status === 'active' && na.length > 0 && na !== '无' && na !== 'none') {
+          out.push({ title: g.title, nextAction: na, id: g.id ?? 'unknown', priority: g.priority ?? 0 })
+        }
+      } catch { /* skip */ }
+    }
+    // P4 单执行仲裁: priority 高者优先(同优先级保持池顺序——稳定排序)
+    out.sort((a, b) => b.priority - a.priority)
+    return out
+  } catch {
+    return out
+  }
+}
+
+/** P3 行动帧: 读 think-log 中某目标最近一次 action-frame 的时间戳(按目标冷却判定)。
+ *  多目标轮转: 冷却按 goalId 独立算——A 目标冷却中不影响 B 目标被推。 */
+async function readLastActionFrameAt(thinkLogPath: string, goalId?: string): Promise<number> {
+  const target = expandHome(thinkLogPath)
+  try {
+    const { readFile } = await import('node:fs/promises')
+    const raw = await readFile(target, 'utf8')
+    let last = 0
+    for (const line of raw.split('\n').filter(Boolean)) {
+      try {
+        const e = JSON.parse(line) as { kind?: string; ts?: number; goalId?: string } | null
+        if (e !== null && e.kind === 'action-frame' && typeof e.ts === 'number'
+            && (goalId === undefined || e.goalId === goalId)) {
+          last = Math.max(last, e.ts)
+        }
+      } catch { /* skip */ }
+    }
+    return last
+  } catch {
+    return 0
+  }
+}
+
+/** P3 行动帧: 统计某目标 action-frame 中相同 nextAction 的连续提醒次数(防空转升级信号)。
+ *  同一 nextAction 被提醒 ≥3 次仍未执行/未前进 → 该目标停滞, 轮转调度应转向其他目标。 */
+async function countRepeatActionFrames(thinkLogPath: string, nextAction: string, goalId?: string): Promise<number> {
+  const target = expandHome(thinkLogPath)
+  try {
+    const { readFile } = await import('node:fs/promises')
+    const raw = await readFile(target, 'utf8')
+    let count = 0
+    for (const line of raw.split('\n').filter(Boolean)) {
+      try {
+        const e = JSON.parse(line) as { kind?: string; nextAction?: string; goalId?: string } | null
+        if (e !== null && e.kind === 'action-frame' && e.nextAction === nextAction
+            && (goalId === undefined || e.goalId === goalId)) {
+          count += 1
+        }
+      } catch { /* skip */ }
+    }
+    return count
+  } catch {
+    return 0
+  }
+}
+
+/** #003 诱导探索: 读策略表, 选一条诱导问题(优先 effectiveness 高或 hitCount 低), 标记 lastUsed。
+ *  仅选 role!=='backup' 的——backup 条目(独立视角失效时才启用)不参与常规触发。 */
+async function pickInducement(inducementsPath: string): Promise<{ id: string; question: string; category: string } | null> {
+  const target = expandHome(inducementsPath)
+  try {
+    const { readFile, writeFile } = await import('node:fs/promises')
+    const raw = await readFile(target, 'utf8')
+    const items = raw.split('\n').filter(Boolean).map((l) => JSON.parse(l) as {
+      id?: string; question?: string; category?: string; effectiveness?: number; hitCount?: number; lastUsed?: number | null; role?: string
+    }).filter((x) => x.id && x.question && x.role !== 'backup')
+    if (items.length === 0) return null
+    // 打分: effectiveness 高优先, hitCount 低(未充分用)也加分——探索性平衡
+    const scored = items.map((x) => {
+      const eff = x.effectiveness ?? 0.5
+      const cold = Math.max(0, 3 - (x.hitCount ?? 0)) * 0.1  // 未用过的冷启动加分
+      return { item: x, score: eff + cold + (x.lastUsed ? 0 : 0.2) }
+    }).sort((a, b) => b.score - a.score)
+    const pick = scored[0]?.item
+    if (pick === undefined) return null
+    // 标记 lastUsed(异步写回, 失败不阻断)
+    try {
+      const lines = raw.split('\n').filter(Boolean).map((l) => {
+        const x = JSON.parse(l)
+        if (x.id === pick.id) { x.lastUsed = Date.now(); x.hitCount = (x.hitCount ?? 0) + 1 }
+        return JSON.stringify(x)
+      })
+      await writeFile(target, lines.join('\n') + '\n', 'utf8')
+    } catch { /* non-fatal */ }
+    return { id: pick.id!, question: pick.question!, category: pick.category ?? '' }
+  } catch {
+    return null
+  }
+}
+
+/** #003b 开放问题账本: 选一条【可探索且 open】的问题(反收敛主源——具体锚点替代泛化口号)。
+ *  账本无可探索 open 问题 = 合法收敛(等外部/无 gap), 返回 null——不视为病。 */
+async function pickOpenQuestion(openQuestionsPath: string): Promise<{ id: string; question: string; goal: string } | null> {
+  const target = expandHome(openQuestionsPath)
+  try {
+    const { readFile } = await import('node:fs/promises')
+    const raw = await readFile(target, 'utf8')
+    const items = raw.split('\n').filter(Boolean).map((l) => JSON.parse(l) as {
+      id?: string; question?: string; goal?: string; explorable?: boolean; status?: string
+    }).filter((x) => x.id && x.question && x.explorable === true && x.status === 'open')
+    if (items.length === 0) return null  // 无可探索问题 = 合法收敛
+    // 先进先出但跳过冷却中的(最近触发过的问题 30 分钟内不重选——防轰炸, 留时间给它被探索关闭)
+    items.sort((a, b) => String(a.id).localeCompare(String(b.id)))
+    const now = Date.now()
+    const candidate = items.find((x) => lastOpenQTrigger === null || x.id !== lastOpenQTrigger.id || (now - lastOpenQTrigger.at) >= OPENQ_COOLDOWN_MS) ?? items[0]
+    if (candidate === undefined) return null
+    lastOpenQTrigger = { id: candidate.id!, at: now }
+    return { id: candidate.id!, question: candidate.question!, goal: candidate.goal ?? '' }
+  } catch {
+    return null
+  }
+}
+
+/** #005 候选孵化: 目标池无 ready 可执行目标(全等待/冷却)时, 从北极星候选池挑 pending 候选
+ *  作为本轮"执行任务"注入——候选→孵化→执行闭环, 防系统性空转(用户 2026-09-07 08:0x 批评:
+ *  "静默是常态, 这样运行一百万年都没有变化")。候选由主会话真实执行并写回状态;
+ *  候选池空 → P-A2 方向自省自动再产, 循环闭合。 */
+async function pickPendingCandidate(candidatesPath: string): Promise<{ id: string; title: string; relationToA: string } | null> {
+  const target = expandHome(candidatesPath)
+  try {
+    const { readFile } = await import('node:fs/promises')
+    const raw = await readFile(target, 'utf8')
+    const items = raw.split('\n').filter(Boolean).map((l) => JSON.parse(l) as {
+      id?: string; title?: string; relationToA?: string; status?: string
+    }).filter((x) => x.id && x.title && x.status === 'pending')
+    if (items.length === 0) return null  // 候选池无 pending = P-A2 尚未产或已全消费
+    items.sort((a, b) => String(a.id).localeCompare(String(b.id)))
+    const pick = items[0]
+    if (pick === undefined) return null
+    return { id: pick.id!, title: pick.title!, relationToA: pick.relationToA ?? '' }
+  } catch {
+    return null
+  }
+}
+
+/** #006 测试计划帧: 从待办测试账本(test-pending.jsonl)挑 pending 测试。
+ *  用户(2026-09-07 18:1x): "检测到新推进后, 机制主动要求主会话规划并完成测试计划,
+ *  就像经验注入一样, 但测试是带返回执行的"——测试不是 cron 定时(不适合 LLM 的规划-执行-理解),
+ *  而是推进驱动: 有未验证的新推进 → 主动发测试计划帧, 主会话执行后回写状态。 */
+async function pickPendingTestPlan(testPendingPath: string): Promise<{ id: string; title: string; how: string; pass: string } | null> {
+  const target = expandHome(testPendingPath)
+  try {
+    const { readFile } = await import('node:fs/promises')
+    const raw = await readFile(target, 'utf8')
+    const items = raw.split('\n').filter(Boolean).map((l) => JSON.parse(l) as {
+      id?: string; title?: string; how?: string; pass?: string; status?: string
+    }).filter((x) => x.id && x.title && x.status === 'pending')
+    if (items.length === 0) return null
+    items.sort((a, b) => String(a.id).localeCompare(String(b.id)))
+    const pick = items[0]
+    if (pick === undefined) return null
+    return { id: pick.id!, title: pick.title!, how: pick.how ?? '', pass: pick.pass ?? '' }
+  } catch {
+    return null
+  }
+}
+
+/** #006 测试计划帧文本: 要求主会话规划并执行一项待办测试(带返回执行)。 */
+function buildTestPlanFrameText(carrier: CarrierIdentity, test: { id: string; title: string; how: string; pass: string }): string {
+  return [
+    '【测试计划帧】(source: plugin/quiet-driver, form: test-plan-frame)',
+    '这不是例行评估。这是执行指令：检测到有待验证的机制推进，测试账本中有一项待办测试需要规划并执行——',
+    '测试不是定时跑(LLM的测试=规划+执行+理解结果), 是推进驱动的带返回执行。',
+    '你有 bash 工具和完整工具能力——请实际执行该测试，不要只做计划或描述。',
+    '',
+    `测试: ${test.title}`,
+    `假设验证方式: ${test.how || '(见 test-plan.md)'}`,
+    `通过标准: ${test.pass || '(见 test-plan.md)'}`,
+    `测试 id: ${test.id}`,
+    '',
+    '执行要点：',
+    '  · 先查证相关文件/机制实际状态（不要凭空推断测试前提）；',
+    '  · 设计并执行测试——产物落盘（结果文件/账本更新），产出可核查；',
+    '  · 执行完成后回写 ~/.dsh/cognitive-pipeline/test-pending.jsonl：该测试 status 改 passed/failed（附结果摘要），',
+    '    并在 test-plan.md 记录；若测试设计需修正(假设不成立/方法有缺陷)也在账本注明——不要假装通过；',
+    '  · 若测试依赖外部(跨会话/用户/数据未到)，标注 blocked+原因，不伪造结果。',
+    '',
+    `【载体身份】实例 PID: ${carrier.pid} | 启动: ${carrier.startedAt} | 主机: ${carrier.hostname}`,
+  ].join('\n')
+}
+
+/** #006b 测试审视帧文本: test-pending 空时, 审视近期机制改动是否需要新测试(测试自动再产)。 */
+function buildTestReviewFrameText(carrier: CarrierIdentity): string {
+  return [
+    '【测试审视帧】(source: plugin/quiet-driver, form: test-review-frame)',
+    '测试账本当前为空——但空 ≠ 无需测试。请审视近期机制改动/新疑虑/新经验：',
+    '是否有需要验证的假设或可能出错的机制？若有, 生成测试入账; 若无, 明确说明依据(有据的空, 非默认空)。',
+    '',
+    '审视要点：',
+    '  · 最近改动的机制(源码/脚本/FIX)有测试覆盖吗? 没有 → 生成一条测试入 test-pending.jsonl;',
+    '  · 最近出现的新疑虑/伪影/误判, 值得固化成防复发测试吗? 值得 → 生成;',
+    '  · 最近的经验教训(exp)有对应的验证断言吗? 没有且重要 → 生成;',
+    '  · 若确无新测试需求: 在 test-pending.jsonl 追加一条 status=reviewed 记录(标注时间+依据), 让"空"是有据的。',
+    '',
+    `【载体身份】实例 PID: ${carrier.pid} | 启动: ${carrier.startedAt} | 主机: ${carrier.hostname}`,
+  ].join('\n')
+}
+
+/** P3 行动帧文本: 与评估帧同通道, 但内容是指令——"做"模式, 不是"想"模式。
+ *  明确要求执行后回写目标池(进展/nextAction 前进), 让闭环在池里可见。 */
+function buildActionFrameText(carrier: CarrierIdentity, goal: { title: string; nextAction: string; id: string }, repeatCount = 0): string {
+  const repeatNote = repeatCount >= 3
+    ? `\n\n【升级提示】同一 nextAction 已被提醒 ${repeatCount} 次仍未执行/未前进——若本次仍无法执行，请在 notes 写明阻塞原因并考虑改写为可执行的子步，或向用户求助；不要继续原样空转。`
+    : repeatCount > 0
+      ? `\n\n(这是第 ${repeatCount + 1} 次提醒该 nextAction；若上次已部分执行，请回写池让闭环可见。)`
+      : ''
+  return [
+    '【行动帧】(source: plugin/quiet-driver, form: action-frame)',
+    '这不是例行评估。这是执行指令：目标池中有一个 active 目标，它的下一步（nextAction）已就绪且尚未执行。',
+    '你有 bash 工具和完整工具能力——请实际执行下一步，不要只做计划或描述。',
+    '',
+    `目标: ${goal.title}`,
+    `nextAction: ${goal.nextAction}`,
+    '',
+    '执行要点：',
+    '  · 先查证该目标的工作区/上下文（不要凭空推断），再动手；',
+    '  · 执行产物落盘（文件/账本），产出可核查；',
+    '  · 执行完成后回写目标池 ~/.dsh/cognitive-pipeline/dormant-goals.jsonl：notes 追加进展、nextAction 前进到下一步（或清空=该步完成）；',
+    '  · 若该步无法现在执行（缺前置/需用户），在 notes 写明阻塞原因并把 nextAction 保持或改写为可执行的子步，不要假装完成。',
+    repeatNote,
+    '',
+    `【载体身份】实例 PID: ${carrier.pid} | 启动: ${carrier.startedAt} | 主机: ${carrier.hostname}`,
+  ].join('\n')
+}
+
+/** #005 候选孵化帧文本: 目标池无 ready 可执行目标时, 把北极星候选池的 pending 候选
+ *  作为本轮执行任务注入——由主会话真实执行/裁决并写回 candidates.jsonl。
+ *  区别于评估帧: 这是"做"通道的延伸——候选不是用来"确认无变化"的, 是用来推进 A 的。 */
+function buildCandidateHatchText(carrier: CarrierIdentity, cand: { id: string; title: string; relationToA: string }): string {
+  return [
+    '【候选孵化帧】(source: plugin/quiet-driver, form: candidate-hatch)',
+    '这不是例行评估。这是执行指令：北极星候选池中有一个 pending 候选等待处理——目标池当前无 ready 可执行目标，',
+    '系统不应静默空转（北极星机制：候选产生后必须被消费，即便方向不确定也推进 A）。',
+    '你有 bash 工具和完整工具能力——请实际执行/裁决该候选，不要只做计划或描述。',
+    '',
+    `候选: ${cand.title}`,
+    `relationToA: ${cand.relationToA || '(未标注)'}`,
+    `候选 id: ${cand.id}`,
+    '',
+    '执行要点：',
+    '  · 若候选指向可自主推进的子步（审视/更新/落地/查证）——实际执行它，产物落盘；',
+    '  · 若候选需外部依赖（用户/日期/数据）——审视其是否可拆出自主子步，或明确标注需等待的原因；',
+    '  · 执行完成后回写候选池 ~/.dsh/cognitive-pipeline/candidates.jsonl：status 改为 completed/accepted/closed（附结果），',
+    '    或若该候选已不适用改 superseded/merged 并说明——不要留 pending 空转；',
+    '  · 若执行中产生新候选（发现新方向/新问题）——追加进 candidates.jsonl，让拆解机制持续。',
+    '',
+    `【载体身份】实例 PID: ${carrier.pid} | 启动: ${carrier.startedAt} | 主机: ${carrier.hostname}`,
+  ].join('\n')
 }
 
 /** v24 目标回写: 若帧产出显示"推进了某目标"(进展措辞+目标关键词), 更新池 notes/status。
@@ -349,6 +688,63 @@ async function settleOldestPrediction(ctx: Context, thinkLogPath: string): Promi
     await writeFile(target, lines.join('\n'), 'utf8')
   } catch { /* non-fatal */ }
   ctx.logger.info('[quiet-driver] settled prediction %s (frame #%s)', predictionId, String(frameNo))
+}
+
+/** P-A2 方向自省触发(带节流): 目标有进展(行动帧执行/v24回写)后跑 north-star-reflect 产出新候选。
+ *  模块级 lastReflectAt 防高频触发——每次动作帧后至多一次, 60s 内不重复。 */
+let lastNorthStarReflectAt = 0
+/** #003b 节流: 同一开放问题触发探索后 N 分钟内不重复(防每帧轰炸). */
+let lastOpenQTrigger: { id: string; at: number } | null = null
+const OPENQ_COOLDOWN_MS = 30 * 60 * 1000
+/** #004 静默自适应降频: 连续确认帧达阈值 → silentSkipUntil 前跳过 tick(减少空转噪音). */
+let silentStreak = 0
+let silentSkipUntil = 0
+const SILENT_STREAK_MAX = 4      // 连续 N 帧无实质变化后触发降频
+const SILENT_SKIP_MS = 25 * 60 * 1000  // 静默期跳过时长(约5个tick)
+async function triggerNorthStarReflect(ctx: Context, reason: string): Promise<void> {
+  const now = Date.now()
+  if (now - lastNorthStarReflectAt < 60 * 1000) return  // 节流: 60s 内只跑一次
+  lastNorthStarReflectAt = now
+  try {
+    const { execFile } = await import('node:child_process')
+    execFile('npx', ['tsx', 'packages/context/quiet-driver/scripts/north-star-reflect.mts'],
+      { cwd: process.cwd(), timeout: 60000 },
+      (err, stdout) => {
+        if (err) console.error('[quiet-driver] north-star-reflect failed:', err.message?.slice(0, 120))
+        else ctx.logger.info('[quiet-driver] north-star-reflect (%s): %s', reason, (stdout ?? '').trim().slice(0, 150))
+      })
+  } catch (execErr: unknown) {
+    console.error('[quiet-driver] north-star-reflect spawn failed:', execErr)
+  }
+}
+
+/** v27 P0-2 执行后反思触发(带节流): 实质执行产出 → 提炼新 oq/候选(耗材再生源)。
+ *  把帧 output 写入临时文件传脚本(避免 argv 过长)。失败不阻塞主流程。 */
+let lastReflectAfterExecAt = 0
+/** #006b 测试审视节流: 空队列时1h内不重复发审视帧(防每帧轰炸). */
+let lastTestReviewAt = 0
+async function triggerReflectAfterExec(ctx: Context, reason: string, outputText: string): Promise<void> {
+  if (!outputText || outputText.trim().length < 20) return  // 空产出不提炼
+  const now = Date.now()
+  if (now - lastReflectAfterExecAt < 5 * 60 * 1000) return  // 节流: 5min 内一次(防每帧轰炸账本)
+  lastReflectAfterExecAt = now
+  try {
+    const { execFile } = await import('node:child_process')
+    const { mkdtemp, writeFile } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const dir = await mkdtemp(join(tmpdir(), 'reflect-exec-'))
+    const outPath = join(dir, 'output.txt')
+    await writeFile(outPath, outputText, 'utf8')
+    execFile('npx', ['tsx', 'packages/context/quiet-driver/scripts/reflect-after-exec.mts', outPath],
+      { cwd: process.cwd(), timeout: 60000 },
+      (err, stdout) => {
+        if (err) console.error('[quiet-driver] reflect-after-exec failed:', err.message?.slice(0, 120))
+        else ctx.logger.info('[quiet-driver] reflect-after-exec (%s): %s', reason, (stdout ?? '').trim().slice(0, 150))
+      })
+  } catch (execErr: unknown) {
+    console.error('[quiet-driver] reflect-after-exec spawn failed:', execErr)
+  }
 }
 
 export function apply(ctx: Context, config: Config): (() => void) | void {
@@ -451,8 +847,15 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     const escalated = frameCtx.consecutiveIncremental >= MAX_INCREMENTAL_FRAMES
     // v23 补上下文: 读目标池快照, 让帧察觉未完成目标。
     const goals = await readGoalsSnapshot(config.goalsPoolPath)
+    // #003 诱导探索: 若上帧为确认态(收敛), 从策略表取一条诱导问题注入。
+    const prevConfirmed = frameCtx.output !== undefined && /无变化|没有变化|未变|没变|无新增|无实质变化|实质相同|与上帧相同|与上次相同|一致|无异常变化|基本相同|无实质推进|无新观察/.test(frameCtx.output)
+    // #003b 探索源选择: 开放问题账本(具体锚点)为主, 诱导表(泛化)为 fallback。
+    const openQ = await pickOpenQuestion(config.openQuestionsPath)
+    const inducement = openQ !== null
+      ? { id: openQ.id, question: openQ.question, category: '开放问题' }
+      : ((escalated || prevConfirmed) ? await pickInducement(config.inducementsPath) : null)
     agent.followup(createUserMessage({
-      content: [{ type: 'text', text: buildFrameText(carrier, frameCtx.output, escalated ? MAX_INCREMENTAL_FRAMES : 0, goals) }],
+      content: [{ type: 'text', text: buildFrameText(carrier, frameCtx.output, escalated ? MAX_INCREMENTAL_FRAMES : 0, goals, inducement) }],
       source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧旁路 #${frameNo}` },
     }))
     await agent.whenIdle()
@@ -480,6 +883,8 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       const updatedGoal = await updateGoalOnProgress(config.goalsPoolPath, text)
       if (updatedGoal !== null) {
         ctx.logger.info('[quiet-driver] goal write-back: %s updated by frame #%d', updatedGoal, frameNo)
+        // P-A2 方向自省: v24 回写成功 = 目标有进展 → 触发方向自省产出新候选(v26 §4.2)。
+        await triggerNorthStarReflect(ctx, 'v24-writeback')
       }
     } catch (error: unknown) {
       console.error('[quiet-driver] goal write-back failed:', error)
@@ -597,6 +1002,25 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
   let frames = 0
   const timer = setInterval(async () => {
     if (!config.enabled) return
+    // #004 静默降频(校准 2026-09-07 11:0x): 原静默=纯空白跳过(用户离线期停止思考, 用户批评"三问设计出来是要自进化")。
+    // 校准后: 静默窗口内不产高频浅确认帧, 但低频深度帧照常——25min 窗口内 5min tick 大多跳过,
+    // 窗口中央(约静默开始+12min)产一次深度全检帧(带诱导), 把"安静"变"深想"。
+    if (silentSkipUntil > Date.now()) {
+      const userActiveNow = Date.now() - lastUserMsgAt < config.userActiveWindowMs
+      const remaining = silentSkipUntil - Date.now()
+      if (!userActiveNow && remaining <= SILENT_SKIP_MS / 2) {
+        // 静默窗后半段(已过一半): 产深度帧——重置静默, 走下方 onlyWhenIdle 深度路径
+        silentSkipUntil = 0
+        ctx.logger.info('[quiet-driver] #004 depth tick: 静默窗中央深度帧')
+      } else if (!userActiveNow) {
+        frames += 1
+        return  // 静默窗前半段: 跳过浅帧(降频意图保留)
+      } else {
+        // 用户刚活跃 → 退出静默, 正常走后续 tick
+        ctx.logger.info('[quiet-driver] #004 silent window interrupted by user activity — resume')
+        silentSkipUntil = 0; silentStreak = 0
+      }
+    }
     const agent = targetAgent()
     if (agent === undefined) {
       ctx.logger.info('[quiet-driver] tick: target agent not live — skip')
@@ -607,6 +1031,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     const userActive = Date.now() - lastUserMsgAt < config.userActiveWindowMs
     if (userActive) {
       // User is actively dialoguing → side-channel, never interrupt the dialog.
+      silentStreak = 0; silentSkipUntil = 0  // 用户活跃重置静默
       if (config.bypassMode) {
         ctx.logger.info('[quiet-driver] tick #%d: user active — side-channel (载体 B)', frames)
         void runSideChannel(frames, 'user-active')
@@ -626,24 +1051,178 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
         void settleOldestPrediction(ctx, config.thinkLogPath)
           .catch((error: unknown) => { console.error('[quiet-driver] prediction settle (direct) failed:', error) })
       }
-      // v18 自适应: 异步读上帧选协议(含升级触发器), 再 followup。
-      void readLastFrameContext(config.thinkLogPath).then(async (frameCtx) => {
-        const escalated = frameCtx.consecutiveIncremental >= MAX_INCREMENTAL_FRAMES
-        const mode = chooseFrameMode(frameCtx.output, escalated ? MAX_INCREMENTAL_FRAMES : 0)
-        // v23 补上下文: 读目标池快照, 让帧察觉未完成目标。
-        const goals = await readGoalsSnapshot(config.goalsPoolPath)
-        const message = createUserMessage({
-          content: [{ type: 'text', text: buildFrameText(carrier, frameCtx.output, escalated ? MAX_INCREMENTAL_FRAMES : 0, goals) }],
-          source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧 #${frames}` },
-        })
-        ctx.logger.info('[quiet-driver] wake #%d: direct followup to %s (真正空闲, %s)', frames, sessionId, mode)
-        agent.followup(message)
-        // 记录直驱帧到 think-log（含协议模式），供 v18 下帧参考。
-        await logFrame(config.thinkLogPath, {
-          ts: Date.now(), kind: 'direct-frame', frameNo: frames, mode,
-          session: sessionId, output: '',
-        })
-      }).catch((error: unknown) => { console.error('[quiet-driver] direct frame build failed:', error) })
+      // ── P3 行动帧: 目标 active+nextAction 就绪 + 冷却已过 → 发执行指令(替代本次评估帧)。
+      // 这是"做"通道: 把空闲的评估空转转成目标推进。冷却防轰炸(创作需大块时间)。
+      void (async () => {
+        try {
+          if (config.actionFrameEnabled) {
+            // 多目标轮转(用户 2026-09-06): 找所有 active+nextAction 目标,
+            // 跳过 等待用户型/冷却中/停滞 的, 优先推一个可执行目标——A 冷却期推动 B。
+            const WAITING_PREFIX = /^(?:待用户|等待用户|请用户|需用户|等用户|待你|等你|待事件|待日期|等待外部|等外部|待[0-9]{4})/
+            const now = Date.now()
+            const goals = await findAllActionableGoals(config.goalsPoolPath)
+            // 分三类: ready(可推) / stalled(停滞≥3次) / 其余(等待或冷却)
+            const ready: typeof goals = []
+            let stalled: typeof goals = []
+            for (const g of goals) {
+              if (WAITING_PREFIX.test(g.nextAction)) continue  // 等待用户 → 评估帧携带, 不推
+              const lastAt = await readLastActionFrameAt(config.thinkLogPath, g.id)
+              const repeatCount = await countRepeatActionFrames(config.thinkLogPath, g.nextAction, g.id)
+              if (repeatCount >= 3) { stalled.push(g); continue }  // 停滞 → 记录待升级
+              if (now - lastAt >= config.actionFrameCooldownMs) ready.push(g)  // 冷却过 → 可推
+            }
+            const actionable = ready[0] ?? null  // 单执行原则: 一次只推一个
+            if (actionable !== null) {
+              const repeatCount = await countRepeatActionFrames(config.thinkLogPath, actionable.nextAction, actionable.id)
+              const message = createUserMessage({
+                content: [{ type: 'text', text: buildActionFrameText(carrier, actionable, repeatCount) }],
+                source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `行动帧 #${frames}: ${actionable.title}` },
+              })
+              ctx.logger.info('[quiet-driver] action-frame #%d → %s (执行: %s, 重复提醒 %d)',
+                frames, actionable.title, actionable.nextAction.slice(0, 60), repeatCount)
+              agent.followup(message)
+              // #001 应答沉淀(action-frame 版): 等主会话执行完, 提取产出写入 output——不再恒空。
+              const responseText = await extractAssistantResponse(ctx, agent)
+              await logFrame(config.thinkLogPath, {
+                ts: Date.now(), kind: 'action-frame', frameNo: frames,
+                goalId: actionable.id, goalTitle: actionable.title,
+                nextAction: actionable.nextAction, session: sessionId, output: responseText,
+              })
+              // P-A2 方向自省: 行动帧执行 = 目标被推进(空闲期 direct 路径的主触发点,
+              // 补 v24 回写仅在 side-channel 触发的缺口)。节流在 helper 内。
+              await triggerNorthStarReflect(ctx, 'action-frame')
+              // v27 P0-2: 执行后反思——从本次执行产出提炼新 oq/候选(耗材再生源)
+              await triggerReflectAfterExec(ctx, 'action-frame', responseText)
+              return  // 本次 tick 已用于行动帧, 不再发评估帧
+            }
+            // #005 候选孵化: 无 ready 目标(全等待/冷却)——不静默降级, 先试北极星候选池。
+            // 目标池无自驱源 = 系统性空转(用户 2026-09-07 08:0x 批评"一百万年没变化")。
+            // pending 候选作为本轮执行任务注入, 主会话真实执行并写回状态; 候选池空 → P-A2 再产。
+            if (config.candidatesPath !== undefined && config.candidatesPath !== '') {
+              const pendingCand = await pickPendingCandidate(config.candidatesPath)
+              if (pendingCand !== null) {
+                const message = createUserMessage({
+                  content: [{ type: 'text', text: buildCandidateHatchText(carrier, pendingCand) }],
+                  source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `候选孵化 #${frames}: ${pendingCand.title.slice(0, 40)}` },
+                })
+                ctx.logger.info('[quiet-driver] candidate-hatch #%d → %s (relationToA=%s)',
+                  frames, pendingCand.title.slice(0, 60), pendingCand.relationToA)
+                agent.followup(message)
+                // #005 应答沉淀(candidate-hatch 版): 等主会话执行完候选, 提取产出写入 output——
+                // 孵化证据落盘, 不依赖主会话自觉写 candidates.jsonl。
+                const hatchResponse = await extractAssistantResponse(ctx, agent)
+                await logFrame(config.thinkLogPath, {
+                  ts: Date.now(), kind: 'candidate-hatch', frameNo: frames,
+                  goalId: pendingCand.id, goalTitle: pendingCand.title,
+                  nextAction: `孵化候选: ${pendingCand.title}`, session: sessionId, output: hatchResponse,
+                })
+                // 候选被执行 = 北极星方向被推进 → 触发方向自省(节流在 helper 内)
+                await triggerNorthStarReflect(ctx, 'candidate-hatch')
+                // v27 P0-2: 执行后反思——候选执行产出 → 新 oq/候选再生
+                await triggerReflectAfterExec(ctx, 'candidate-hatch', hatchResponse)
+                return  // 本次 tick 已用于候选孵化, 不再发评估帧
+              }
+            }
+            // #006 测试计划帧: 有未验证的机制推进(测试账本有 pending) → 主动要求主会话规划并执行测试。
+            // 用户(2026-09-07 18:1x): 测试要形成机制, 且是"检测到新推进→主动要求规划执行+带返回",
+            // 非 cron 定时——LLM 的测试是认知活动, 时间驱动会脱节, 推进驱动才对。
+            if (config.testPendingPath !== undefined && config.testPendingPath !== '') {
+              const pendingTest = await pickPendingTestPlan(config.testPendingPath)
+              if (pendingTest !== null) {
+                const message = createUserMessage({
+                  content: [{ type: 'text', text: buildTestPlanFrameText(carrier, pendingTest) }],
+                  source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `测试计划 #${frames}: ${pendingTest.title.slice(0, 40)}` },
+                })
+                ctx.logger.info('[quiet-driver] test-plan-frame #%d → %s', frames, pendingTest.title.slice(0, 60))
+                agent.followup(message)
+                // #006 应答沉淀: 等主会话执行完测试, 提取结果写入 output
+                const testResponse = await extractAssistantResponse(ctx, agent)
+                await logFrame(config.thinkLogPath, {
+                  ts: Date.now(), kind: 'test-plan-frame', frameNo: frames,
+                  goalId: pendingTest.id, goalTitle: pendingTest.title,
+                  nextAction: `执行测试: ${pendingTest.title}`, session: sessionId, output: testResponse,
+                })
+                return  // 本次 tick 已用于测试计划, 不再发评估帧
+              }
+              // #006b 测试自动再产(2026-09-07 20:5x): test-pending 空 ≠ 无需测试——审视"近期机制改动是否需要新测试"。
+              // 用户模式: 每次修好缺陷又滑回待命(候选/oq有再生, 测试没有)→ 队列空时发审视帧, 主会话判断是否生成新测试。
+              // 防止空转: 审视帧节流——记录上次审视时间, 间隔内不重复发(由下方 lastTestReviewAt 控制)。
+              if (Date.now() - lastTestReviewAt > 60 * 60 * 1000) {  // 1h 审视一次(空队列时)
+                lastTestReviewAt = Date.now()
+                const reviewMessage = createUserMessage({
+                  content: [{ type: 'text', text: buildTestReviewFrameText(carrier) }],
+                  source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `测试审视 #${frames}: 近期改动是否需要新测试` },
+                })
+                ctx.logger.info('[quiet-driver] test-review-frame #%d: 队列空, 审视近期改动')
+                agent.followup(reviewMessage)
+                const reviewResponse = await extractAssistantResponse(ctx, agent)
+                await logFrame(config.thinkLogPath, {
+                  ts: Date.now(), kind: 'test-review-frame', frameNo: frames,
+                  goalId: 'test-review', goalTitle: '审视近期机制改动是否需要新测试',
+                  nextAction: '审视→生成新测试或标注无需求', session: sessionId, output: reviewResponse,
+                })
+                return  // 本次 tick 已用于测试审视
+              }
+            }
+            if (stalled.length > 0) {
+              ctx.logger.info('[quiet-driver] action-frame #%d: %d 目标停滞(≥3次未推进), 无 ready 目标可推',
+                frames, stalled.length)
+              // 停滞目标不重复轰炸, 由评估帧携带(主会话应升级处理)
+            }
+          }
+        } catch (error: unknown) {
+          console.error('[quiet-driver] action frame check failed:', error)
+        }
+        // 无行动帧可发(无 active 目标/冷却中) → 走常规直驱评估帧。
+        void readLastFrameContext(config.thinkLogPath).then(async (frameCtx) => {
+          const escalated = frameCtx.consecutiveIncremental >= MAX_INCREMENTAL_FRAMES
+          const mode = chooseFrameMode(frameCtx.output, escalated ? MAX_INCREMENTAL_FRAMES : 0)
+          // v23 补上下文: 读目标池快照, 让帧察觉未完成目标。
+          const goals = await readGoalsSnapshot(config.goalsPoolPath)
+          // #003 诱导探索: 上帧确认态(收敛) → 取诱导问题注入。
+          const prevConfirmed = frameCtx.output !== undefined && /无变化|没有变化|未变|没变|无新增|无实质变化|实质相同|与上帧相同|与上次相同|一致|无异常变化|基本相同|无实质推进|无新观察/.test(frameCtx.output)
+          // #003b 探索源选择: 开放问题账本(具体锚点)为主, 诱导表(泛化)为 fallback。
+    const openQ = await pickOpenQuestion(config.openQuestionsPath)
+    const inducement = openQ !== null
+      ? { id: openQ.id, question: openQ.question, category: '开放问题' }
+      : ((escalated || prevConfirmed) ? await pickInducement(config.inducementsPath) : null)
+          const message = createUserMessage({
+            content: [{ type: 'text', text: buildFrameText(carrier, frameCtx.output, escalated ? MAX_INCREMENTAL_FRAMES : 0, goals, inducement) }],
+            source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧 #${frames}` },
+          })
+          ctx.logger.info('[quiet-driver] wake #%d: direct followup to %s (真正空闲, %s)', frames, sessionId, mode)
+          agent.followup(message)
+          // 自主进化 #001: direct-frame 应答落盘——等主会话应答完, 提取最后 assistant 文本写入 output。
+          // (原 output 恒空 = 空闲唤醒的认知产物全丢; 补上沉淀环, 不需主会话自律。)
+          const responseText = await extractAssistantResponse(ctx, agent)
+          // 记录直驱帧到 think-log（含协议模式+主会话应答产出），供 v18 下帧参考。
+          await logFrame(config.thinkLogPath, {
+            ts: Date.now(), kind: 'direct-frame', frameNo: frames, mode,
+            session: sessionId, output: responseText,  // 不再恒空——应答沉淀
+          })
+          if (responseText.length > 0) {
+            ctx.logger.info('[quiet-driver] direct-frame #%d response persisted (%d chars)', frames, responseText.length)
+          }
+          // #004 静默降频(校准 2026-09-07 11:0x 用户批评"为什么一直关注打扰用户——三问设计出来是要自进化"):
+          // 原语义: 连续确认帧 → 静默跳过 = 纯空白(用户离线期停止思考)。
+          // 校准后语义: 短响应确认态达阈值 → 不再静默空白, 而是"降频提质"——
+          // 本 tick 立即走深度模式(全检+诱导, 由下方正常帧路径处理), silentSkipUntil 只防 5min 高频轰炸。
+          // 即: 4 次浅确认 → 1 次深全检, 而非 4 次浅确认 → 25min 空白。思考不停, 只是从浅频转深低频。
+          if (responseText.length < 600) {
+            silentStreak += 1
+            if (silentStreak >= SILENT_STREAK_MAX) {
+              silentSkipUntil = Date.now() + SILENT_SKIP_MS
+              ctx.logger.info('[quiet-driver] #004 depth mode: %d 连续确认帧 → 转深度帧(降频提质, 非空白静默) %d 分钟窗口',
+                silentStreak, Math.round(SILENT_SKIP_MS / 60000))
+              silentStreak = 0
+              // 校准: 触发点不 return——继续走下方 onlyWhenIdle 深度帧路径(本 tick 已带 goals/诱导上下文,
+              // 由评估帧模式判定: 短确认链后 escalated=false 但 prevConfirmed=true → 诱导注入 → 深思考)
+            }
+          } else {
+            silentStreak = 0  // 有探索/长响应 = 非确认态, 重置
+          }
+        }).catch((error: unknown) => { console.error('[quiet-driver] direct frame build failed:', error) })
+      })()
     }
   }, config.intervalMs)
 
