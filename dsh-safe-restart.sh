@@ -58,23 +58,80 @@ verify_plugin() {
   return 0
 }
 
+verify_patch() {
+  # 2026-09-08 07:2x 崩溃教训固化: patch entry 格式错(id用包名/无insert包裹)曾致88次崩溃循环。
+  # 轻量预检: 每个顶层 insert entry 须有 id+name 完整结构(loader 定位靠 name)。
+  # 注: dsh patch 允许 `!!js` 表达式(loader 运行时求值)——校验只关心结构, 给 !!js 注册占位构造器即可。
+  local patch="${PATCH_FILE:-/home/ubuntu/.dsh/profiles/web/cordis.patch.yml}"
+  [ -f "$patch" ] || { log "无 patch 文件, 跳过"; return 0; }
+  # 用 python 校验 YAML 顶层结构（注册 !!js 占位构造器，避免未知标签误报）
+  python3 - "$patch" << 'PYEOF2'
+import sys, yaml
+class Loader(yaml.SafeLoader):
+    pass
+def js_placeholder(loader, node):
+    # dsh loader 运行时表达式, 结构校验无需展开——占位返回即可
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node, deep=True)
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node, deep=True)
+    return None
+Loader.add_constructor('tag:yaml.org,2002:js', js_placeholder)
+try:
+    with open(sys.argv[1]) as f:
+        docs = list(yaml.load_all(f, Loader=Loader))
+    for doc in docs:
+        if not doc or not isinstance(doc, list): continue
+        for entry in doc:
+            if not isinstance(entry, dict): continue
+            # 顶层 entry 必须是 op 容器(insert/disable 等)——裸 id/name 顶层条目是上次崩溃根因
+            if 'insert' not in entry and ('id' in entry or 'name' in entry):
+                print(f"✗ 顶层裸 entry(缺 insert 容器, loader 无法定位): {entry}")
+                sys.exit(1)
+            if 'insert' in entry:
+                for item in entry['insert']:
+                    if not isinstance(item, dict): continue
+                    if not item.get('id'):
+                        print(f"✗ patch insert entry 缺 id: {item}")
+                        sys.exit(1)
+                    if not item.get('name'):
+                        print(f"✗ patch insert entry {item.get('id','?')} 缺 name(loader 定位靠 name): {item}")
+                        sys.exit(1)
+    print("✓ patch 顶层结构校验通过")
+except Exception as e:
+    print(f"✗ patch YAML 解析失败: {e}")
+    sys.exit(1)
+PYEOF2
+}
+
 verify_all() {
+  # 2026-09-08 崩溃教训: patch 格式错与插件源码改动无关联——必须无条件先校验 patch。
+  # （上次崩溃: repeat-tool-reminder entry 格式错(id用包名/无insert包裹) → 88次崩溃循环）
+  local failed=0
+  if ! verify_patch; then failed=$((failed + 1)); fi
+
   log "预检最近 ${CHECK_WINDOW_MIN} 分钟内改动的插件 ..."
   local changed
   changed="$(find_changed_plugins)"
   if [ -z "$changed" ]; then
-    log "  无最近改动的插件，跳过预检"
+    log "  无最近改动的插件，跳过插件预检"
+    if [ "$failed" -gt 0 ]; then
+      die "patch 顶层结构校验失败——请先修复配置（回滚: cp cordis.patch.yml.good cordis.patch.yml）"
+    fi
+    log "全部预检通过"
     return 0
   fi
-  local pkg failed=0
+  local pkg
   while IFS= read -r pkg; do
     [ -n "$pkg" ] || continue
     if ! verify_plugin "$DSH_ROOT/packages/$pkg"; then failed=$((failed + 1)); fi
   done <<< "$changed"
   if [ "$failed" -gt 0 ]; then
-    die "${failed} 个插件预检失败——请先修复源码，或用 --force 强制重启（不推荐）"
+    die "${failed} 项预检失败——请先修复源码/配置，或用 --force 强制重启（不推荐）"
   fi
-  log "全部插件预检通过"
+  log "全部预检通过"
 }
 
 # ---------- 3. 重启 + 健康确认（失败则回滚 patch 自愈） ----------
@@ -126,6 +183,16 @@ safe_restart() {
   if [ "$ok" -eq 0 ]; then
     log "✓ 服务就绪 (PID ${after_pid})"
     snapshot_good_patch   # 成功 → 存良好快照（下次崩溃可回滚到这里）
+    # v28 验证闭环: 重启后跑帧质量验证(延迟等 quiet-driver 首帧)。失败仅告警, 不阻断(回滚逻辑保持独立)。
+    if [ -x "$DSH_ROOT/dsh-verify-frames.sh" ]; then
+      sleep 8
+      if ! "$DSH_ROOT/dsh-verify-frames.sh" --minutes 6 >/tmp/dsh-frame-verify.log 2>&1; then
+        log "⚠ 帧质量验证未过(详见 /tmp/dsh-frame-verify.log)——部署后请人工确认帧产出"
+        cat /tmp/dsh-frame-verify.log >&2 || true
+      else
+        log "✓ 帧质量验证通过($(grep -o '窗口帧数.*' /tmp/dsh-frame-verify.log | head -1))"
+      fi
+    fi
     return 0
   fi
   # ── 重启失败 → 自愈：回滚 patch 到已知良好快照，再试一次 ──
