@@ -57,6 +57,14 @@ const DEFAULT_MODELS: DeepSeekCatalogModel[] = [
     contextWindow: DEFAULT_CONTEXT_WINDOW,
     inputModalities: ['text', 'image'],
   },
+  {
+    // 灰测模型(2026-09-08 用户加入): v4.1 Flash 内测版, 原生多模态, expires-on-0910 = 09-10 到期
+    // 到期后需从目录移除(见 identity 灰测台账/claims-ledger)
+    id: 'deepseek-v4.1-flash-expires-on-0910',
+    name: 'DeepSeek-V4.1-Flash (灰测, 至09-10)',
+    contextWindow: DEFAULT_CONTEXT_WINDOW,
+    inputModalities: ['text', 'image'],
+  },
 ]
 
 const MODEL_MODALITIES = ['text', 'image'] as const satisfies readonly ModelModality[]
