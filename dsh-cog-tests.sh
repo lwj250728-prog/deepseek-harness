@@ -144,6 +144,16 @@ t "probe区分页异常与数据未入" bash -c "grep -q 'detail-error' '$HOME/d
 # 8c. probe 日志已记录页异常(非静默'数据未入')
 t "probe日志有页异常记录" bash -c "grep -q '页异常' '$DIR/oq010-probe.log'"
 
+# ── T9 probe 指纹去重(2026-09-08 09:3x 固化——tp-012: 同数据不得重复解锁) ──
+echo "[T9] probe 指纹去重(数据无变化不重复解锁)"
+# 9a. probe 含指纹去重逻辑(比较上次指纹)
+t "probe含指纹比较逻辑" bash -c "grep -q 'oq010-fingerprint' '$HOME/dsh-fork/dsh-oq010-probe.sh' && grep -q '数据无变化' '$HOME/dsh-fork/dsh-oq010-probe.sh'"
+# 9b. 指纹文件存在(首次探测后建立)
+t "指纹文件已建立" test -f "$DIR/.oq010-fingerprint"
+# 9c. 去重真实生效: log 中"无变化"记录存在且同一指纹段内"已解锁"次数不暴增
+t "去重已生效(有无变化记录)" bash -c "grep -q '数据无变化' '$DIR/oq010-probe.log'"
+t "解锁次数有限(无轰炸)" bash -c "n=\$(grep -c '数据变化, 已解锁' '$DIR/oq010-probe.log' 2>/dev/null || echo 0); [ \"\$n\" -le 5 ]"
+
 echo ""
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 if [ "$FAIL" -gt 0 ]; then
