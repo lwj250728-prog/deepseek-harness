@@ -803,6 +803,41 @@ overdue = [k for k, v in by_id.items()
 assert not overdue, "已过 reviewBy 未裁决: %s" % overdue[:3]
 '
 
+# ── T34 目标池 nextAction 滞留(cl-054, 2026-09-09 01:1x——T33 只管账本, 目标池仍无滞留锚) ──
+echo "[T34] 目标池 nextAction 滞留(active 目标须有 watch 记录; 超 maxDays 且无未来 reviewBy 即失败)"
+t "目标watch脚本可运行" bash /home/ubuntu/dsh-fork/dsh-goal-watch.sh
+t "active目标均有watch记录" python3 -c '
+import json, os
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+goals = [json.loads(l) for l in open(D + "/dormant-goals.jsonl", encoding="utf8") if l.strip()]
+active = [g["id"] for g in goals if g.get("status") == "active"]
+watch = json.load(open(D + "/goal-watch.json", encoding="utf8"))
+missing = [g for g in active if g not in watch]
+assert not missing, "无 watch 记录的 active 目标: %s" % missing
+'
+t "active目标nextAction未超期" python3 -c '
+import json, os, datetime
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+goals = [json.loads(l) for l in open(D + "/dormant-goals.jsonl", encoding="utf8") if l.strip()]
+active = [g["id"] for g in goals if g.get("status") == "active"]
+watch = json.load(open(D + "/goal-watch.json", encoding="utf8"))
+now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+today = now.date().isoformat()
+stale = []
+for gid in active:
+    r = watch.get(gid, {})
+    try:
+        days = (now - datetime.datetime.fromisoformat(r["lastChanged"])).total_seconds() / 86400.0
+    except Exception:
+        stale.append(gid + "(无lastChanged)")
+        continue
+    maxd = r.get("maxDays", 2)
+    rb = r.get("reviewBy")
+    if days > maxd and not (isinstance(rb, str) and rb >= today):
+        stale.append("%s(%.1fd>%sd)" % (gid, days, maxd))
+assert not stale, "滞留未裁决: %s" % stale
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
