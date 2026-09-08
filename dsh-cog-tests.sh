@@ -838,6 +838,34 @@ for gid in active:
 assert not stale, "滞留未裁决: %s" % stale
 '
 
+# ── T35 词级关键词守卫(2026-09-09 01:4x 固化——cl-058: 结构化输入使 LLM 省略关键词, 回退成单字) ──
+echo "[T35] 词级关键词(行动关键词须为词级元素, 单字关键词会饿死词元素通道与 actionVector)"
+t "src含元素抽取器" bash -c "grep -q 'export function elements' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/src/vectorizer.ts'"
+t "src含关键词兜底与修复" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts")).read()
+assert "ensureWordKeywords" in s and "repairCharKeywords" in s, "缺兜底/修复"
+'
+t "lib含词级关键词(已部署)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")).read()
+assert "ensureWordKeywords" in s and "repairCharKeywords" in s, "lib 未部署"
+'
+t "无字符级关键词经验" python3 -c '
+import json, os
+d = os.path.expanduser("~/.dsh/cognitive-pipeline")
+bad = []
+for f in ("experiences.jsonl", "experiences-frames.jsonl"):
+    for l in open(os.path.join(d, f)):
+        if not l.strip(): continue
+        r = json.loads(l)
+        kw = ((r.get("sar") or {}).get("actionKeywords") or [])
+        if not kw: continue
+        avg = sum(len(k) for k in kw) / len(kw)
+        if avg < 1.6: bad.append(r.get("expId"))
+assert not bad, "字符级关键词残留: %s" % bad[:3]
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。

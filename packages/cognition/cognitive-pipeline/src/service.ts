@@ -71,7 +71,7 @@ import type {
   TurnCognitionSummary,
   VariantCandidate,
 } from './types.ts'
-import { actionVector, cosine, outcomePolarity, outcomeVector, signatureHash, tokenize, utilityScore, variantConvergence } from './vectorizer.ts'
+import { actionVector, elements, cosine, outcomePolarity, outcomeVector, signatureHash, tokenize, utilityScore, variantConvergence } from './vectorizer.ts'
 import {
   STATIC_TRIGGERS,
   STOP_WORDS,
@@ -687,6 +687,9 @@ export class CognitivePipelineService extends Service {
       // 存储的 SAR 与确定性切分不一致时(LLM 抽取失败回退按句号切分所致), 启动时修复
       // 字段与向量——这是"L0 不可变 / L1 可重抽"第一次真正生效。
       await this.repairStructuredSar()
+      // cl-058: 同理修复字符级关键词(结构化输入使 LLM 省略 action_keywords →
+      // 回退 tokenize → 单字), 并用 IDF 过滤从行动文本重抽词级元素。
+      await this.repairCharKeywords()
     }).catch((error: unknown) => {
       this.ctx.logger.warn(`cognitive-pipeline: store load failed, continuing in-memory: ${String(error)}`)
     })
@@ -748,10 +751,10 @@ export class CognitivePipelineService extends Service {
     if (input.rawText.trim().length === 0) {
       throw new CognitivePipelineError('cognitive-pipeline: rawText must not be empty', 'EMPTY_RAW_TEXT')
     }
-    const sar = await extractSar(this.ctx, this.resolved.route, input.rawText, {
+    const sar = this.ensureWordKeywords(await extractSar(this.ctx, this.resolved.route, input.rawText, {
       sessionId: call?.sessionId,
       signal: call?.signal,
-    })
+    }))
     const expId = this.store.nextExpId()
     const embedding = await this.maybeEmbed(sar.action)
     const exp: Experience = {
@@ -777,6 +780,84 @@ export class CognitivePipelineService extends Service {
     this.store.addExperience(exp)
     await this.store.flush()
     return { expId, sar }
+  }
+
+  /**
+   * Guarantee word-level action keywords (cl-058). The LLM omits
+   * `action_keywords` whenever the caller supplies structural markers, so the
+   * extraction fell back to `tokenize`, which splits CJK into single characters
+   * — 24/130 rows ended up with keywords like ['先','查','证']. When the
+   * keywords are missing or char-level, derive them deterministically from the
+   * action's word elements, dropping elements that appear in more than half the
+   * stored actions (the store's own stop list, self-tuning, no hand-curated
+   * table).
+   * @param sar - the extracted triplet.
+   * @returns the triplet, with word-level keywords when they could be derived.
+   */
+  private ensureWordKeywords(sar: SarTriplet): SarTriplet {
+    const keywords = sar.actionKeywords
+    const avgLength = keywords.length === 0
+      ? 0
+      : keywords.reduce((sum, keyword) => sum + keyword.length, 0) / keywords.length
+    if (keywords.length > 0 && avgLength >= 1.6) return sar
+    const picked = this.deriveWordKeywords(sar.action)
+    return picked.length === 0 ? sar : { ...sar, actionKeywords: picked }
+  }
+
+  /**
+   * Derive word-level keywords from one action text, using the store's own
+   * document frequencies as the stop list (elements occurring in more than half
+   * the stored actions carry no discrimination and are dropped).
+   * @param action - the action text.
+   * @returns up to eight word elements, most frequent first.
+   */
+  private deriveWordKeywords(action: string): string[] {
+    const actions = this.store.experiencesSnapshot().map(exp => exp.sar.action)
+    const documentCount = actions.length || 1
+    const documentFrequency = new Map<string, number>()
+    for (const stored of actions) {
+      for (const element of new Set(elements(stored))) {
+        documentFrequency.set(element, (documentFrequency.get(element) ?? 0) + 1)
+      }
+    }
+    const counts = new Map<string, number>()
+    for (const element of elements(action)) {
+      if ((documentFrequency.get(element) ?? 0) / documentCount > 0.5) continue
+      counts.set(element, (counts.get(element) ?? 0) + 1)
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([element]) => element)
+  }
+
+  /**
+   * Repair char-level keywords on loaded rows (cl-058): rows written while the
+   * extraction fell back to `tokenize` carry single-character keywords, which
+   * starve the lexical channel and the action vector. Re-derive them from the
+   * stored action text and rebuild the action vector.
+   * @returns the number of repaired experiences.
+   */
+  async repairCharKeywords(): Promise<number> {
+    let repaired = 0
+    for (const exp of this.store.experiencesSnapshot()) {
+      const keywords = exp.sar.actionKeywords
+      const avgLength = keywords.length === 0
+        ? 0
+        : keywords.reduce((sum, keyword) => sum + keyword.length, 0) / keywords.length
+      if (keywords.length > 0 && avgLength >= 1.6) continue
+      const picked = this.deriveWordKeywords(exp.sar.action)
+      if (picked.length === 0) continue
+      const sar: SarTriplet = { ...exp.sar, actionKeywords: picked }
+      this.store.addExperience({
+        ...exp,
+        sar,
+        actionVector: actionVector(sar.action, sar.actionKeywords),
+      })
+      repaired += 1
+    }
+    if (repaired > 0) {
+      await this.store.flush()
+      this.ctx.logger.info(`cognitive-pipeline: repaired ${repaired} char-level keyword experience(s)`)
+    }
+    return repaired
   }
 
   /** Embed an action text when the seam is enabled; undefined otherwise.

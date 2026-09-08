@@ -222,6 +222,49 @@ export function tokenize(text: string): string[] {
   return tokens
 }
 
+/**
+ * Word-level elements of a text: CJK bigrams plus ASCII words (cl-058).
+ * `tokenize` deliberately splits CJK into single characters for the hashed
+ * vectors, so it cannot serve as a *feature word* extractor. This is the
+ * element extractor the lexical channel and the keyword fallback need; single
+ * characters remain available by taking `tokenize` instead.
+ * @param text - the text to segment.
+ * @returns the element list (order preserved, duplicates kept for counting).
+ */
+export function elements(text: string): string[] {
+  const out: string[] = []
+  let latin = ''
+  const flush = (): void => {
+    if (latin.length > 0) {
+      out.push(latin)
+      latin = ''
+    }
+  }
+  let cjkRun = ''
+  const flushCjk = (): void => {
+    if (cjkRun.length === 1) out.push(cjkRun)
+    else if (cjkRun.length > 1) {
+      for (let i = 0; i < cjkRun.length - 1; i += 1) out.push(cjkRun.slice(i, i + 2))
+    }
+    cjkRun = ''
+  }
+  for (const char of text) {
+    if (isCjk(char)) {
+      flush()
+      cjkRun += char
+    } else if (/[a-zA-Z0-9]/.test(char)) {
+      flushCjk()
+      latin += char.toLowerCase()
+    } else {
+      flush()
+      flushCjk()
+    }
+  }
+  flush()
+  flushCjk()
+  return out
+}
+
 /** Build an L2-normalized count bag over hashed tokens of one dimension. */
 function bagVector(tokens: readonly string[], dim: number): number[] {
   const counts = new Array<number>(dim).fill(0)
