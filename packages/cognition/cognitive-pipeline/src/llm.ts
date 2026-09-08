@@ -419,9 +419,13 @@ export async function extractSar(
       situation: structured?.situation ?? stripStructLabel(parsed.situation),
       action: structured?.action ?? stripStructLabel(parsed.action),
       outcome: structured?.outcome ?? stripStructLabel(parsed.outcome),
-      actionKeywords: structured !== null
-        ? [...new Set(tokenize(structured.action))].slice(0, 8)
-        : (keywords.length > 0 ? keywords : [...new Set(tokenize(parsed.action))].slice(0, 8)),
+      // cl-051: 结构化切分只接管 situation/action/outcome 的**归属**, 不接管关键词——
+      // 关键词仍优先用 LLM 抽出的词级特征词(用户提案的匹配对象正是这一层)。此前结构化
+      // 输入改走 tokenize(), 而 tokenize 按设计把中文切成单字, 致 exp_224 起关键词退化成
+      // '先/查/证/工/作' 这类字符, 既废掉词级检索, 也让 actionVector 少了真实特征。
+      actionKeywords: keywords.length > 0
+        ? keywords
+        : [...new Set(tokenize(structured?.action ?? parsed.action))].slice(0, 8),
       outcomeUtility: {
         materialGain: clampUtility(materialGain),
         emotionalValence: clampUtility(emotionalValence),
