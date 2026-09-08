@@ -662,6 +662,38 @@ missing = [f for f in files
 assert not missing, "改动但无断言引用: %s" % missing[:3]
 '
 
+# ── T29 经验样本二次处理(2026-09-09 00:1x 固化——cl-045: 81 条帧经验效用因 snake_case 键名恒为 None) ──
+echo "[T29] 经验样本二次处理(字段键名无损迁移: snake_case 效用须归一为驼峰并恢复数值)"
+# 29a. src 含迁移函数
+t "src含效用键名迁移" bash -c "grep -q 'normalizeUtilityKeys' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/src/store.ts'"
+# 29b. lib 已部署
+t "lib含键名迁移(已部署)" bash -c "grep -q 'normalizeUtilityKeys' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
+# 29c. 运行时: 无任何经验效用缺失
+t "无效用缺失经验" python3 -c '
+import json, os
+d = os.path.expanduser("~/.dsh/cognitive-pipeline")
+missing = []
+for f in ("experiences.jsonl", "experiences-frames.jsonl"):
+    for l in open(os.path.join(d, f)):
+        if not l.strip(): continue
+        r = json.loads(l)
+        u = ((r.get("sar") or {}).get("outcomeUtility") or {})
+        if u.get("materialGain") is None:
+            missing.append(r.get("expId"))
+assert not missing, "效用仍缺失: %s" % missing[:3]
+'
+# 29d. 运行时: 文件中不得再出现 snake_case 效用键(迁移已落盘)
+t "无snake_case效用键残留" python3 -c '
+import os
+d = os.path.expanduser("~/.dsh/cognitive-pipeline")
+bad = []
+for f in ("experiences.jsonl", "experiences-frames.jsonl"):
+    s = open(os.path.join(d, f), encoding="utf8").read()
+    if "material_gain" in s or "emotional_valence" in s:
+        bad.append(f)
+assert not bad, "snake_case 键残留: %s" % bad
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。

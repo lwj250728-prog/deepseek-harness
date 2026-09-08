@@ -103,6 +103,28 @@ function clampWeight(value: unknown): number {
   return Math.min(3, Math.max(0.2, n))
 }
 
+/**
+ * Lossless key-name migration for legacy utility rows (cl-045 二次处理).
+ * Early frame experiences wrote `material_gain` / `emotional_valence` /
+ * `energy_cost` while the reader expects camelCase, so 81 rows read as having
+ * no utility at all. The values are still in the file; renaming the keys
+ * restores them without inventing data.
+ * @param exp - the loaded experience.
+ * @returns a patch when a migration applies, otherwise an empty object.
+ */
+function normalizeUtilityKeys(exp: Experience): Partial<Experience> {
+  const utility = exp.sar?.outcomeUtility as unknown as Record<string, unknown> | undefined
+  if (typeof utility !== 'object' || utility === null) return {}
+  const gain = utility.materialGain ?? utility.material_gain
+  const valence = utility.emotionalValence ?? utility.emotional_valence
+  const cost = utility.energyCost ?? utility.energy_cost
+  if (typeof gain !== 'number' || typeof valence !== 'number' || typeof cost !== 'number') return {}
+  if (utility.materialGain === gain && utility.emotionalValence === valence && utility.energyCost === cost) return {}
+  return {
+    sar: { ...exp.sar, outcomeUtility: { materialGain: gain, emotionalValence: valence, energyCost: cost } },
+  }
+}
+
 /** The complete persisted state of one pipeline store. */
 export class CognitiveStore {
   private readonly root: string
@@ -200,6 +222,10 @@ export class CognitiveStore {
       // to explicit absences so chain assembly reads them cleanly.
       this.experiences.set(exp.expId, {
         ...exp,
+        // cl-045 二次处理(字段键名迁移): 早期帧经验把效用写成 snake_case
+        // (material_gain/emotional_valence/energy_cost), 读取侧按驼峰解析 → 81 条效用
+        // 恒为 None。值还在文件里, 迁移是无损的——把键名归一后, 这批经验重新参与统计与重放。
+        ...normalizeUtilityKeys(exp),
         ...typeof exp.chainId === 'string' ? { chainId: exp.chainId } : {},
         ...typeof exp.parentNodeId === 'string' ? { parentNodeId: exp.parentNodeId } : {},
         ...Number.isInteger(exp.sequence) ? { sequence: exp.sequence } : {},
