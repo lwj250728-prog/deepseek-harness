@@ -163,6 +163,15 @@ t "lib 含言行账本(已部署)" bash -c "grep -q '言行账本' '$HOME/dsh-fo
 # 10c. claims-ledger 存在且每行可解析
 t "claims-ledger 存在且可解析" bash -c "test -f '$DIR/claims-ledger.jsonl' && python3 -c \"import json; rows=[json.loads(l) for l in open('$DIR/claims-ledger.jsonl')]; assert all(d.get('id') and d.get('claim') for d in rows)\""
 
+# ── T11 入账纪律(2026-09-08 11:0x 固化——tp-014: 帧头'先入账再回答'子句) ──
+echo "[T11] 入账纪律子句(宣称入账不依赖自觉——帧头'先入账再回答')"
+# 11a. src 言行账本行含"先入账再回答"子句
+t "src含入账纪律子句" bash -c "grep -q '先入账再回答' '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts'"
+# 11b. lib 已重建含子句(部署生效)
+t "lib含入账纪律子句(已部署)" bash -c "grep -q '先入账再回答' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
+# 11c. lib 早于服务启动(当前进程跑的是新 lib)
+t "lib早于服务启动(进程用新lib)" bash -c "lib_ts=\$(stat -c %Y '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'); svc_ts=\$(systemctl --user show dsh-web.service -p ActiveEnterTimestamp --value 2>/dev/null); svc_ep=\$(date -d \"\$svc_ts\" +%s 2>/dev/null); [ -n \"\$svc_ep\" ] && [ \"\$lib_ts\" -lt \"\$svc_ep\" ]"
+
 echo ""
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 if [ "$FAIL" -gt 0 ]; then
