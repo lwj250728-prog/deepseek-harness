@@ -509,6 +509,43 @@ assert sar.get("situation", "").startswith("2026-09-08 22:1x"), "exp_228 situati
 assert sar.get("action", "").startswith("先查证工作区"), "exp_228 action 仍错位: %s" % sar.get("action", "")[:40]
 '
 
+# ── T25 产出物存续(2026-09-08 22:3x 固化——小说工作区此前不在任何备份/版本控制范围) ──
+echo "[T25] 产出物存续(小说草稿/设定/账本须进每日备份与异地冗余)"
+# 25a. 备份脚本覆盖小说工作区
+t "备份脚本含小说工作区" bash -c "grep -q 'dsh-workshop/novels' '$HOME/dsh-fork/dsh-cognitive-backup.sh'"
+# 25b. 最新备份归档确实含正文
+t "最新归档含小说正文" python3 -c '
+import glob, os, tarfile
+files = sorted(glob.glob(os.path.expanduser("~/backups/cognitive-daily/cognitive-*.tar.gz")), key=os.path.getmtime)
+assert files, "无备份归档"
+with tarfile.open(files[-1], "r:gz") as tf:
+    names = tf.getnames()
+assert any(n.startswith("dsh-workshop/novels/") and n.endswith(".md") for n in names), "归档内无小说 md"
+'
+# 25c. 异地推送配置在
+t "异地推送配置在" bash -c "grep -q 'REMOTE_HOST=' '$HOME/dsh-fork/dsh-cognitive-backup.sh'"
+# 25d. 草稿编号连续无缺号(防静默丢章)
+t "草稿编号无缺号" python3 -c '
+import glob, os, re
+d = os.path.expanduser("~/dsh-workshop/novels/qizhongjiyi/drafts")
+nums = sorted(int(re.search(r"(\d+)", os.path.basename(p)).group(1)) for p in glob.glob(os.path.join(d, "00*.md")))
+assert nums, "无草稿"
+missing = [n for n in range(nums[0], nums[-1] + 1) if n not in nums]
+assert not missing, "草稿缺号: %s" % missing
+'
+# 25e. 每章均过机检字数标尺
+t "各章字数在标尺内" python3 -c '
+import glob, os, re
+d = os.path.expanduser("~/dsh-workshop/novels/qizhongjiyi/drafts")
+bad = []
+for p in sorted(glob.glob(os.path.join(d, "00*.md"))):
+    t = open(p, encoding="utf8").read()
+    n = len(re.sub(r"\s", "", re.sub(r"^# .*", "", t, flags=re.M)))
+    if not (2200 <= n <= 2800):
+        bad.append("%s=%d" % (os.path.basename(p), n))
+assert not bad, "字数超范围: %s" % bad[:3]
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
