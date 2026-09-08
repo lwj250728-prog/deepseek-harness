@@ -722,6 +722,7 @@ export class CognitivePipelineService extends Service {
       simulated: false,
       verification: 'verified',
       evidenceScore: 0,
+      kind: 'task',
       ...input.chainId === undefined ? {} : { chainId: input.chainId },
     }
     this.store.addExperience(exp)
@@ -888,7 +889,14 @@ export class CognitivePipelineService extends Service {
    * @param input - the structured SAR fields for the observation.
    * @returns the new experience id.
    */
-  rememberMeta(input: { situation: string; action: string; outcome: string; utility: OutcomeUtility }): string {
+  rememberMeta(input: {
+    situation: string
+    action: string
+    outcome: string
+    utility: OutcomeUtility
+    /** Explicit storage-layer provenance; omitted means a task experience. */
+    kind?: 'task' | 'frame'
+  }): string {
     const sar: SarTriplet = {
       situation: input.situation,
       action: input.action,
@@ -913,6 +921,7 @@ export class CognitivePipelineService extends Service {
       verification: 'verified',
       evidenceScore: 0,
       meta: true,
+      kind: input.kind ?? 'task',
     })
     return expId
   }

@@ -383,6 +383,41 @@ bad = [r.get("expId") for r in rows if isinstance(r.get("chainId"), str) and r.g
 assert not bad, "帧经验被锚定: %s" % bad[:3]
 '
 
+# ── T22 经验分层 provenance(2026-09-08 21:3x 固化——tp-025 实测发现 exp_221 被文本嗅探误判) ──
+echo "[T22] 经验分层provenance(显式kind优先, 文本嗅探只作旧行回退——防'引用模板即被误判')"
+# 22a. src 显式 kind 判定
+t "src显式kind判定" bash -c "grep -q \"exp.kind === 'frame'\" '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/src/store.ts'"
+# 22b. 旧行回退用前缀匹配(非 includes)
+t "旧行回退用前缀匹配" bash -c "grep -q \"startsWith('quiet-driver 旁路三问帧')\" '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/src/store.ts'"
+# 22c. 写入方声明 kind
+t "quiet-driver声明kind=frame" bash -c "grep -q \"kind: 'frame'\" '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts'"
+# 22d. lib 已部署(bundler 会把单引号规范化为双引号)
+t "lib含kind判定(已部署)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")).read()
+assert "kind === \"frame\"" in s, "lib 未部署 kind 判定"
+'
+# 22e. 运行时分层不变量(帧层全为帧/任务层无帧)
+t "运行时分层不变量" python3 -c '
+import json, os
+d = os.path.expanduser("~/.dsh/cognitive-pipeline")
+def rows(f): return [json.loads(l) for l in open(os.path.join(d, f)) if l.strip()]
+frames, tasks = rows("experiences-frames.jsonl"), rows("experiences.jsonl")
+bad = [r.get("expId") for r in frames
+       if r.get("kind") != "frame"
+       and not (r.get("sar") or {}).get("action", "").startswith("quiet-driver 旁路三问帧")]
+assert not bad, "帧层混入非帧经验: %s" % bad[:3]
+bad2 = [r.get("expId") for r in tasks if r.get("kind") == "frame"]
+assert not bad2, "任务层混入帧经验: %s" % bad2[:3]
+'
+# 22f. 回归个案: 引用模板字符串的任务经验(exp_221)必须留在任务层
+t "引用模板的任务经验留任务层" python3 -c '
+import json, os
+d = os.path.expanduser("~/.dsh/cognitive-pipeline")
+ids = [json.loads(l).get("expId") for l in open(os.path.join(d, "experiences.jsonl")) if l.strip()]
+assert "exp_221" in ids, "exp_221 不在任务层(文本嗅探误判复发)"
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。

@@ -179,6 +179,16 @@ export interface Experience {
    * experiences with a non-neutral utility join the cold-loop sample so the
    * pipeline can learn about its own failure modes. Absent on legacy rows. */
   readonly meta?: boolean
+  /**
+   * Explicit provenance marker deciding which storage layer this experience
+   * belongs to: `frame` = the quiet-driver side-channel three-question frame
+   * (episodic layer, `experiences-frames.jsonl`), `task` = real work (semantic
+   * layer, `experiences.jsonl`). Absent on legacy rows, which fall back to a
+   * strict action-prefix sniff. Text sniffing alone is unsound: tp-025 caught a
+   * task experience (exp_221) misrouted to the frame layer because its action
+   * merely QUOTED the frame template string.
+   */
+  readonly kind?: 'task' | 'frame'
   /** The goal-anchored chain this experience belongs to, when tagged by an
    * orchestrator goal or a delegation. The chain consolidates tagged members
    * into a causal skeleton. Absent on legacy rows. */

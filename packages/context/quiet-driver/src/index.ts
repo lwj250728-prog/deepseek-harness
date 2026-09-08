@@ -929,6 +929,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
         const pipeline = ctx.get('cognitivePipeline') as { rememberMeta(input: {
           situation: string; action: string; outcome: string
           utility: { materialGain: number; emotionalValence: number; energyCost: number }
+          kind?: 'task' | 'frame'
         }): string } | undefined
         if (pipeline !== undefined) {
           pipeline.rememberMeta({
@@ -937,6 +938,8 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
             action: `quiet-driver 旁路三问帧 #${frameNo}（${reason}）：定时触发独立会话例行自我评估（环境/当下/预测）；本轮评估要点：${text.slice(0, 80)}`,
             outcome: text,
             utility: { materialGain: 1, emotionalValence: 0, energyCost: 2 },
+            // cl-033: 显式声明存储层——文本嗅探曾把引用模板字符串的任务经验误判为帧经验
+            kind: 'frame',
           })
           ctx.logger.info('[quiet-driver] side-channel #%d persisted to cognitive pipeline', frameNo)
         }

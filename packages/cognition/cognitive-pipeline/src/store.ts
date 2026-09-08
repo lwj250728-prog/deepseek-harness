@@ -492,10 +492,17 @@ export class CognitiveStore {
    * 帧旁路经验(情景层)与任务经验(语义层)分文件存储——CLS 双存储。
    * 2026-09-08 cl-030 修复: 原实现把内存全量回写 experiences.jsonl, 导致离线清洗的
    * 帧经验分离数分钟内被覆盖(运行时内存仍持旧集)。改为按来源分流: 帧经验(quiet-driver
-   * 旁路三问帧, action 固定模板)写 experiences-frames.jsonl, 任务经验写 experiences.jsonl。
+   * 旁路三问帧)写 experiences-frames.jsonl, 任务经验写 experiences.jsonl。
+   * 2026-09-08 cl-033 修复(tp-025 实测发现): 原分流用 action.includes('旁路三问帧')
+   * 文本嗅探, 一条任务经验因在 action 里引用该模板字符串(exp_221)被误判为帧经验写入
+   * 情景层。改为显式 kind 标记优先(写入方声明), 旧行回退到"模板前缀"严格判定。
    */
   private isFrameExperience(exp: Experience): boolean {
-    return (exp.sar?.action ?? '').includes('旁路三问帧')
+    if (exp.kind === 'frame') return true
+    if (exp.kind === 'task') return false
+    // Legacy rows carry no explicit kind: the frame template must PREFIX the
+    // action, so a task experience that merely quotes it stays in the task layer.
+    return (exp.sar?.action ?? '').startsWith('quiet-driver 旁路三问帧')
   }
 
   /** Persist both experience layers to their own files (never cross-write). */
