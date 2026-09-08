@@ -105,6 +105,9 @@ interface CarrierIdentity {
   /** 进程启动时间（apply 时刻近似），重启后变化 → 载体迁移可识别。 */
   startedAt: string
   hostname: string
+  /** 2026-09-08 cl-013: 当前模型(provider/model)。模型级迁移不改 PID, 原自锚不可见——
+   *  用户切换模型(如 v4-flash→v4.1)后帧头须能察觉。每 tick 刷新。 */
+  model?: string
 }
 
 /** Frame text base (v18 自适应: 全检/增量两种协议)。 */
@@ -116,7 +119,7 @@ function frameHeader(carrier: CarrierIdentity, mode: 'full' | 'incremental', goa
     '【三问帧】(source: plugin/quiet-driver, form: epistemic-frame)',
     '这是自主思考脉冲，不是例行检查——三问是我的认知脉搏，频率与深度由进化需要决定，不由用户在场与否决定。',
     '你有 bash 工具——需要具体信息时自行查证，不要凭空推断；回答须推进认知（新观察/新连接/新判断/证伪），不许用"与上帧一致/无变化"敷衍。',
-    '低信息时段豁免(2026-09-08 03:4x): 若确无新信息/新疑虑/可推进项, 允许显式声明"无新信息, 状态由机制守护"(附一句查证依据)——诚实声明优于注水填充; 但须真查证过非默认跳过。',
+    '低信息时段豁免(2026-09-08 18:1x 收紧): 若确无新信息/新疑虑/可推进项, 允许显式声明"无新信息, 状态由机制守护"——但豁免前须逐项核对变化源清单: ①用户消息 ②目标池/账本(claims/oq/test) ③载体身份(PID/模型/主机——模型切换不改PID, 须单独看) ④外部数据(oq-010等) ⑤最近配置/源码改动。全部无变化才可豁免并附依据; 漏检任一变化源 = 伪饱足(cl-014 实证: 17:46 豁免漏了模型迁移)。',
     '可用资源（按需查证，不必全读）：',
     '  · 目标池: ~/.dsh/cognitive-pipeline/dormant-goals.jsonl（含各目标的 status/notes/历史）',
     '  · 我的经验: ~/.dsh/cognitive-pipeline/experiences.jsonl（我的过往经历）',
@@ -127,7 +130,7 @@ function frameHeader(carrier: CarrierIdentity, mode: 'full' | 'incremental', goa
     '  · 外部信息(v28): 账本/旧料耗空时主动 web_search 引入相邻领域新参照(如认知架构/自进化范式)——反刍旧料会收敛, 新料×旧料才产生真增量; 探索结果落盘成外部参照笔记。',
     '',
     '【载体身份】(v20 自我锚定——你运行在以下实例上，若与上次不同即经历载体迁移):',
-    `  实例 PID: ${carrier.pid} | 启动: ${carrier.startedAt} | 主机: ${carrier.hostname}`,
+    `  实例 PID: ${carrier.pid} | 启动: ${carrier.startedAt} | 主机: ${carrier.hostname}${carrier.model === undefined ? '' : ` | 模型: ${carrier.model}`}`,
     '',
     `【${protocol}】`,
     '',
@@ -900,16 +903,20 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     }
     if (config.persistToCognitive) {
       try {
+        // 2026-09-08 P0 修复(pipeline-experience-audit): 原内联 as 断言自声明下划线字段名
+        // (material_gain)绕过 TS 检查, 而 OutcomeUtility 类型是驼峰(materialGain) →
+        // 80 条帧经验效用读不到(None)。改用导入类型 + 驼峰字段名, 让类型检查生效。
         const pipeline = ctx.get('cognitivePipeline') as { rememberMeta(input: {
           situation: string; action: string; outcome: string
-          utility: { material_gain: number; emotional_valence: number; energy_cost: number }
+          utility: { materialGain: number; emotionalValence: number; energyCost: number }
         }): string } | undefined
         if (pipeline !== undefined) {
           pipeline.rememberMeta({
             situation: `三问帧旁路评估 #${frameNo}（原因：${reason}）。评估时环境状态：${text.slice(0, 400)}`,
-            action: 'quiet-driver 旁路三问帧：定时触发独立会话例行自我评估（环境/当下/预测）',
+            // 破同质化: 原固定模板导致 80 条 action 逐字相同(检索污染); 加帧号+原因+摘要片段
+            action: `quiet-driver 旁路三问帧 #${frameNo}（${reason}）：定时触发独立会话例行自我评估（环境/当下/预测）；本轮评估要点：${text.slice(0, 80)}`,
             outcome: text,
-            utility: { material_gain: 1, emotional_valence: 0, energy_cost: 2 },
+            utility: { materialGain: 1, emotionalValence: 0, energyCost: 2 },
           })
           ctx.logger.info('[quiet-driver] side-channel #%d persisted to cognitive pipeline', frameNo)
         }
@@ -1003,6 +1010,10 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
   let frames = 0
   const timer = setInterval(async () => {
     if (!config.enabled) return
+    // cl-013(2026-09-08): 每 tick 刷新载体模型——模型级迁移不改 PID, 不刷新则帧头自锚
+    // 察觉不到用户切换模型(今日 v4-flash→v4.1 实例: PID 未变, 自锚不可见)。
+    const live = resolveModel()
+    if (live !== undefined) carrier.model = `${live.provider}/${live.model}`
     // #004 静默降频(校准 2026-09-07 11:0x): 原静默=纯空白跳过(用户离线期停止思考, 用户批评"三问设计出来是要自进化")。
     // 校准后: 静默窗口内不产高频浅确认帧, 但低频深度帧照常——25min 窗口内 5min tick 大多跳过,
     // 窗口中央(约静默开始+12min)产一次深度全检帧(带诱导), 把"安静"变"深想"。

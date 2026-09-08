@@ -37,8 +37,13 @@ t "资产含可行规则" bash -c "grep -q 'R1 ' '$DIR/world-model-assets.md'"
 
 # ── T3 校准有效性(帧质量, 呼应今日措辞校准) ──────────────────
 echo "[T3] 校准有效性(帧实质产出, 非确认态)"
-# 3a. 最近帧有实质内容(平均>200字)
-t "近帧平均长度>200字" bash -c "'$HOME/dsh-fork/dsh-verify-frames.sh' --minutes 30 2>/dev/null | grep -q '平均长度: [2-9][0-9][0-9]'"
+# 3a. 最近帧有实质内容(平均>200字; 窗口样本<3则跳过=待积累, 防重启后误报)
+t "近帧平均长度>200字(样本≥3)" bash -c "
+out=\$('$HOME/dsh-fork/dsh-verify-frames.sh' --minutes 30 2>/dev/null)
+n=\$(echo \"\$out\" | grep -oP '窗口帧数: \K[0-9]+')
+if [ \"\${n:-0}\" -lt 3 ]; then echo '样本不足跳过'; exit 0; fi
+echo \"\$out\" | grep -q '平均长度: [2-9][0-9][0-9]'
+"
 
 # ── T4 存续保护(数据不会丢) ───────────────────────────────────
 echo "[T4] 存续保护(四层在跑)"
@@ -237,6 +242,26 @@ t "src含灰测模型" bash -c "grep -q 'deepseek-v4.1-flash-expires-on-0910' '$
 t "lib含灰测模型(已部署)" bash -c "grep -q 'deepseek-v4.1-flash-expires-on-0910' '$HOME/dsh-fork/packages/llm/llm-deepseek/lib/index.js'"
 # 15c. 到期标注存在(清理锚点)
 t "到期标注(expires-on-0910)" bash -c "grep -q 'expires-on-0910' '$HOME/dsh-fork/packages/llm/llm-deepseek/src/index.ts'"
+
+# ── T16 经验写入字段名一致性(2026-09-08 18:0x 固化——tp-020: 驼峰字段防 80 条效用丢失) ──
+echo "[T16] 经验写入字段名(quiet-driver utility 须驼峰——下划线曾致 80 条效用读不到)"
+# 16a. src 代码层用驼峰(排除注释)
+t "src 代码层 utility 驼峰" bash -c "grep -q 'materialGain: 1' '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts' && ! grep -v '^\s*//' '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts' | grep -q 'material_gain'"
+# 16b. lib 已部署
+t "lib 含驼峰字段(已部署)" bash -c "grep -q 'materialGain: 1' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
+# 16c. action 破同质化(含帧号)
+t "action 破同质化(含帧号)" bash -c "grep -q '旁路三问帧 #' '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts'"
+# 16d. 重启后新经验字段名正确(无新经验则跳过=待验证)
+t "重启后经验字段名正确" python3 -c "
+import json, datetime, subprocess
+ts = subprocess.run(['systemctl','--user','show','dsh-web.service','-p','ActiveEnterTimestamp','--value'], capture_output=True, text=True).stdout.strip()
+restart = datetime.datetime.strptime(ts.replace('CST','').strip(), '%a %Y-%m-%d %H:%M:%S').timestamp() if ts else 0
+exps = [json.loads(l) for l in open('$DIR/experiences.jsonl')]
+after = [e for e in exps if (e.get('timestamp') or 0)/1000 > restart]
+bad = [e['expId'] for e in after if 'material_gain' in e.get('sar',{}).get('outcomeUtility',{})]
+assert not bad, f'下划线字段残留: {bad}'
+print(f'OK ({len(after)} 条重启后经验)')
+"
 
 echo ""
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
