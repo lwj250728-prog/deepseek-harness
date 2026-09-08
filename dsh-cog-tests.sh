@@ -546,6 +546,47 @@ for p in sorted(glob.glob(os.path.join(d, "00*.md"))):
 assert not bad, "字数超范围: %s" % bad[:3]
 '
 
+# ── T26 测试选择器 last-wins(2026-09-08 22:4x 固化——追加式账本未去重, 已通过测试被反复复活) ──
+echo "[T26] 测试选择器last-wins(追加式账本同id多状态: 先pending后passed 不得复活)"
+# 26a. src 含按 id 去重
+t "src按id取最后一条" bash -c "grep -q 'byId.set(item.id' '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts'"
+# 26b. lib 已部署
+t "lib含last-wins(已部署)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/lib/index.js")).read()
+assert "byId.set(" in s, "lib 未部署 last-wins 去重"
+'
+# 26c. 账本确为追加式(同 id 多状态) —— 断言前提真实存在
+t "账本为追加式(同id多状态)" python3 -c '
+import json, os
+from collections import Counter
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/test-pending.jsonl")
+rows = [json.loads(l) for l in open(p) if l.strip()]
+c = Counter(r.get("id") for r in rows)
+multi = [k for k, v in c.items() if v > 1 and k and k.startswith("tp-")]
+assert multi, "无同 id 多记录, 本断言前提不成立"
+'
+# 26d. 模拟新旧选择逻辑: 新逻辑挑中的必为真 pending; 旧逻辑若挑到不同 id 则该 id 已被推进
+t "去重后不复活已通过测试" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/test-pending.jsonl")
+rows = [json.loads(l) for l in open(p) if l.strip()]
+by_id = {}
+for r in rows:
+    if r.get("id"): by_id[r["id"]] = r
+def pick(dedupe):
+    if dedupe:
+        cands = [k for k, v in by_id.items() if v.get("status") == "pending" and v.get("title")]
+    else:
+        cands = sorted({r["id"] for r in rows if r.get("status") == "pending" and r.get("title")})
+    return sorted(cands)[0] if cands else None
+new, old = pick(True), pick(False)
+assert new is None or by_id[new].get("status") == "pending", "新逻辑挑中非 pending: %s" % new
+if old is not None and old != new:
+    assert by_id[old].get("status") != "pending", "旧逻辑挑到 %s 但其最后状态仍为 pending" % old
+print("new=%s old=%s" % (new, old))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。

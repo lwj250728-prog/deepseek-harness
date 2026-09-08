@@ -499,9 +499,15 @@ async function pickPendingTestPlan(testPendingPath: string): Promise<{ id: strin
   try {
     const { readFile } = await import('node:fs/promises')
     const raw = await readFile(target, 'utf8')
-    const items = raw.split('\n').filter(Boolean).map((l) => JSON.parse(l) as {
+    const parsed = raw.split('\n').filter(Boolean).map((l) => JSON.parse(l) as {
       id?: string; title?: string; how?: string; pass?: string; status?: string
-    }).filter((x) => x.id && x.title && x.status === 'pending')
+    }).filter((x) => x.id && x.title)
+    // 2026-09-08 22:4x 修复: 账本是追加式的, 同一 id 会因状态推进被多次写入(先 pending 后
+    // passed)。原先只按 status==='pending' 过滤, 于是旧的 pending 记录把已通过的测试反复
+    // 复活——tp-025 已 passed 却连发 3 次测试计划帧。改为按 id 取最后一条(last-wins)再过滤。
+    const byId = new Map<string, typeof parsed[number]>()
+    for (const item of parsed) byId.set(item.id!, item)
+    const items = [...byId.values()].filter((x) => x.status === 'pending')
     if (items.length === 0) return null
     items.sort((a, b) => String(a.id).localeCompare(String(b.id)))
     const pick = items[0]
