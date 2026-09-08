@@ -276,4 +276,29 @@ t "帧预测无锚不结算" bash -c "grep -q 'no-external-anchor' '$HOME/dsh-fo
 # 17d. lib 已部署两项
 t "lib含α自适应+无锚不结算" bash -c "grep -q 'base / Math.sqrt' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js' && grep -q 'no-external-anchor' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
 
+
+# ── T18 验收标准机制(2026-09-08 19:3x 固化——tp-022: acceptance 从空转→可用) ──
+echo "[T18] 验收标准机制(3标准激活/trigger单词/工具层可更新/audit已应用)"
+# 18a. 3 条 active 标准
+t "3条标准active" python3 -c "
+import json
+d = json.load(open('$DIR/acceptance.json'))
+assert len([c for c in d if c.get('status')=='active']) >= 3
+"
+# 18b. trigger 均为单词(无竖线——字面 includes 匹配)
+t "trigger均为单词" python3 -c "
+import json
+d = json.load(open('$DIR/acceptance.json'))
+bad = [c['checkId'] for c in d if c.get('status')=='active' and '|' in (c.get('trigger') or '')]
+assert not bad, f'含竖线: {bad}'
+"
+# 18c. 工具层传递 trigger(cl-022 修复)
+t "工具层传递trigger" bash -c "grep -q 'args.trigger' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/src/tools.ts'"
+# 18d. audit 有 applied 非空(机制真被应用)
+t "audit有applied记录" python3 -c "
+import json
+rows = [json.loads(l) for l in open('$DIR/claim_audits.jsonl')]
+assert any(r.get('appliedCheckIds') for r in rows), '无applied记录'
+"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"

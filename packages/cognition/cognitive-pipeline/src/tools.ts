@@ -1088,6 +1088,12 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
         type: 'string',
         description: 'New evidence hint.',
       },
+      // 2026-09-08 补(cl-022): service.updateAcceptanceCheck 支持 trigger 但工具层未暴露——
+      // 传 trigger 被静默忽略, 标准触发词无法修正(匹配是字面 includes, 用 | 分隔的词组永不命中)。
+      trigger: {
+        type: 'string',
+        description: 'New trigger marker (literal substring matched against situation+claim; use ONE word — the match is a literal includes, NOT a regex).',
+      },
       retire: {
         type: 'boolean',
         description: 'Set true to freeze the criterion as retired (terminal; cannot be un-retired).',
@@ -1112,6 +1118,7 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
         checkId: args.check_id,
         ...args.criterion === undefined || args.criterion.length === 0 ? {} : { criterion: args.criterion },
         ...args.evidence_hint === undefined || args.evidence_hint.length === 0 ? {} : { evidenceHint: args.evidence_hint },
+        ...args.trigger === undefined || args.trigger.length === 0 ? {} : { trigger: args.trigger },
         ...args.retire === undefined ? {} : { retire: args.retire },
       })
       return {
