@@ -601,6 +601,51 @@ if old is not None and old != new:
 print("new=%s old=%s" % (new, old))
 '
 
+# ── T27 引用结算存活(2026-09-08 23:5x 固化——cl-044: 引用率 50%→0.5%, 学习信号停摆两天) ──
+echo "[T27] 引用结算存活(注入块带引用契约 + 未结算注入不得超期滞留)"
+# 27a. 注入块含引用契约
+t "src注入块含引用契约" bash -c "grep -q '引用契约' '$HOME/dsh-fork/packages/context/cognitive-inject/src/index.ts'"
+# 27b. lib 已部署
+t "lib含引用契约(已部署)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js")).read()
+assert "引用契约" in s, "lib 未部署引用契约"
+'
+# 27c. TTL 结算在源码与 lib
+t "TTL结算已部署" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts")).read()
+lib = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")).read()
+assert "INJECTION_SETTLE_TTL_MS" in src and "INJECTION_SETTLE_TTL_MS" in lib, "TTL 结算未部署"
+'
+# 27d. 运行时: 未结算注入不得有超过 48h 的(TTL=24h + 余量)
+t "无超期未结算注入" python3 -c '
+import json, os, time
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/injections.jsonl")
+rows = [json.loads(l) for l in open(p) if l.strip()]
+now = time.time()
+def age_h(r):
+    v = r.get("createdAt") or 0
+    v = float(v) if v else 0
+    return (now - (v / 1000 if v > 1e11 else v)) / 3600
+stale = [r.get("injectionId") for r in rows if r.get("cited") is None and age_h(r) > 48]
+assert not stale, "超期未结算注入: %s" % stale[:3]
+'
+# 27e. 引用率非零(近 7 天至少一条被引用)
+t "近7天有引用记录" python3 -c '
+import json, os, time
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/injections.jsonl")
+rows = [json.loads(l) for l in open(p) if l.strip()]
+now = time.time()
+def ts(r):
+    v = r.get("createdAt") or 0
+    v = float(v) if v else 0
+    return v / 1000 if v > 1e11 else v
+recent = [r for r in rows if ts(r) > now - 7 * 86400]
+cited = [r for r in recent if r.get("cited")]
+assert cited, "近 7 天零引用——学习信号停摆"
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。

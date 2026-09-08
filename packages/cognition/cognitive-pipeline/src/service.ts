@@ -97,6 +97,11 @@ const META_DEDUP_COSINE = 0.8
  * output never reaches the accumulation gate (the per-turn LLM cost guard). */
 const ACCUMULATE_MIN_ACTION_CHARS = 160
 
+/** Unresolved injections older than this settle as "not cited" (cl-044): a
+ * one-shot session that injected and never produced another turn would
+ * otherwise stay pending forever and never fold into the learning ledgers. */
+const INJECTION_SETTLE_TTL_MS = 24 * 60 * 60 * 1000
+
 /** Plugin configuration (all fields optional; engine defaults apply). */
 export interface CognitivePipelineConfig {
   /** Store directory; default `<dshHome>/cognitive-pipeline`. */
@@ -2221,6 +2226,22 @@ export class CognitivePipelineService extends Service {
       .filter(record => record.sessionId === sessionId && record.cited === null)
     let settled = 0
     let cited = 0
+    // cl-044: 一次性会话(如 quiet-frame 旁路)注入后不会再有下一轮, 其记录永远停在
+    // cited=null——既不计入引用, 也永不折入 jump/chain/strategy 账本(75 条 >24h 未结算)。
+    // 超过 TTL 的未结算注入按"未被引用"结算: 会话已结束, 这是事实而非惩罚。
+    const cutoff = Date.now() - INJECTION_SETTLE_TTL_MS
+    for (const stale of this.store.injectionsSnapshot()) {
+      if (stale.cited !== null || stale.sessionId === sessionId) continue
+      if (stale.createdAt > cutoff) continue
+      this.store.settleInjection(stale.injectionId, false)
+      this.store.foldJumpCitation(stale.jumpWords, false)
+      if (stale.chainId !== null) {
+        this.foldObjectFeedback('chain', stale.chainId, false)
+        this.foldObjectFeedback('chain-pattern', stale.chainId, false)
+      }
+      if (stale.strategyId !== null) this.store.foldSolidifiedStrategyUsage(stale.strategyId, false)
+      settled += 1
+    }
     for (const record of pending) {
       const mentioned = record.expIds.some(expId => turnText.includes(expId))
         || (record.chainId !== null && turnText.includes(record.chainId))

@@ -447,7 +447,13 @@ function referenceBlock(
   const vetoNote = rejectedNotes.length > 0
     ? `\n（已否决 ${rejectedNotes.length} 条过阈值候选：${rejectedNotes.join('；')}）`
     : ''
-  const text = `${preamble}\n${lines.join('\n')}${vetoNote}`
+  // 2026-09-08 23:5x cl-044: 引用结算只认"回复文本字面包含 expId"。模型改用语态叙述后,
+  // 引用率从 09-02 的 50% 掉到 09-07/08 的 0.5%(最后一次引用停在 09-08 06:47)——通道权重
+  // 与触发跳转的学习信号就此停摆。修法不是放宽判据(关键词重叠会造假阳性), 而是把"引用契约"
+  // 写进注入块: 采用了哪条, 就在回复里写出它的 expId。
+  const citationContract = '\n（引用契约：若本轮确实采用了其中某条经验，请在回复中写出它的 expId——'
+    + '这是引用结算的唯一依据，用于学习哪些注入真正有用；没采用就不必写。）'
+  const text = `${preamble}\n${lines.join('\n')}${vetoNote}${citationContract}`
   return createUserMessage({
     content: [{ type: 'text', text }],
     source: { kind: 'plugin', plugin: name, form: 'snapshot', sections: [{ name, text }] },
