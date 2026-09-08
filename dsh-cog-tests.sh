@@ -90,6 +90,51 @@ t "顶层裸entry被拦截" bash -c "! PATCH_FILE='$TMPB2' '$SR' --verify-only >
 t "patch校验在插件早退之前(无条件)" bash -c "patch_line=\$(grep -n 'if ! verify_patch' '$SR' | head -1 | cut -d: -f1); early_line=\$(grep -n '无最近改动的插件' '$SR' | head -1 | cut -d: -f1); [ -n \"\$patch_line\" ] && [ -n \"\$early_line\" ] && [ \"\$patch_line\" -lt \"\$early_line\" ]"
 rm -f "$TMPP" "$TMPB1" "$TMPB2"
 
+# ── T7 数据链路防复发(2026-09-08 08:2x 固化——tp-010: oq010-probe 解锁逻辑) ──
+echo "[T7] 数据链路(oq010-probe 解锁: 数据入→nextAction 去'待'前缀→行动帧可推)"
+GOALS7="$DIR/dormant-goals.jsonl"
+BAK7=$(mktemp); cp "$GOALS7" "$BAK7"
+# 7a. 解锁段执行: 模拟 probe 检测到数据的分支逻辑(与 dsh-oq010-probe.sh 相同)
+UNLOCK7=$(python3 - "$GOALS7" << 'PYEOF'
+import json, sys
+p = sys.argv[1]
+rows = []
+changed = False
+for line in open(p, encoding='utf8'):
+    d = json.loads(line)
+    if d.get('id') == 'goal-digital-life-incubation':
+        d['nextAction'] = ('执行 oq-010 解读: 读 oq010-data-ready.json(刚入中心的细粒度数据), '
+                           '按 world-model 读者层基线解读, 结论回写 world-model + 决定发布节奏')
+        changed = True
+    rows.append(d)
+if changed:
+    with open(p, 'w', encoding='utf8') as f:
+        for d in rows:
+            f.write(json.dumps(d, ensure_ascii=False) + '\n')
+    print('unlocked')
+PYEOF
+)
+# 7b. 断言解锁: nextAction 不以"待"开头且含"执行 oq-010"
+NA7=$(python3 -c "
+import json
+for l in open('$GOALS7'):
+    d=json.loads(l)
+    if d.get('id')=='goal-digital-life-incubation': print(d.get('nextAction',''))
+")
+t "解锁段执行成功(模拟数据入中心)" test -n "$UNLOCK7"
+t "解锁后 nextAction 去'待'前缀" bash -c "! [[ '$NA7' == 待* ]]"
+t "解锁后含'执行 oq-010'(行动帧可推)" bash -c "[[ '$NA7' == *'执行 oq-010'* ]]"
+# 7c. 还原
+cp "$BAK7" "$GOALS7"
+NA7B=$(python3 -c "
+import json
+for l in open('$GOALS7'):
+    d=json.loads(l)
+    if d.get('id')=='goal-digital-life-incubation': print(d.get('nextAction',''))
+")
+t "还原后回到'待事件'待命态" bash -c "[[ '$NA7B' == 待* ]]"
+rm -f "$BAK7"
+
 echo ""
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 if [ "$FAIL" -gt 0 ]; then
