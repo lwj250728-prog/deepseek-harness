@@ -344,6 +344,45 @@ for l in open('$DIR/claims-ledger.jsonl'):
 assert not bad, f'矛盾项: {bad}'
 "
 
+# ── T21 目标锚定自动化(2026-09-08 21:2x 固化——cl-031: 离线实验语义链0条/目标锚定链4条) ──
+echo "[T21] 目标锚定自动化(remember_experience 自动取活目标/会话粘性锚, 不依赖逐条记忆)"
+# 21a. src 含链锚解析
+t "src含链锚解析" bash -c "grep -q 'resolveChainAnchor' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/src/tools.ts'"
+# 21b. 解析优先级: 活目标 > 会话锚(顺序断言)
+t "活目标优先于会话锚" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/tools.ts")).read()
+q = chr(39)
+i = src.index("source: " + q + "goal" + q)
+j = src.index("source: " + q + "session" + q)
+assert i < j, "goal 分支必须在 session 分支之前"
+'
+# 21c. 会话锚持久化
+t "会话锚持久化文件" bash -c "grep -q 'chain_anchors.json' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/src/store.ts'"
+# 21d. lib 已部署
+t "lib含链锚(已部署)" bash -c "grep -q 'chain_source' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
+# 21e. 运行时锚文件存在且非空(机制真跑过)
+t "运行时锚文件非空" python3 -c '
+import json, os
+d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/chain_anchors.json")))
+assert isinstance(d, dict) and len(d) > 0, "链锚文件为空"
+'
+# 21f. 最新任务经验带 chainId(自动锚定真生效, 非仅代码存在)
+t "最新经验已锚定目标" python3 -c '
+import json, os
+rows = [json.loads(l) for l in open(os.path.expanduser("~/.dsh/cognitive-pipeline/experiences.jsonl")) if l.strip()]
+newest = max(rows, key=lambda r: r.get("timestamp") or 0)
+cid = newest.get("chainId")
+assert isinstance(cid, str) and cid != "", "最新经验未锚定: %s" % newest.get("expId")
+'
+# 21g. 帧经验不参与锚定(帧层保持无 chainId, 防污染链)
+t "帧经验不带链锚" python3 -c '
+import json, os
+rows = [json.loads(l) for l in open(os.path.expanduser("~/.dsh/cognitive-pipeline/experiences-frames.jsonl")) if l.strip()]
+bad = [r.get("expId") for r in rows if isinstance(r.get("chainId"), str) and r.get("chainId")]
+assert not bad, "帧经验被锚定: %s" % bad[:3]
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。

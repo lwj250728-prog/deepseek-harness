@@ -28,6 +28,53 @@ function renderJson(_args: unknown, value: unknown): { type: 'text'; text: strin
   return [{ type: 'text', text: JSON.stringify(value) }]
 }
 
+/** Minimal view of the goal service used for automatic chain anchoring. */
+interface GoalAnchorLookup {
+  get(agent: unknown): { readonly goal: { readonly id: string; readonly phase: string } } | undefined
+}
+
+/** Resolved chain anchor for one experience write. */
+interface ChainAnchorResolution {
+  readonly chainId: string | undefined
+  readonly source: 'explicit' | 'goal' | 'session' | 'none'
+}
+
+/**
+ * Resolve the chain anchor for one experience write (cl-031). The offline
+ * replay experiment (experiment-replay-offline-20260908.md) found semantic
+ * replay produces ZERO chains while goal anchoring produced every real chain,
+ * so the anchor must be automatic — not something the agent has to remember
+ * per experience. Resolution order:
+ *   1. explicit `chain_id` (also becomes this session's sticky anchor);
+ *   2. the agent's live goal id (automatic, whenever a goal round is running);
+ *   3. the session's sticky anchor (one declaration covers the work block);
+ *   4. none.
+ * An explicitly empty `chain_id` clears the sticky anchor.
+ * @param ctx - context providing the optional goal service.
+ * @param service - the pipeline service owning the store.
+ * @param exec - the executing tool context (carries the agent/session).
+ * @param explicit - the caller-supplied chain_id, if any.
+ * @returns the chain id to tag plus which rule produced it.
+ */
+function resolveChainAnchor(
+  ctx: Context, service: CognitivePipelineService, exec: ToolRunContext, explicit: string | undefined,
+): ChainAnchorResolution {
+  const sessionId = exec.agent === undefined ? undefined : exec.agent.session.id
+  if (explicit !== undefined) {
+    const trimmed = explicit.trim()
+    if (sessionId !== undefined) service.store.setChainAnchor(sessionId, trimmed === '' ? null : trimmed)
+    return trimmed === ''
+      ? { chainId: undefined, source: 'none' }
+      : { chainId: trimmed, source: 'explicit' }
+  }
+  const goals = ctx.get('goals') as GoalAnchorLookup | undefined
+  const view = exec.agent === undefined ? undefined : goals?.get(exec.agent)
+  const goalId = view === undefined || view.goal.phase === 'complete' ? undefined : view.goal.id
+  if (goalId !== undefined && goalId !== '') return { chainId: goalId, source: 'goal' }
+  const anchored = sessionId === undefined ? undefined : service.store.getChainAnchor(sessionId)
+  return anchored === undefined ? { chainId: undefined, source: 'none' } : { chainId: anchored, source: 'session' }
+}
+
 /** Register the fifteen pipeline tools.
  * @param ctx - context with the tool registry.
  * @param service - the pipeline service backing the tools.
@@ -41,7 +88,9 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
       + 'outcome for later retrieval and utility-space clustering. Call this when the user shares a completed '
       + 'experience that should inform future predictions. Optionally tag the experience with a chain_id (the '
       + 'goal trace id of the goal execution it belongs to) so the offline consolidation can assemble the '
-      + 'goal-anchored chain from its members.',
+      + 'goal-anchored chain from its members. When omitted, the anchor is resolved automatically: the live goal '
+      + 'id if a goal round is running, otherwise this session\'s sticky anchor (set by an earlier explicit '
+      + 'chain_id). Pass an empty chain_id to clear the sticky anchor.',
     parameters: {
       raw_text: {
         type: 'string',
@@ -74,14 +123,16 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
             },
           },
           chain_id: { type: 'string' },
+          chain_source: { type: 'string', required: true },
         },
       },
       render: renderJson,
     },
     async execute(args, exec) {
+      const anchor = resolveChainAnchor(ctx, service, exec, args.chain_id)
       const { expId, sar } = await service.remember({
         rawText: args.raw_text,
-        ...args.chain_id === undefined ? {} : { chainId: args.chain_id },
+        ...anchor.chainId === undefined ? {} : { chainId: anchor.chainId },
       }, {
         ...callContext(exec),
         signal: exec.signal,
@@ -96,7 +147,8 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           emotional_valence: sar.outcomeUtility.emotionalValence,
           energy_cost: sar.outcomeUtility.energyCost,
         },
-        ...args.chain_id === undefined ? {} : { chain_id: args.chain_id },
+        ...anchor.chainId === undefined ? {} : { chain_id: anchor.chainId },
+        chain_source: anchor.source,
       }
     },
     presentCall: args => ({ card: 'generic', title: 'Remember experience', kind: 'other', rawInput: args.raw_text }),

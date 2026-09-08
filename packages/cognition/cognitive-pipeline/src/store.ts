@@ -515,6 +515,35 @@ export class CognitiveStore {
   }
 
   /**
+   * Read the session-scoped chain anchor (goal trace id) inherited by untagged
+   * experiences. Declaring the anchor once per work block is what makes
+   * goal-anchored chains form without per-experience remembering.
+   * @param sessionId - the owning session.
+   * @returns the anchored chain id, or undefined.
+   */
+  getChainAnchor(sessionId: string): string | undefined {
+    return this.chainAnchors.get(sessionId)
+  }
+
+  /**
+   * Set or clear the session-scoped chain anchor and persist it.
+   * @param sessionId - the owning session.
+   * @param chainId - the goal trace id, or null/empty to clear.
+   */
+  setChainAnchor(sessionId: string, chainId: string | null): void {
+    if (chainId === null || chainId.trim() === '') this.chainAnchors.delete(sessionId)
+    else this.chainAnchors.set(sessionId, chainId.trim())
+    this.enqueue('chain_anchors.json', `${JSON.stringify(Object.fromEntries(this.chainAnchors))}\n`)
+  }
+
+  /** Every live chain anchor, for inspection.
+   * @returns session id → chain id.
+   */
+  chainAnchorsSnapshot(): Readonly<Record<string, string>> {
+    return Object.fromEntries(this.chainAnchors)
+  }
+
+  /**
    * Read one experience by id.
    * @param expId - the experience id.
    * @returns the experience, or undefined.
