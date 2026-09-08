@@ -172,6 +172,13 @@ t "lib含入账纪律子句(已部署)" bash -c "grep -q '先入账再回答' '$
 # 11c. lib 早于服务启动(当前进程跑的是新 lib)
 t "lib早于服务启动(进程用新lib)" bash -c "lib_ts=\$(stat -c %Y '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'); svc_ts=\$(systemctl --user show dsh-web.service -p ActiveEnterTimestamp --value 2>/dev/null); svc_ep=\$(date -d \"\$svc_ts\" +%s 2>/dev/null); [ -n \"\$svc_ep\" ] && [ \"\$lib_ts\" -lt \"\$svc_ep\" ]"
 
+# ── T12 异模型盲审通道(2026-09-08 12:0x 固化——tp-015: oq-022 effectiveness 外部判定源) ──
+echo "[T12] 异模型盲审通道(oq-022——effectiveness 外部判定源可用)"
+# 12a. 盲审脚本存在且语法有效
+t "盲审脚本存在且语法有效" bash -c "test -f '$HOME/dsh-fork/dsh-oq022-blind-audit.py' && python3 -m py_compile '$HOME/dsh-fork/dsh-oq022-blind-audit.py'"
+# 12b. SILICONFLOW key 存在
+t "SILICONFLOW key 存在" bash -c "grep -q 'SILICONFLOW_API_KEY' '$HOME/.dsh/.credentials.yaml'"
+
 echo ""
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 if [ "$FAIL" -gt 0 ]; then
