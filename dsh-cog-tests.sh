@@ -301,4 +301,70 @@ rows = [json.loads(l) for l in open('$DIR/claim_audits.jsonl')]
 assert any(r.get('appliedCheckIds') for r in rows), '无applied记录'
 "
 
+echo ""
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
+# ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
+# 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
+# 改法: 失败写入有机制保证的通道(言行账本, 帧头已提示"Q3 前先查它");
+#       防噪: 连续 2 次失败才入账, 全过时自动清理。
+STREAK_FILE="$DIR/.test-fail-streak"
+if [ "$FAIL" -gt 0 ]; then
+  echo "失败项:"; for f in "${FAILED_TESTS[@]}"; do echo "  - $f"; done
+  # 记录连续失败次数
+  prev=$(cat "$STREAK_FILE" 2>/dev/null || echo 0)
+  streak=$((prev + 1))
+  echo "$streak" > "$STREAK_FILE"
+  # 连续 ≥2 次 → 写入言行账本(唯一有帧头机制保证的通道)
+  if [ "$streak" -ge 2 ]; then
+    python3 - "$DIR/claims-ledger.jsonl" "$FAIL" "${FAILED_TESTS[*]}" << 'PYEOF'
+import json, sys, datetime
+ledger, fail_count, failed = sys.argv[1], sys.argv[2], sys.argv[3]
+now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat()
+# 已存在未关闭的测试告警则不重复写
+try:
+    existing = [json.loads(l) for l in open(ledger, encoding='utf8')]
+except Exception:
+    existing = []
+if any(d.get('id','').startswith('cl-test-') and d.get('status') in ('open','in-progress') for d in existing):
+    print('[test-alert] 已有未关闭的测试告警, 跳过')
+    sys.exit(0)
+entry = {
+    'id': f"cl-test-{datetime.datetime.now().strftime('%Y%m%d-%H%M')}",
+    'ts': now,
+    'claim': f'认知测试套件连续失败({fail_count}项): {failed[:200]}',
+    'source': 'dsh-cog-tests.sh 自动汇报(design-spec-wire-up-verification P0)',
+    'status': 'open',
+    'note': '自动入账: 测试失败连续≥2次。需查证是真失败还是时序噪声(如重启后lib未生效), 修复后本条目应关闭。'
+}
+with open(ledger, 'a', encoding='utf8') as f:
+    f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+print(f'[test-alert] 已写入言行账本: {entry["id"]}')
+PYEOF
+    echo "[test-alert] 连续失败 $streak 次——已写入言行账本(帧自查可见)"
+  fi
+  exit 1
+fi
+# 全过: 清理告警状态 + 关闭遗留测试告警
+rm -f "$STREAK_FILE"
+python3 - "$DIR/claims-ledger.jsonl" << 'PYEOF'
+import json, sys, datetime
+ledger = sys.argv[1]
+try:
+    rows = [json.loads(l) for l in open(ledger, encoding='utf8')]
+except Exception:
+    sys.exit(0)
+changed = False
+now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat()
+for d in rows:
+    if d.get('id','').startswith('cl-test-') and d.get('status') in ('open','in-progress'):
+        d['status'] = 'done'
+        d['doneAt'] = now
+        d['doneNote'] = '测试套件恢复全过, 自动关闭(design-spec-wire-up-verification P0)'
+        changed = True
+if changed:
+    with open(ledger, 'w', encoding='utf8') as f:
+        for d in rows:
+            f.write(json.dumps(d, ensure_ascii=False) + '\n')
+    print('[test-alert] 测试恢复全过——已自动关闭遗留告警')
+PYEOF
+exit 0
