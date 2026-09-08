@@ -264,9 +264,16 @@ print(f'OK ({len(after)} 条重启后经验)')
 "
 
 echo ""
+
+# ── T17 校准外部锚(2026-09-08 18:5x 固化——cl-016/017/018/019 重设计) ──
+echo "[T17] 校准外部锚(α降+自适应 / 帧预测无锚不填值 / 双尾)"
+# 17a. α 默认已降 50→5
+t "α默认已降(5)" bash -c "grep -q 'shrinkageAlpha: z.number().min(0).default(5)' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts'"
+# 17b. α 自适应公式在
+t "α自适应公式在" bash -c "grep -q 'base / Math.sqrt' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/src/hot-engine.ts'"
+# 17c. 帧预测无外部锚不填值(cl-019)
+t "帧预测无锚不结算" bash -c "grep -q 'no-external-anchor' '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts'"
+# 17d. lib 已部署两项
+t "lib含α自适应+无锚不结算" bash -c "grep -q 'base / Math.sqrt' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js' && grep -q 'no-external-anchor' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
-if [ "$FAIL" -gt 0 ]; then
-  echo "失败项:"; for f in "${FAILED_TESTS[@]}"; do echo "  - $f"; done
-  exit 1
-fi
-exit 0

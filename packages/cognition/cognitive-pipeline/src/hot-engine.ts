@@ -839,9 +839,13 @@ export class HotEngine {
     }
   }
 
-  /** Layer-2 shrinkage: P_cal = (k/(k+α))·P_raw + (α/(k+α))·0.5. */
+  /** Layer-2 shrinkage: P_cal = (k/(k+α))·P_raw + (α/(k+α))·0.5.
+   *  2026-09-08 重设计(pipeline-redesign-external-anchor 步2): α 由固定 50 改为随样本量自适应
+   *  α = max(3, 50/√(k+1))——小样本保守、大样本放开。cl-017/018 实证: 固定 α=50 叠加 Layer5
+   *  把概率压进 [0.49,0.66](无法表达失败预测); 降到 3-5 且保留 Layer5 才双尾齐现。 */
   private shrink(raw: number, k: number): number {
-    const alpha = this.config.shrinkageAlpha
+    const base = this.config.shrinkageAlpha
+    const alpha = Math.max(3, base / Math.sqrt(k + 1))
     return clamp01((k / (k + alpha)) * raw + (alpha / (k + alpha)) * 0.5)
   }
 

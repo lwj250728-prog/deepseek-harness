@@ -350,7 +350,10 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   disequilibriumMinSamples: z.number().step(1).min(2).default(3),
   citationRetrievalWeight: z.number().min(0).max(1).default(0.05),
   offlineConsolidationIntervalMs: z.number().step(1).min(60_000).default(60 * 60 * 1000),
-  shrinkageAlpha: z.number().min(0).default(50),
+  // 2026-09-08 重设计(步2): 默认 50 → 5。cl-017/018 实证固定 α=50 叠加 Layer5 把概率压进
+  // [0.49,0.66](无法表达失败预测); α=3-5 且保留 Layer5 才双尾齐现。配合 hot-engine 的
+  // 自适应公式 α=max(3, base/√(k+1)) 使各样本量下 α∈[3,5]。
+  shrinkageAlpha: z.number().min(0).default(5),
   minConfidenceIntervalWidth: z.number().min(0).max(1).default(0.2),
   successReferenceThreshold: z.number().min(0).max(1).default(0.4),
   coverageThreshold: z.number().min(0).max(1).default(0.3),
@@ -415,7 +418,7 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
       oodSimThreshold: config.oodSimThreshold ?? 0.65,
       oodFlatThreshold: config.oodFlatThreshold ?? 0.1,
       oodSiThreshold: config.oodSiThreshold ?? 1.5,
-      shrinkageAlpha: config.shrinkageAlpha ?? 50,
+      shrinkageAlpha: config.shrinkageAlpha ?? 5,
       minConfidenceIntervalWidth: config.minConfidenceIntervalWidth ?? 0.2,
       successReferenceThreshold: config.successReferenceThreshold ?? 0.4,
       coverageThreshold: config.coverageThreshold ?? 0.3,

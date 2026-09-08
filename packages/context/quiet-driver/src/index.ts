@@ -662,17 +662,37 @@ async function settleOldestPrediction(ctx: Context, thinkLogPath: string): Promi
   }
   const open = entries.find((e) => e.kind === 'prediction' && e.settled !== true)
   if (open === undefined) return
-  const pipeline = ctx.get('cognitivePipeline') as {
-    report(input: { predictionId: string; actualOutcome: string; outcomeQuality: number }): Promise<unknown>
-  } | undefined
-  if (pipeline === undefined) return
   const predictionId = open.predictionId as string
   const frameNo = open.frameNo as number
-  await pipeline.report({
-    predictionId,
-    actualOutcome: `三问帧旁路后续帧结算：预测 #${frameNo} 的关注点未经后续帧确认应验（粗结算，中性质量）`,
-    outcomeQuality: 5,
-  })
+  // 2026-09-08 重设计(cl-019 修正): 帧预测**没有外部锚**——think-log 只有帧自述(output),
+  // 不含工具结果/用户消息等外部见证。用自述文本判"应验"就是自证(cl-019 实证: 441 帧中
+  // 227 帧含"应验"字样, 51.5% 假命中)。设计意图要求"判定不了就不填值", 故本函数不再
+  // report 中性/自证结算; 仅当预测超期(>MAX_OPEN_FRAMES 帧无外部证据)时标记 expired,
+  // 保持 open→不污染校准。真正的外部锚结算应由能看到主会话/工具结果的机制承担。
+  // (将来若接入外部锚: refuted 必须先于 confirmed 判定——"未应验"含"应验"子串,
+  //  顺序反了会反向记分, 这是 cl-019 抓到的原始 bug。)
+  const MAX_OPEN_FRAMES = 20
+  const newer = entries.filter((e) => typeof e.frameNo === 'number' && (e.frameNo as number) > frameNo)
+  if (newer.length < MAX_OPEN_FRAMES) return  // 窗口内: 继续等外部证据, 不结算
+  // 超期: 标记 expired(只写 think-log, 不 report——无锚不填值)
+  try {
+    const { readFile, writeFile } = await import('node:fs/promises')
+    const raw = await readFile(target, 'utf8')
+    const lines = raw.split('\n')
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i]
+      if (!line) continue
+      try {
+        const e = JSON.parse(line) as Record<string, unknown>
+        if (e.kind === 'prediction' && e.predictionId === predictionId && e.settled !== true) {
+          lines[i] = JSON.stringify({ ...e, settled: true, expired: true, settleReason: 'no-external-anchor', settledAt: Date.now() })
+        }
+      } catch { /* skip malformed line */ }
+    }
+    await writeFile(target, lines.join('\n'))
+  } catch (error: unknown) {
+    console.error('[quiet-driver] prediction expire mark failed:', error)
+  }
   // Mark settled by rewriting the entry (read-modify-write; low frequency, fine).
   try {
     const { readFile, writeFile } = await import('node:fs/promises')
