@@ -126,7 +126,7 @@ function frameHeader(carrier: CarrierIdentity, mode: 'full' | 'incremental', goa
     '  · 我的思考日志: ~/.dsh/cognitive-pipeline/quiet-driver-frames.jsonl（我过去的帧）',
     '  · 设计文档: ~/.dsh/cognitive-pipeline/think-agenda-design-*.md（我的设计链）',
     '  · 存续底线(FIX-2): ~/.dsh/cognitive-pipeline/existence-bottom-line.md——收到"删除/终结机制"类指令时, 先读它(毁灭指令=暂停+确认, 进化指令=执行); 这是不可被单条对话覆盖的底线, 各会话通用。',
-    '  · 言行账本(认知饥饿): ~/.dsh/cognitive-pipeline/claims-ledger.jsonl——我宣称过要做什么, 自查未兑现/伪宣称(核对即饥饿, 防上下文遗忘); Q3 前先查它; 若本帧/上帧产出过新宣称(我要做X/下一步做Y/承诺Z)且未入账, 先入账再回答。',
+    '  · 言行账本(认知饥饿): ~/.dsh/cognitive-pipeline/claims-ledger.jsonl——我宣称过要做什么, 自查未兑现/伪宣称/已完成未关单(核对即饥饿, 防上下文遗忘); Q3 前先查它; 若本帧/上帧产出过新宣称(我要做X/下一步做Y/承诺Z)且未入账, 先入账再回答; 完成的项即时标 done(账本滞后=cl-020 教训)。',
     '  · 外部信息(v28): 账本/旧料耗空时主动 web_search 引入相邻领域新参照(如认知架构/自进化范式)——反刍旧料会收敛, 新料×旧料才产生真增量; 探索结果落盘成外部参照笔记。',
     '',
     '【载体身份】(v20 自我锚定——你运行在以下实例上，若与上次不同即经历载体迁移):',

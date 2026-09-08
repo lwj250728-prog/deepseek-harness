@@ -324,6 +324,26 @@ for cid in ('check_2','check_3'):
 # 19d. P0 失败自动汇报通道在
 t "P0告警通道在" bash -c "grep -q 'test-alert' '$HOME/dsh-fork/dsh-cog-tests.sh'"
 
+
+# ── T20 关单纪律(2026-09-08 20:1x 固化——tp-024: cl-020 帧头机制保证) ──
+echo "[T20] 关单纪律(帧头提示'已完成未关单'+'即时标done' + 无矛盾open项)"
+# 20a. src 含关单提示
+t "src含关单提示" bash -c "grep -q '已完成未关单' '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts'"
+# 20b. lib 已部署
+t "lib含关单提示(已部署)" bash -c "grep -q '已完成未关单' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
+# 20c. 无矛盾 open 项(note说已修但状态open)
+t "无矛盾open项" python3 -c "
+import json
+bad = []
+for l in open('$DIR/claims-ledger.jsonl'):
+    d = json.loads(l)
+    if d['status'] not in ('open','in-progress'): continue
+    note = (d.get('note') or '') + (d.get('doneNote') or '')
+    if any(k in note for k in ['已修','已执行','已落地','已修复']):
+        bad.append(d['id'])
+assert not bad, f'矛盾项: {bad}'
+"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
