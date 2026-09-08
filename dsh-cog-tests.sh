@@ -774,6 +774,35 @@ assert line, "找不到提交 cron 行"
 assert "\\%H" in line[0] or "%" not in line[0], "提交行仍未转义: %s" % line[0][:80]
 '
 
+# ── T33 open 项到期裁决(2026-09-09 00:5x 固化——账本滞留 18 条一天无人裁决, 同 cl-037 家族) ──
+echo "[T33] open项到期裁决(每条 open/in-progress 须有 reviewBy; 过期未裁决即失败)"
+t "open项均有reviewBy" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
+by_id = {}
+for l in open(p, encoding="utf8"):
+    if not l.strip(): continue
+    r = json.loads(l)
+    if r.get("id"): by_id[r["id"]] = r
+bad = [k for k, v in by_id.items()
+       if v.get("status") in ("open", "in-progress") and not v.get("reviewBy")]
+assert not bad, "无 reviewBy 的 open 项: %s" % bad[:3]
+'
+t "open项未过期" python3 -c '
+import json, os, datetime
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
+by_id = {}
+for l in open(p, encoding="utf8"):
+    if not l.strip(): continue
+    r = json.loads(l)
+    if r.get("id"): by_id[r["id"]] = r
+today = datetime.date.today().isoformat()
+overdue = [k for k, v in by_id.items()
+           if v.get("status") in ("open", "in-progress")
+           and isinstance(v.get("reviewBy"), str) and v["reviewBy"] < today]
+assert not overdue, "已过 reviewBy 未裁决: %s" % overdue[:3]
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
