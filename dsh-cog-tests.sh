@@ -753,6 +753,27 @@ assert "全库锚定率" in out, "未报告锚定率"
 assert ("不能" in out or "可尝试提炼" in out), "未给出裁决"
 '
 
+# ── T32 crontab 转义守卫(2026-09-09 00:4x 固化——cl-049: 未转义 % 让提交腿停摆 25h) ──
+echo "[T32] crontab转义守卫(命令中的 % 必须转义为 \\%——cron 在首个 % 处截断命令)"
+t "crontab无未转义%" python3 -c '
+import subprocess
+out = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
+bad = []
+for i, l in enumerate(out.split("\n"), 1):
+    if not l.strip() or l.strip().startswith("#"): continue
+    if "%" in l.replace("\\%", ""):
+        bad.append((i, l[:70]))
+assert not bad, "存在未转义 %%: %s" % bad[:2]
+'
+# 32b. 提交腿的 cron 行确实被修好(含转义)
+t "提交cron行已转义" python3 -c '
+import subprocess
+out = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
+line = [l for l in out.split("\n") if "cognitive update" in l]
+assert line, "找不到提交 cron 行"
+assert "\\%H" in line[0] or "%" not in line[0], "提交行仍未转义: %s" % line[0][:80]
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
