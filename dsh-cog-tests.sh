@@ -545,6 +545,20 @@ for p in sorted(glob.glob(os.path.join(d, "00*.md"))):
         bad.append("%s=%d" % (os.path.basename(p), n))
 assert not bad, "字数超范围: %s" % bad[:3]
 '
+# 25f. 账本自报累计字数 = 机算总和(防"账本自己说谎"——本轮发现漂移 4,668 字)
+t "账本累计字数与机算一致" python3 -c '
+import re, glob, os
+d = os.path.expanduser("~/dsh-workshop/novels/qizhongjiyi")
+txt = open(os.path.join(d, "audit/progress.md"), encoding="utf8").read().replace("*", "")
+m = re.findall(r"累计正文\s*([\d,]+)\s*字", txt)
+assert m, "progress.md 无累计正文记录"
+ledger = int(m[-1].replace(",", ""))
+total = 0
+for p in glob.glob(os.path.join(d, "drafts/00*.md")):
+    t = open(p, encoding="utf8").read()
+    total += len(re.sub(r"\s", "", re.sub(r"^# .*", "", t, flags=re.M)))
+assert ledger == total, "账本累计 %d != 机算 %d (漂移 %d)" % (ledger, total, ledger - total)
+'
 
 # ── T26 测试选择器 last-wins(2026-09-08 22:4x 固化——追加式账本未去重, 已通过测试被反复复活) ──
 echo "[T26] 测试选择器last-wins(追加式账本同id多状态: 先pending后passed 不得复活)"
