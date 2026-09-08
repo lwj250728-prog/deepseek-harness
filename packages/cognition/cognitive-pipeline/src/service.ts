@@ -30,6 +30,7 @@ import {
   proposeDiscriminantAxes,
   proposeTriggerJumps,
   resolveRoute,
+  splitStructuredSar,
 } from './llm.ts'
 import type { CognitiveLlmRoute } from './llm.ts'
 import { cognitionPrefix } from './prompts.ts'
@@ -676,9 +677,51 @@ export class CognitivePipelineService extends Service {
     // serve them and any kind a consumer registers afterwards.
     this.registerCognitionObject(new ChainObjectKind())
     this.registerCognitionObject(new ChainPatternObjectKind())
-    this.readinessPromise = this.store.load().catch((error: unknown) => {
+    this.readinessPromise = this.store.load().then(async () => {
+      // cl-038/cl-035: L1 编码层可从 L0 原始文本重抽。当 rawText 自带结构标记而
+      // 存储的 SAR 与确定性切分不一致时(LLM 抽取失败回退按句号切分所致), 启动时修复
+      // 字段与向量——这是"L0 不可变 / L1 可重抽"第一次真正生效。
+      await this.repairStructuredSar()
+    }).catch((error: unknown) => {
       this.ctx.logger.warn(`cognitive-pipeline: store load failed, continuing in-memory: ${String(error)}`)
     })
+  }
+
+  /**
+   * Re-derive the SAR triplet (and its vectors) from `rawText` for rows whose
+   * stored fields disagree with the caller's own structural markers.
+   * @returns the number of repaired experiences.
+   */
+  async repairStructuredSar(): Promise<number> {
+    let repaired = 0
+    for (const exp of this.store.experiencesSnapshot()) {
+      const raw = exp.rawText
+      if (typeof raw !== 'string' || raw === '') continue
+      const split = splitStructuredSar(raw)
+      if (split === null) continue
+      if (split.situation === exp.sar.situation && split.action === exp.sar.action && split.outcome === exp.sar.outcome) continue
+      const sar: SarTriplet = {
+        ...exp.sar,
+        situation: split.situation,
+        action: split.action,
+        outcome: split.outcome,
+        actionKeywords: [...new Set(tokenize(split.action))].slice(0, 8),
+      }
+      const embedding = await this.maybeEmbed(sar.action)
+      this.store.addExperience({
+        ...exp,
+        sar,
+        actionVector: actionVector(sar.action, sar.actionKeywords),
+        outcomeVector: outcomeVector(sar.outcomeUtility, sar.outcome),
+        ...embedding === undefined ? {} : { embedding },
+      })
+      repaired += 1
+    }
+    if (repaired > 0) {
+      await this.store.flush()
+      this.ctx.logger.info(`cognitive-pipeline: repaired ${repaired} structured SAR experience(s) from rawText`)
+    }
+    return repaired
   }
 
   /** Resolve after the store finished loading (never rejects). */

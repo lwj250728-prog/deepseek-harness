@@ -430,7 +430,10 @@ export async function extractSar(
     }
   } catch (error) {
     ctx.logger.warn(`cognitive-pipeline: SAR extraction degraded to fallback: ${String(error)}`)
-    return sarFallback(rawText)
+    // cl-038: the fallback splits by sentence punctuation and assigns 5/5/5, so
+    // the caller's own structural markers must still override it — otherwise a
+    // failed LLM call silently corrupts the field assignment it was meant to fix.
+    return structured === null ? sarFallback(rawText) : { ...sarFallback(rawText), ...structured }
   }
 }
 

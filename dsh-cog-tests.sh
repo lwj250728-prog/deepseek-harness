@@ -458,6 +458,57 @@ assert not bad, "字段残留结构标记(互串): %s" % bad[:3]
 assert not fabricated, "字段内容无法回溯到 rawText(疑似捏造): %s" % fabricated[:3]
 '
 
+# ── T24 L1 可重抽(2026-09-08 22:1x 固化——cl-038: 抽取失败回退绕过结构标记, 启动时按 rawText 修复) ──
+echo "[T24] L1编码层可从L0重抽(回退分支也遵守结构标记 + 启动修复错位SAR)"
+# 24a. 回退分支也应用结构标记
+t "回退分支遵守结构标记" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/llm.ts")).read()
+i = s.index("SAR extraction degraded to fallback")
+seg = s[i:i+600]
+assert "structured === null ? sarFallback(rawText) : { ...sarFallback(rawText), ...structured }" in seg, "回退分支未应用 structured"
+'
+# 24b. 启动修复存在
+t "src含启动修复" bash -c "grep -q 'repairStructuredSar' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts'"
+# 24c. lib 已部署
+t "lib含启动修复(已部署)" bash -c "grep -q 'repairStructuredSar' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
+# 24d. 运行时: 带结构标记 rawText 的行, 其 SAR 必须与确定性切分一致(修复生效/未再错位)
+t "结构化rawText的SAR与切分一致" python3 -c '
+import json, os, re
+d = os.path.expanduser("~/.dsh/cognitive-pipeline")
+rows = [json.loads(l) for l in open(os.path.join(d, "experiences.jsonl")) if l.strip()]
+pat_s = re.compile(r"(?:情境|situation)\s*[:：]", re.I)
+pat_a = re.compile(r"(?:动作|行动|action)\s*[:：]", re.I)
+pat_o = re.compile(r"(?:结果|outcome)\s*[:：]", re.I)
+strip = re.compile(r"^\s*(?:情境|situation|动作|行动|action|结果|outcome)\s*[:：]\s*", re.I)
+bad = []
+for r in rows:
+    raw = r.get("rawText")
+    if not isinstance(raw, str) or not raw:
+        continue
+    ms, ma, mo = pat_s.search(raw), pat_a.search(raw), pat_o.search(raw)
+    if not (ms and ma and mo and ms.start() < ma.start() < mo.start()):
+        continue
+    want = [strip.sub("", raw[ms.start():ma.start()]).strip(),
+            strip.sub("", raw[ma.start():mo.start()]).strip(),
+            strip.sub("", raw[mo.start():]).strip()]
+    got = [(r.get("sar") or {}).get(f) or "" for f in ("situation", "action", "outcome")]
+    if want != got:
+        bad.append(r.get("expId"))
+assert not bad, "SAR 与 rawText 切分不一致(修复未生效): %s" % bad[:3]
+'
+# 24e. 回归个案: exp_228(回退错位受害行)必须已被修复
+t "exp_228已按rawText修复" python3 -c '
+import json, os
+d = os.path.expanduser("~/.dsh/cognitive-pipeline")
+rows = [json.loads(l) for l in open(os.path.join(d, "experiences.jsonl")) if l.strip()]
+r = [x for x in rows if x.get("expId") == "exp_228"]
+assert r, "exp_228 不在任务层"
+sar = r[0].get("sar") or {}
+assert sar.get("situation", "").startswith("2026-09-08 22:1x"), "exp_228 situation 仍是回退切分: %s" % sar.get("situation", "")[:40]
+assert sar.get("action", "").startswith("先查证工作区"), "exp_228 action 仍错位: %s" % sar.get("action", "")[:40]
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
