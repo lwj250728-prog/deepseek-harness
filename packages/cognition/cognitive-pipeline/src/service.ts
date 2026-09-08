@@ -945,6 +945,8 @@ export class CognitivePipelineService extends Service {
     utility: OutcomeUtility
     /** Explicit storage-layer provenance; omitted means a task experience. */
     kind?: 'task' | 'frame'
+    /** Explicit meta subtype marker for readers that need a specific kind. */
+    metaKind?: string
   }): string {
     const sar: SarTriplet = {
       situation: input.situation,
@@ -971,6 +973,7 @@ export class CognitivePipelineService extends Service {
       evidenceScore: 0,
       meta: true,
       kind: input.kind ?? 'task',
+      ...input.metaKind === undefined ? {} : { metaKind: input.metaKind },
     })
     return expId
   }
@@ -1706,6 +1709,7 @@ export class CognitivePipelineService extends Service {
         action: `重写准则 ${names} 或将其退役（统计账本不可清零，仅可冻结）`,
         outcome: `未验证声明与预测误差同尺累计：${names} 累计误差 ${worst.cumulativeError.toFixed(3)}（${worst.errorFoldCount} 次回流）`,
         utility: { materialGain: 2, emotionalValence: 4, energyCost: 6 },
+        metaKind: 'acceptance-deviation',
       })
     }
     const audit: ClaimAudit = {
@@ -1830,7 +1834,7 @@ export class CognitivePipelineService extends Service {
       && check.violatedCount / check.invokedCount >= this.resolved.acceptanceDeviationThreshold)
     if (flagged.length === 0) return { flagged: [], proposals: [], applied: [] }
     const deviationMeta = this.store.experiencesSnapshot()
-      .filter(exp => exp.meta === true && exp.sar.situation.includes('验收准则持续被违反'))
+      .filter(exp => exp.meta === true && exp.metaKind === 'acceptance-deviation')
       .map(exp => ({ expId: exp.expId, text: exp.sar.situation }))
     const decision = await proposeAcceptanceUpdates(this.ctx, this.resolved.route, flagged, deviationMeta, {
       sessionId: call?.sessionId,

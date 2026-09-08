@@ -180,6 +180,13 @@ export interface Experience {
    * pipeline can learn about its own failure modes. Absent on legacy rows. */
   readonly meta?: boolean
   /**
+   * Pipeline-internal meta-experience subtype (cl-046 外推). `meta` alone does
+   * not discriminate: every frame row carries it. Readers that need a specific
+   * meta kind must match this marker, never a substring of the situation text —
+   * a frame quoting the phrase would otherwise be miscounted.
+   */
+  readonly metaKind?: string
+  /**
    * Explicit provenance marker deciding which storage layer this experience
    * belongs to: `frame` = the quiet-driver side-channel three-question frame
    * (episodic layer, `experiences-frames.jsonl`), `task` = real work (semantic

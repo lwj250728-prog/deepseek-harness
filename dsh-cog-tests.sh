@@ -682,16 +682,49 @@ for f in ("experiences.jsonl", "experiences-frames.jsonl"):
             missing.append(r.get("expId"))
 assert not missing, "效用仍缺失: %s" % missing[:3]
 '
-# 29d. 运行时: 文件中不得再出现 snake_case 效用键(迁移已落盘)
+# 29d. 运行时: outcomeUtility 内不得再有 snake_case 键(按 JSON 键判定, 非文本匹配——
+#      首版用文本匹配被 exp_98 正文里提到的字段名误伤, 属断言设计缺陷)
 t "无snake_case效用键残留" python3 -c '
-import os
+import json, os
 d = os.path.expanduser("~/.dsh/cognitive-pipeline")
 bad = []
 for f in ("experiences.jsonl", "experiences-frames.jsonl"):
-    s = open(os.path.join(d, f), encoding="utf8").read()
-    if "material_gain" in s or "emotional_valence" in s:
-        bad.append(f)
-assert not bad, "snake_case 键残留: %s" % bad
+    for l in open(os.path.join(d, f)):
+        if not l.strip(): continue
+        r = json.loads(l)
+        keys = ((r.get("sar") or {}).get("outcomeUtility") or {}).keys()
+        if any(k in keys for k in ("material_gain", "emotional_valence", "energy_cost")):
+            bad.append(r.get("expId"))
+assert not bad, "outcomeUtility 内 snake_case 键残留: %s" % bad[:3]
+'
+
+# ── T30 外推机制(2026-09-09 00:2x 固化——cl-046: 一处修复须外推扫描同型点) ──
+echo "[T30] 外推机制(meta 子类用显式标记 + 外推扫描器可用——防'修一处就停')"
+# 30a. 读取侧用显式 metaKind 标记
+t "meta子类用显式标记" bash -c "grep -q \"metaKind === 'acceptance-deviation'\" '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts'"
+# 30b. 读取侧不再用 situation 文本嗅探
+t "不再用文本嗅探找meta" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts")).read()
+assert "exp.sar.situation.includes(\"验收准则持续被违反\")" not in s, "仍在用文本嗅探"
+'
+# 30c. lib 已部署
+t "lib含metaKind(已部署)" bash -c "grep -q 'acceptance-deviation' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
+# 30d. 外推扫描器存在且可执行
+t "外推扫描器可用" bash -c "test -x '$HOME/dsh-fork/dsh-extrapolate.sh' && bash '$HOME/dsh-fork/dsh-extrapolate.sh' 'ZZZ_NO_MATCH' '$HOME/dsh-fork/packages/cognition' | grep -q '孤例'"
+# 30e. 运行时: 带该短语的 meta 经验必须带 metaKind(无第二判别器)
+t "meta标记与文本一致" python3 -c '
+import json, os
+d = os.path.expanduser("~/.dsh/cognitive-pipeline")
+bad = []
+for f in ("experiences.jsonl", "experiences-frames.jsonl"):
+    for l in open(os.path.join(d, f)):
+        if not l.strip(): continue
+        r = json.loads(l)
+        sit = ((r.get("sar") or {}).get("situation") or "")
+        if r.get("meta") and "验收准则持续被违反" in sit and not r.get("metaKind"):
+            bad.append(r.get("expId"))
+assert not bad, "带该短语的 meta 经验无显式标记: %s" % bad[:3]
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
