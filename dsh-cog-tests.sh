@@ -135,6 +135,15 @@ for l in open('$GOALS7'):
 t "还原后回到'待事件'待命态" bash -c "[[ '$NA7B' == 待* ]]"
 rm -f "$BAK7"
 
+# ── T8 probe 404 误判防复发(2026-09-08 08:3x 固化——tp-011) ──
+echo "[T8] probe 404 误判防复发(页异常≠数据未入)"
+# 8a. read_platform_signal.py 含 404/错误页检测逻辑(不静默吞错误页)
+t "signal工具含错误页检测" bash -c "grep -q 'detail-error' '$HOME/.dsh/novel-tools/read_platform_signal.py'"
+# 8b. probe 三态判定: detail-error 单独分支(不再并入'数据未入')
+t "probe区分页异常与数据未入" bash -c "grep -q 'detail-error' '$HOME/dsh-fork/dsh-oq010-probe.sh' && grep -q '页异常' '$HOME/dsh-fork/dsh-oq010-probe.sh'"
+# 8c. probe 日志已记录页异常(非静默'数据未入')
+t "probe日志有页异常记录" bash -c "grep -q '页异常' '$DIR/oq010-probe.log'"
+
 echo ""
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 if [ "$FAIL" -gt 0 ]; then

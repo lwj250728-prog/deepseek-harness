@@ -8,7 +8,10 @@ OUT=$(cd /home/ubuntu/.dsh/novel-tools && timeout 90 python3 read_platform_signa
 # 修正(2026-09-08 00:2x 审视发现): 排除"数据中心不可达"的detail失败提示——那是错误非数据就绪。
 # 只认真实的细粒度数据标签(detail-阅读 等), 不含裸"detail"或"不可达"。
 # 多入口探测: 若 --detail 无数据(数据中心未更新), 试作者页小说数据区(book_list等可能含阅读数据)
-if echo "$OUT" | grep -qE "detail-(阅读|完读|追读|收藏|评论|新增)" && ! echo "$OUT" | grep -q "不可达"; then
+# tp-011 修复(2026-09-08 08:2x): 分三态——detail-error(页异常, 非数据未入) / detail-关键词(数据入) / 其他(真未入)
+if echo "$OUT" | grep -q "detail-error"; then
+  echo "[oq010] $(date '+%F %T') ⚠ 数据中心页异常(404/不可达)——非'数据未入', 需人工定位真实URL: $(echo "$OUT" | grep detail-error | head -1 | cut -c1-80)" >> /home/ubuntu/.dsh/cognitive-pipeline/oq010-probe.log
+elif echo "$OUT" | grep -qE "detail-(阅读|完读|追读|收藏|评论|新增)" && ! echo "$OUT" | grep -q "不可达"; then
   # 数据已入中心 → 记录+标记待解读
   echo "$OUT" > /home/ubuntu/.dsh/cognitive-pipeline/oq010-data-ready.json
   echo "[oq010] $(date '+%F %T') 数据已入中心, 待完整解读" >> /home/ubuntu/.dsh/cognitive-pipeline/oq010-probe.log
