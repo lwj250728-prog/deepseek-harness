@@ -34,6 +34,9 @@ import {
   deriveTriggerWords,
   jumpVocabulary,
   STATIC_TRIGGERS,
+  STRONG_STATIC_TRIGGERS,
+  STRONG_STATIC_WEIGHT,
+  WEAK_STATIC_WEIGHT,
 } from '@deepseek-ai/dsh-cognitive-pipeline/src/triggers.ts'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -520,8 +523,6 @@ function isAfterFailure(agent: Agent): boolean {
 
 // ── trigger-gated injection ────────────────────────────────────────────────
 
-/** Single static-trigger hit weight (a literal ask matches immediately). */
-const STATIC_TRIGGER_WEIGHT = 1
 /** Summed trigger weight (static, derived, or jump) needed to prime injection. */
 const TRIGGER_MATCH_THRESHOLD = 0.6
 
@@ -558,9 +559,12 @@ export function triggeredBy(
   let source = ''
   // Static triggers are multi-character phrases; match them as substrings
   // (tokenize splits CJK per character, so token matching would never hit).
+  // 2026-09-08 分级(cl-008 数据实证): 强词(失败/崩溃——66%/50%引用)单独触发;
+  // 弱词(怎么/异常——0.7%/0%引用)只加 0.4, 单弱词不过 0.6 阈值, 需第二个信号累积。
   for (const trigger of STATIC_TRIGGERS) {
     if (text.includes(trigger)) {
-      score += STATIC_TRIGGER_WEIGHT
+      const weight = STRONG_STATIC_TRIGGERS.has(trigger) ? STRONG_STATIC_WEIGHT : WEAK_STATIC_WEIGHT
+      score += weight
       if (source === '') source = `static:${trigger}`
       if (score >= TRIGGER_MATCH_THRESHOLD) return { fired: true, triggerSource: source, jumpWords: [] }
     }

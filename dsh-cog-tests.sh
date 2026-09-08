@@ -179,6 +179,28 @@ t "盲审脚本存在且语法有效" bash -c "test -f '$HOME/dsh-fork/dsh-oq022
 # 12b. SILICONFLOW key 存在
 t "SILICONFLOW key 存在" bash -c "grep -q 'SILICONFLOW_API_KEY' '$HOME/.dsh/.credentials.yaml'"
 
+# ── T13 触发词分级(2026-09-08 13:1x 固化——tp-016: 强词单独触发/弱词需叠加, 数据驱动修正'想当然') ──
+echo "[T13] 触发词分级(数据驱动: 失败/崩溃强触发, 怎么/异常弱触发)"
+TRIG13="$HOME/dsh-fork/packages/cognition/cognitive-pipeline/src/triggers.ts"
+INJ13="$HOME/dsh-fork/packages/context/cognitive-inject/src/index.ts"
+# 13a. 分级结构存在
+t "triggers.ts 含强/弱分级" bash -c "grep -q 'STRONG_STATIC_TRIGGERS' '$TRIG13' && grep -q 'WEAK_STATIC_TRIGGERS' '$TRIG13'"
+# 13b. 语义归类(失败/崩溃强, 怎么/异常弱)
+t "强/弱词归类正确(语义)" python3 -c "
+import re
+src = open('$TRIG13').read()
+m = re.search(r'STRONG_STATIC_TRIGGERS: ReadonlySet<string> = new Set\(\[(.*?)\]\)', src, re.S)
+strong = set(re.findall(r\"'([^']+)'\", m.group(1)))
+m2 = re.search(r'STATIC_TRIGGERS: ReadonlySet<string> = new Set\(\[(.*?)\]\)', src, re.S)
+weak = set(re.findall(r\"'([^']+)'\", m2.group(1))) - strong
+assert '失败' in strong and '崩溃' in strong, '强词缺失'
+assert '怎么' in weak and '异常' in weak, '弱词分类错'
+"
+# 13c. 注入逻辑用分级权重
+t "注入逻辑用分级权重" bash -c "grep -q 'STRONG_STATIC_TRIGGERS.has' '$INJ13' && grep -q 'WEAK_STATIC_WEIGHT' '$INJ13'"
+# 13d. lib 已部署
+t "lib已部署分级" bash -c "grep -q 'STRONG_STATIC_TRIGGERS' '$HOME/dsh-fork/packages/context/cognitive-inject/lib/index.js' && grep -q 'STRONG_STATIC_TRIGGERS' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/types/triggers.js'"
+
 echo ""
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 if [ "$FAIL" -gt 0 ]; then

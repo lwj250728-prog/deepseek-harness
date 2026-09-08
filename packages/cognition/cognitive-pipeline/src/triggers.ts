@@ -24,6 +24,33 @@ export const STATIC_TRIGGERS: ReadonlySet<string> = new Set([
   '计划', '打算', '准备', '决定', '方案', '步骤', '流程', '检查', '诊断',
 ])
 
+/**
+ * Strong static triggers (2026-09-08 数据驱动分级——cl-008 实证): words whose
+ * injection was actually cited at high rate. A single strong hit opens the gate.
+ * Data (754 injections): 失败 66% cited, 崩溃 50% cited — real求助 signals.
+ */
+export const STRONG_STATIC_TRIGGERS: ReadonlySet<string> = new Set([
+  '失败', '崩溃', '卡住', '报错', '错误', '超时', '挂起',
+])
+
+/**
+ * Weak static triggers: common dialogue words that fired many injections but
+ * were almost never cited (怎么 143次注入 0.7%, 异常 255次 0%, 测试 38次 0%).
+ * A weak hit alone must NOT open the gate — it needs a second signal. Kept in
+ * the set (not removed) so two weak words or a weak word + derived/jump can
+ * still fire when the situation genuinely is求助-ish.
+ */
+export const WEAK_STATIC_TRIGGERS: ReadonlySet<string> = new Set(
+  [...STATIC_TRIGGERS].filter(w => !STRONG_STATIC_TRIGGERS.has(w)),
+)
+
+/** Static trigger weight when a strong word hits (alone opens the gate). */
+export const STRONG_STATIC_WEIGHT = 1
+/** Static trigger weight when a weak word hits (needs accumulation). */
+export const WEAK_STATIC_WEIGHT = 0.4
+/** Gate threshold: score must reach this to fire. */
+export const STATIC_MATCH_THRESHOLD = 0.6
+
 /** CJK stop words: tokens too common to carry trigger signal. */
 export const STOP_WORDS: ReadonlySet<string> = new Set([
   '的', '了', '在', '和', '我', '你', '他', '她', '它', '是', '一', '个', '这', '那',
