@@ -201,6 +201,34 @@ t "注入逻辑用分级权重" bash -c "grep -q 'STRONG_STATIC_TRIGGERS.has' '$
 # 13d. lib 已部署
 t "lib已部署分级" bash -c "grep -q 'STRONG_STATIC_TRIGGERS' '$HOME/dsh-fork/packages/context/cognitive-inject/lib/index.js' && grep -q 'STRONG_STATIC_TRIGGERS' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/types/triggers.js'"
 
+# ── T14 帧统计口径(2026-09-08 15:2x 固化——tp-017: 统计今日帧须限日期, 防历史帧虚高) ──
+echo "[T14] 帧统计口径(限日期+限评估帧类型——防'473帧'式误判)"
+# 14a. 今日评估帧远小于全历史(口径正确)
+t "今日帧远小于历史总数" bash -c "today=\$(python3 -c \"
+import json, datetime
+n = 0
+for l in open('$DIR/quiet-driver-frames.jsonl'):
+    d = json.loads(l)
+    t = datetime.datetime.fromtimestamp(d.get('ts',0)/1000)
+    if t.date() == datetime.date(2026,9,8) and d.get('kind') in ('direct-frame','epistemic-frame'): n += 1
+print(n)
+\"); total=\$(python3 -c \"
+import json
+print(sum(1 for l in open('$DIR/quiet-driver-frames.jsonl')))
+\"); [ \"\$today\" -lt \$((total / 2)) ]"
+# 14b. 今日评估帧合理区间(单小时≤20, 防'59帧/时'误判)
+t "单小时评估帧≤20" python3 -c "
+import json, datetime
+hourly = {}
+for l in open('$DIR/quiet-driver-frames.jsonl'):
+    d = json.loads(l)
+    t = datetime.datetime.fromtimestamp(d.get('ts',0)/1000)
+    if t.date() == datetime.date(2026,9,8) and d.get('kind') in ('direct-frame','epistemic-frame'):
+        hourly[t.hour] = hourly.get(t.hour, 0) + 1
+assert all(v <= 20 for v in hourly.values()), f'超频: {hourly}'
+print('OK')
+"
+
 echo ""
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 if [ "$FAIL" -gt 0 ]; then
