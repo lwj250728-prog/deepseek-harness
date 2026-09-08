@@ -646,6 +646,22 @@ cited = [r for r in recent if r.get("cited")]
 assert cited, "近 7 天零引用——学习信号停摆"
 '
 
+# ── T28 改动覆盖元测试(2026-09-09 00:0x 固化——把"审视帧第一问"机器化) ──
+echo "[T28] 改动覆盖元测试(24h 内改动的 src 文件必须被断言引用——防'改了机制没加测试')"
+t "24h改动文件均有断言覆盖" python3 -c '
+import subprocess, os
+root = os.path.expanduser("~/dsh-fork")
+suite = open(os.path.join(root, "dsh-cog-tests.sh"), encoding="utf8").read()
+out = subprocess.run(
+    ["git", "-C", root, "log", "--since=24 hours ago", "--name-only", "--pretty=format:", "--", "packages"],
+    capture_output=True, text=True).stdout
+files = [f for f in sorted(set(out.split())) if f.endswith(".ts") and "/src/" in f]
+assert files, "24h 内无 src 改动(元测试前提不成立)"
+missing = [f for f in files
+           if "/".join(f.split("/")[:3]) not in suite and f.split("/")[-1] not in suite]
+assert not missing, "改动但无断言引用: %s" % missing[:3]
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
