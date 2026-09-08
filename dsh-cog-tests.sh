@@ -49,6 +49,17 @@ echo \"\$out\" | grep -q '平均长度: [2-9][0-9][0-9]'
 echo "[T4] 存续保护(四层在跑)"
 t "备份cron存在" bash -c "crontab -l 2>/dev/null | grep -q 'dsh-cognitive-backup'"
 t "git提交存在" bash -c "git -C '$HOME/.dsh' log --oneline 2>/dev/null | grep -q ."
+# 4b2. 提交腿须"在驱动"而非"存在"(2026-09-09 00:3x 固化——cl-049: crontab 未转义 % 致
+#      自动提交停摆 25h, 而旧断言只看历史任意提交, 套件全绿而存续腿已死。窗口取 6h 以容忍
+#      夜间无变更导致的"nothing to commit"。)
+t "git提交未停摆(6h内)" python3 -c '
+import subprocess, time
+out = subprocess.run(["git", "-C", __import__("os").path.expanduser("~/.dsh"),
+                      "log", "-1", "--format=%ct"], capture_output=True, text=True).stdout.strip()
+assert out.isdigit(), "取不到提交时间"
+age = time.time() - int(out)
+assert age < 6 * 3600, "最近提交距今 %.1f 小时(>6h, 提交腿可能停摆)" % (age / 3600)
+'
 t "完整性基线在" bash -c "test -f '$DIR/.integrity-baseline.sha256'"
 # 4d. cron时间语义校验(2026-09-08 06:0x 审视固化——*/2小时=偶数点非"从X起", 曾致oq010探测凌晨空转)
 t "oq010探测cron在白天奇数点" bash -c "crontab -l 2>/dev/null | grep dsh-oq010-probe | grep -qE '^7 (7|9|11|13|15|17|19|21),'"
