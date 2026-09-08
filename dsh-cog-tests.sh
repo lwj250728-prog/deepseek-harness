@@ -302,6 +302,28 @@ assert any(r.get('appliedCheckIds') for r in rows), '无applied记录'
 "
 
 echo ""
+
+# ── T19 验收标准锚线(2026-09-08 19:5x 固化——tp-023: 锚线接通/check_2/3开火/P0告警通道) ──
+echo "[T19] 验收标准锚线(command_anchor配置/锚验证记录/check_2-3开火/P0告警通道)"
+# 19a. 配置开启
+t "acceptanceCommandExecution开启" bash -c "grep -q 'acceptanceCommandExecution: true' '$HOME/.dsh/profiles/web/cordis.patch.yml'"
+# 19b. 有锚验证记录
+t "有anchorVerified记录" python3 -c "
+import json
+n = sum(1 for l in open('$DIR/claim_audits.jsonl') if json.loads(l).get('anchorVerified'))
+assert n >= 1, f'anchorVerified={n}'
+"
+# 19c. check_2/3 开火且机器验证
+t "check_2/3开火+机器验证" python3 -c "
+import json
+d = {c['checkId']: c for c in json.load(open('$DIR/acceptance.json'))}
+for cid in ('check_2','check_3'):
+    c = d.get(cid, {})
+    assert c.get('invokedCount',0) > 0 and c.get('machineVerifiedCount',0) > 0, f'{cid}未开火'
+"
+# 19d. P0 失败自动汇报通道在
+t "P0告警通道在" bash -c "grep -q 'test-alert' '$HOME/dsh-fork/dsh-cog-tests.sh'"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
