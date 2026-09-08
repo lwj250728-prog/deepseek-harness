@@ -125,6 +125,9 @@ export class CognitiveStore {
   private chainPatterns = new Map<string, ChainPattern>()
   private solidifiedStrategies = new Map<string, SolidifiedStrategy>()
   private variants = new Map<string, VariantCandidate>()
+  // 2026-09-08 cl-031: 会话级链锚——一次声明(显式 chain_id)覆盖该会话后续全部经验,
+  // 使目标锚定不依赖逐条记忆(离线实验: 语义相似链0条, 目标锚定链4条)。
+  private chainAnchors = new Map<string, string>()
   private taxonomyState: TaxonomyState | null = null
   private nextExpSeq = 1
   private nextPredictionSeq = 1
@@ -151,12 +154,15 @@ export class CognitiveStore {
   async load(): Promise<void> {
     await mkdir(this.root, { recursive: true })
     const [
-      experiences, predictions, tempStrategies, clusters, calibration,
+      experiences, experienceFrames, predictions, tempStrategies, clusters, calibration,
       channelWeights, exploration, tasks, loopExecutions, acceptance,
       claimAudits, triggerJumps, injections, chains, chainPatterns, taxonomy,
-      solidifiedStrategies, variants, discriminantAxes,
+      solidifiedStrategies, variants, discriminantAxes, chainAnchors,
     ] = await Promise.all([
       readFile(this.file('experiences.jsonl'), 'utf8').catch(() => ''),
+      // 2026-09-08 cl-030: 帧旁路经验独立存储(CLS 情景层), 加载时合并入内存——
+      // 它们参与统计但不应污染任务经验的语义检索。
+      readFile(this.file('experiences-frames.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('predictions.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('temp_strategies.jsonl'), 'utf8').catch(() => ''),
       readFile(this.file('clusters.json'), 'utf8').catch(() => ''),
@@ -175,8 +181,18 @@ export class CognitiveStore {
       readFile(this.file('solidified_strategies.json'), 'utf8').catch(() => ''),
       readFile(this.file('variants.json'), 'utf8').catch(() => ''),
       readFile(this.file('discriminant_axes.json'), 'utf8').catch(() => ''),
+      readFile(this.file('chain_anchors.json'), 'utf8').catch(() => ''),
     ])
-    for (const record of parseLines(experiences)) {
+    if (chainAnchors !== '') {
+      const parsed = JSON.parse(chainAnchors) as unknown
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        for (const [sessionId, chainId] of Object.entries(parsed as Record<string, unknown>)) {
+          if (typeof chainId === 'string' && chainId !== '') this.chainAnchors.set(sessionId, chainId)
+        }
+      }
+    }
+    // 2026-09-08 cl-030: 两个经验层都并入内存(帧层用于统计/重放, 任务层用于语义检索)。
+    for (const record of [...parseLines(experiences), ...parseLines(experienceFrames)]) {
       if (typeof record !== 'object' || record === null) continue
       const exp = record as Experience
       if (typeof exp.expId !== 'string') continue
@@ -473,12 +489,29 @@ export class CognitiveStore {
   // ── experiences ──────────────────────────────────────────────────────────
 
   /**
+   * 帧旁路经验(情景层)与任务经验(语义层)分文件存储——CLS 双存储。
+   * 2026-09-08 cl-030 修复: 原实现把内存全量回写 experiences.jsonl, 导致离线清洗的
+   * 帧经验分离数分钟内被覆盖(运行时内存仍持旧集)。改为按来源分流: 帧经验(quiet-driver
+   * 旁路三问帧, action 固定模板)写 experiences-frames.jsonl, 任务经验写 experiences.jsonl。
+   */
+  private isFrameExperience(exp: Experience): boolean {
+    return (exp.sar?.action ?? '').includes('旁路三问帧')
+  }
+
+  /** Persist both experience layers to their own files (never cross-write). */
+  private enqueueExperiences(): void {
+    const all = [...this.experiences.values()]
+    this.enqueueLines('experiences.jsonl', all.filter(e => !this.isFrameExperience(e)))
+    this.enqueueLines('experiences-frames.jsonl', all.filter(e => this.isFrameExperience(e)))
+  }
+
+  /**
    * Store one experience and enqueue its persistence.
    * @param exp - the experience to add.
    */
   addExperience(exp: Experience): void {
     this.experiences.set(exp.expId, exp)
-    this.enqueueLines('experiences.jsonl', [...this.experiences.values()])
+    this.enqueueExperiences()
   }
 
   /**
@@ -504,7 +537,7 @@ export class CognitiveStore {
    */
   removeExperience(expId: string): boolean {
     const existed = this.experiences.delete(expId)
-    if (existed) this.enqueueLines('experiences.jsonl', [...this.experiences.values()])
+    if (existed) this.enqueueExperiences()
     return existed
   }
 
@@ -521,7 +554,7 @@ export class CognitiveStore {
     }
     const next: Experience = { ...current, ...patch }
     this.experiences.set(expId, next)
-    this.enqueueLines('experiences.jsonl', [...this.experiences.values()])
+    this.enqueueExperiences()
     return next
   }
 
@@ -555,7 +588,7 @@ export class CognitiveStore {
       // and do not count the contradictory weight.
       const rolled = { ...current, verification: 'unverified' as const, evidenceScore: 0 }
       this.experiences.set(expId, rolled)
-      this.enqueueLines('experiences.jsonl', [...this.experiences.values()])
+      this.enqueueExperiences()
       return rolled
     }
     const nextScore = current.evidenceScore + weight
@@ -572,7 +605,7 @@ export class CognitiveStore {
       verification,
     }
     this.experiences.set(expId, next)
-    this.enqueueLines('experiences.jsonl', [...this.experiences.values()])
+    this.enqueueExperiences()
     return next
   }
 
@@ -594,7 +627,7 @@ export class CognitiveStore {
       }
     }
     if (expired.length > 0) {
-      this.enqueueLines('experiences.jsonl', [...this.experiences.values()])
+      this.enqueueExperiences()
     }
     return expired
   }
@@ -711,7 +744,7 @@ export class CognitiveStore {
           })(),
         }
         this.experiences.set(exp.expId, next)
-        this.enqueueLines('experiences.jsonl', [...this.experiences.values()])
+        this.enqueueExperiences()
       }
     }
     return resolved
@@ -1555,7 +1588,7 @@ export class CognitiveStore {
         })
       }
     }
-    this.enqueueLines('experiences.jsonl', [...this.experiences.values()])
+    this.enqueueExperiences()
   }
 
   /** Simple in-memory + disk counts for inspection.
