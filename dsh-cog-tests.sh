@@ -418,6 +418,46 @@ ids = [json.loads(l).get("expId") for l in open(os.path.join(d, "experiences.jso
 assert "exp_221" in ids, "exp_221 不在任务层(文本嗅探误判复发)"
 '
 
+# ── T23 SAR provenance 不变量(2026-09-08 21:5x 固化——cl-035: cl-033/cl-034 同属写入路径文本层缺陷) ──
+echo "[T23] SAR provenance不变量(结构标记权威切分 + rawText可回溯 + 字段不互串)"
+# 23a. src 含确定性结构切分
+t "src含结构标记切分" bash -c "grep -q 'splitStructuredSar' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/src/llm.ts'"
+# 23b. 抽取提示词含结构/防捏造规则
+t "提示词含结构切分规则" bash -c "grep -q '标记是权威切分' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/src/prompts.ts'"
+# 23c. rawText 持久化(可回溯)
+t "src持久化rawText" bash -c "grep -q 'rawText: input.rawText' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts'"
+# 23d. lib 已部署
+t "lib含结构切分(已部署)" bash -c "grep -q 'splitStructuredSar' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
+# 23e. 运行时: 至少一条经验携带 rawText(机制真跑过)
+t "有经验携带rawText" python3 -c '
+import json, os
+d = os.path.expanduser("~/.dsh/cognitive-pipeline")
+rows = [json.loads(l) for l in open(os.path.join(d, "experiences.jsonl")) if l.strip()]
+assert any(isinstance(r.get("rawText"), str) and r["rawText"] for r in rows), "无任何经验携带 rawText"
+'
+# 23f. 运行时不变量: 带 rawText 的行——字段不以结构标记开头, 且字段字符 ≥50% 可在 rawText 中找到
+t "SAR字段不互串且可回溯" python3 -c '
+import json, os, re
+d = os.path.expanduser("~/.dsh/cognitive-pipeline")
+rows = [json.loads(l) for l in open(os.path.join(d, "experiences.jsonl")) if l.strip()]
+label = re.compile(r"^\s*(?:情境|situation|动作|行动|action|结果|outcome)\s*[:：]", re.I)
+bad, fabricated = [], []
+for r in rows:
+    raw = r.get("rawText")
+    if not isinstance(raw, str) or not raw:
+        continue
+    sar = r.get("sar") or {}
+    for f in ("situation", "action", "outcome"):
+        v = sar.get(f) or ""
+        if label.search(v):
+            bad.append("%s.%s" % (r.get("expId"), f))
+        chars = set(ch for ch in v if not ch.isspace())
+        if chars and len(chars & set(raw)) / len(chars) < 0.5:
+            fabricated.append("%s.%s" % (r.get("expId"), f))
+assert not bad, "字段残留结构标记(互串): %s" % bad[:3]
+assert not fabricated, "字段内容无法回溯到 rawText(疑似捏造): %s" % fabricated[:3]
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。

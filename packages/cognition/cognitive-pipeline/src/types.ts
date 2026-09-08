@@ -189,6 +189,13 @@ export interface Experience {
    * merely QUOTED the frame template string.
    */
   readonly kind?: 'task' | 'frame'
+  /**
+   * The caller's original text, kept so the extracted SAR triplet stays
+   * auditable (cl-035): without it, a field-assignment defect like cl-034 can
+   * only be found by manually re-reading the caller's prompt. Absent on legacy
+   * rows and on pipeline-internal meta experiences.
+   */
+  readonly rawText?: string
   /** The goal-anchored chain this experience belongs to, when tagged by an
    * orchestrator goal or a delegation. The chain consolidates tagged members
    * into a causal skeleton. Absent on legacy rows. */

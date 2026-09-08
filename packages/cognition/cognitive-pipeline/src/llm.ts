@@ -327,6 +327,49 @@ function sarFallback(rawText: string): SarTriplet {
   }
 }
 
+/** Structural markers a caller may use to label SAR fields themselves. */
+const STRUCT_SITUATION = /(?:情境|situation)\s*[:：]/i
+const STRUCT_ACTION = /(?:动作|行动|action)\s*[:：]/i
+const STRUCT_OUTCOME = /(?:结果|outcome)\s*[:：]/i
+
+/** Leading structural label of any field, for defensive stripping. */
+const STRUCT_ANY_LABEL = /^\s*(?:情境|situation|动作|行动|action|结果|outcome)\s*[:：]\s*/i
+
+/**
+ * Split caller-structured raw text into SAR fields deterministically (cl-034).
+ * When the caller already labelled the fields, those labels are authoritative:
+ * the LLM must not be allowed to re-assign them. exp_224 showed the failure —
+ * its situation text was placed into the action field and the action text into
+ * the outcome field, corrupting the action vector used for retrieval.
+ * @param rawText - the raw experience text.
+ * @returns the split fields, or null when the text is not fully structured.
+ */
+export function splitStructuredSar(rawText: string): { situation: string; action: string; outcome: string } | null {
+  const s = rawText.search(STRUCT_SITUATION)
+  const a = rawText.search(STRUCT_ACTION)
+  const o = rawText.search(STRUCT_OUTCOME)
+  if (s < 0 || a < 0 || o < 0 || !(s < a && a < o)) return null
+  const body = (from: number, to: number): string =>
+    rawText.slice(from, to).replace(STRUCT_ANY_LABEL, '').trim()
+  const situation = body(s, a)
+  const action = body(a, o)
+  const outcome = body(o, rawText.length)
+  if (situation === '' || action === '' || outcome === '') return null
+  return { situation, action, outcome }
+}
+
+/**
+ * Strip a leading structural label from one extracted field. A field that still
+ * carries a label is cross-contaminated: the label is dropped so downstream
+ * vectors and the provenance invariant see clean text.
+ * @param value - the field text.
+ * @returns the field without a leading structural label.
+ */
+export function stripStructLabel(value: string): string {
+  const stripped = value.replace(STRUCT_ANY_LABEL, '').trim()
+  return stripped === '' ? value.trim() : stripped
+}
+
 /**
  * Template 1: extract the SAR triplet. Falls back to a deterministic split.
  * @param ctx - plugin context for the LLM call.
@@ -341,7 +384,11 @@ export async function extractSar(
   rawText: string,
   options: CallOptions,
 ): Promise<SarTriplet> {
-  if (!hasExplicitRoute(route)) return sarFallback(rawText)
+  // cl-034: when the caller labelled the fields, those labels are authoritative
+  // and must override the LLM's field assignment (exp_224 had its situation
+  // text placed into the action field).
+  const structured = splitStructuredSar(rawText)
+  if (!hasExplicitRoute(route)) return structured === null ? sarFallback(rawText) : { ...sarFallback(rawText), ...structured }
   try {
     const parsed = asObject(await callJson(ctx, route, SAR_SYSTEM_PROMPT, frameSarInput(rawText), {
       ...options,
@@ -369,10 +416,12 @@ export async function extractSar(
       throw new CognitivePipelineError('cognitive-pipeline: SAR output missing utility fields', 'SAR_UTILITY_FAILED')
     }
     return {
-      situation: parsed.situation,
-      action: parsed.action,
-      outcome: parsed.outcome,
-      actionKeywords: keywords.length > 0 ? keywords : [...new Set(tokenize(parsed.action))].slice(0, 8),
+      situation: structured?.situation ?? stripStructLabel(parsed.situation),
+      action: structured?.action ?? stripStructLabel(parsed.action),
+      outcome: structured?.outcome ?? stripStructLabel(parsed.outcome),
+      actionKeywords: structured !== null
+        ? [...new Set(tokenize(structured.action))].slice(0, 8)
+        : (keywords.length > 0 ? keywords : [...new Set(tokenize(parsed.action))].slice(0, 8)),
       outcomeUtility: {
         materialGain: clampUtility(materialGain),
         emotionalValence: clampUtility(emotionalValence),
