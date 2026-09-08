@@ -331,12 +331,16 @@ echo "[T20] 关单纪律(帧头提示'已完成未关单'+'即时标done' + 无�
 t "src含关单提示" bash -c "grep -q '已完成未关单' '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts'"
 # 20b. lib 已部署
 t "lib含关单提示(已部署)" bash -c "grep -q '已完成未关单' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
-# 20c. 无矛盾 open 项(note说已修但状态open)
+# 20c. 无矛盾 open 项(note说已修但状态open)——按 id last-wins 去重后再判
+#      (2026-09-09 00:2x 修正: 首版遍历全部行, 旧记录会把已关闭项判成矛盾——与 cl-041 同族)
 t "无矛盾open项" python3 -c "
 import json
-bad = []
+by_id = {}
 for l in open('$DIR/claims-ledger.jsonl'):
     d = json.loads(l)
+    if d.get('id'): by_id[d['id']] = d
+bad = []
+for d in by_id.values():
     if d['status'] not in ('open','in-progress'): continue
     note = (d.get('note') or '') + (d.get('doneNote') or '')
     if any(k in note for k in ['已修','已执行','已落地','已修复']):
@@ -725,6 +729,17 @@ for f in ("experiences.jsonl", "experiences-frames.jsonl"):
         if r.get("meta") and "验收准则持续被违反" in sit and not r.get("metaKind"):
             bad.append(r.get("expId"))
 assert not bad, "带该短语的 meta 经验无显式标记: %s" % bad[:3]
+'
+
+# ── T31 对照挖掘器(2026-09-09 00:2x 固化——cl-047: "为什么"的原料是对照样本+可信标签) ──
+echo "[T31] 对照挖掘器(同类对照对/锚定率/类内极差裁决——回答'能否提炼因果')"
+t "对照挖掘器可用" bash -c "test -f '$HOME/dsh-fork/dsh-contrast.py' && python3 '$HOME/dsh-fork/dsh-contrast.py' | grep -q '最大类内极差'"
+t "报告锚定率与裁决" python3 -c '
+import subprocess, os
+out = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-contrast.py")],
+                     capture_output=True, text=True).stdout
+assert "全库锚定率" in out, "未报告锚定率"
+assert ("不能" in out or "可尝试提炼" in out), "未给出裁决"
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
