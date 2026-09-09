@@ -1032,6 +1032,28 @@ assert age < 24, "最新预测距今 %.1f 小时——预测环可能停摆(校�
 print("最新预测距今 %.1f 小时" % age)
 '
 
+# ── T42 孵化三指标自动化(2026-09-09 12:0x 固化——行动帧: 推进率从人工核对改为结构化判据) ──
+echo "[T42] 孵化三指标(触发/采纳/推进 自动统计 + 采纳时刻落盘)"
+t "采纳时刻落盘已部署" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/src/index.ts")).read()
+lib = open(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/lib/index.js")).read()
+assert "incubation-log.jsonl" in src and "incubation-log.jsonl" in lib, "采纳时刻未落盘"
+'
+t "三指标脚本可跑出三列" python3 -c '
+import subprocess, os
+out = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-incubation-stats.py")],
+                     capture_output=True, text=True, timeout=60).stdout
+assert "触发" in out and "采纳" in out and "推进" in out, "缺少三列"
+assert "goal-digital-life-incubation" in out, "未统计到目标"
+assert os.path.exists(os.path.expanduser("~/.dsh/cognitive-pipeline/incubation-stats.md")), "未产出统计文件"
+'
+t "变更历史在积累" python3 -c '
+import os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/goal-watch-history.jsonl")
+assert os.path.exists(p) and os.path.getsize(p) > 0, "goal-watch 变更历史为空(推进率无从判定)"
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。

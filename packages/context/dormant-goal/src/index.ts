@@ -18,7 +18,7 @@
  * @module @deepseek-ai/dsh-dormant-goal
  */
 
-import { readFile, writeFile } from 'node:fs/promises'
+import { appendFile, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
@@ -286,13 +286,20 @@ export function apply(ctx: Context, config: Config): void {
     }
     if (hits.length === 0) return decision
     hits.sort((a, b) => b.similarity - a.similarity)
+    let summary = '目标孵化提醒'
     const blocks = hits.slice(0, 1).map(({ goal, layer, similarity }) => {
       const body = layer === 'kernel' && goal.kernel ? goal.kernel : goal.focus ?? goal.kernel ?? ''
       const title = goal.title ?? goal.id
+      summary = `目标孵化提醒: ${title} (${layer} ${similarity.toFixed(2)})`
       return `【目标孵化提醒】休眠目标“${title}”（${goal.id}）被当前情境唤醒：命中 ${layer} 层（相似度 ${similarity.toFixed(2)}）。该目标的本源/当前形态：${body.slice(0, 120)}。若此情境与它有真实的交叉，可在回复中深化思考或记录推进（有效孵化）；否则忽略即可。`
     })
     const block = createUserMessage({
       content: [{ type: 'text', text: blocks.join('\n') }],
+      // A producer MUST tag the message source: `session.list` and several
+      // per-event listeners read `event.data.source.kind` unconditionally, so a
+      // source-less user/message breaks the whole session list (2026-09-09
+      // incident: POST /api/session.list 500).
+      source: { kind: 'plugin', plugin: name, form: 'notice', summary },
     })
     // Register triggered goals for this turn's adoption check; count triggers.
     const set = pending.get(agent.session.id) ?? new Set<string>()
@@ -351,10 +358,20 @@ export function apply(ctx: Context, config: Config): void {
       saveDomains(failPath, domains)
     }
     const keywords = config.adoptKeywords ?? {}
+    // 2026-09-09 12:0x 行动帧: 采纳时刻落盘(incubation-log.jsonl)——推进率统计需要
+    // "采纳发生的时间", 光有 adoptedCount 无法与 goal-watch 的变更时间对齐。
+    const incubationLog = join(dirname(poolPath), 'incubation-log.jsonl')
     for (const goalId of triggered) {
       const words = keywords[goalId] ?? []
       const adopted = words.length > 0 && words.some(w => assistantText.includes(w))
-      if (adopted) bump(goalId, true)
+      if (!adopted) continue
+      bump(goalId, true)
+      void appendFile(incubationLog, JSON.stringify({
+        ts: new Date().toISOString(),
+        goalId,
+        sessionId: session.id,
+        matchedKeyword: words.find(w => assistantText.includes(w)) ?? null,
+      }) + '\n').catch(() => undefined)
     }
   }, 'dormant-goal adoption')
 }
