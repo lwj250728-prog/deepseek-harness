@@ -1031,11 +1031,15 @@ export class CognitivePipelineService extends Service {
     /** Explicit meta subtype marker for readers that need a specific kind. */
     metaKind?: string
   }): string {
+    // cl-058 补: 帧/元经验同样要词级关键词——此前 rememberMeta 直接用 tokenize(单字),
+    // 而 load 时的 repairCharKeywords 只在启动跑一次, 新写入的帧照样是字符级(exp_245 实测)。
+    const rawKeywords = [...new Set(tokenize(input.action))].slice(0, 8)
+    const wordKeywords = isCharLevelKeywords(rawKeywords) ? this.deriveWordKeywords(input.action) : rawKeywords
     const sar: SarTriplet = {
       situation: input.situation,
       action: input.action,
       outcome: input.outcome,
-      actionKeywords: [...new Set(tokenize(input.action))].slice(0, 8),
+      actionKeywords: wordKeywords.length > 0 ? wordKeywords : rawKeywords,
       outcomeUtility: { ...input.utility },
     }
     const expId = this.store.nextExpId()
