@@ -2105,12 +2105,15 @@ i = s.index("const wakeTargetAgent")
 seg = s[i:i+1400]
 assert "modelStillAvailable" in seg, "校验不在唤醒路径内"
 '
-t "校验失败开放(查不到不阻断)" python3 -c '
+t "校验失败开放(查不到不阻断, 但必须可见)" python3 -c '
 import os
 s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
 i = s.index("const modelStillAvailable")
-seg = s[i:i+800]
-assert "return true" in seg, "未失败开放"
+seg = s[i:i+1000]
+# cl-103 三态: 查不到 => unknown(不阻断), 调用方只把 missing 当阻断, 且 unknown 必须留痕。
+assert "unknown" in seg, "查不到未标注 unknown"
+assert "missing" in s, "调用方未按三态判定"
+assert "model-check-unknown" in s, "unknown 路径无痕迹(不可证伪)"
 '
 t "产物含可用性校验(已部署)" bash -c "grep -q 'modelStillAvailable' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
 t "巡检查的是会话实际模型(cl-096)" python3 -c '
@@ -2461,16 +2464,39 @@ hit = [r for r in rows if (r.get("ts") or 0) > cut
 # cl-103: 只有失败路径留痕 => "没有告警"不可证伪(既可能模型在, 也可能根本没查成)。
 assert hit, "最近 1h 无 model-ok/model-check-unknown 心跳: 巡检结果不可证伪"
 '
-t "告警关闭记录必须带 claim 字段(套件 10c 断言每行有 id 和 claim)" bash -c '
-python3 - <<PY
+t "所有告警关闭记录都必须带 claim 字段(套件 10c 断言每行有 id 和 claim)" python3 -c '
 import re, os
 src = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
-block = re.search(r"status: .done..*?\}", src, re.S)
-assert block, "未找到关闭记录写入块"
-assert "claim:" in block.group(0), "关闭记录缺 claim 字段——首次自动关闭会把套件 10c 打红(伪红)"
-PY
+# 套件 10c 断言账本每行都有 id 和 claim => 每个 status: done 的写入块都必须带 claim。
+blocks = re.findall(r"\{[^{}]*status: .done.[^{}]*\}", src, re.S)
+assert blocks, "未找到关闭记录写入块"
+bad = [b[:80] for b in blocks if "claim:" not in b]
+assert not bad, "关闭记录缺 claim 的块: %s" % bad
 '
-t "T73 读账本已 last-wins 去重" bash -c "grep -q 'cl-041: 追加式账本必须 last-wins' '$HOME/dsh-fork/dsh-cog-tests.sh'"
+
+# ── T86 在用模型 vs 实时目录(cl-105: 巡检真相源是硬编码清单) ──
+echo "[T86] 在用模型一致性(实时目录检查落盘 / 差异必须可见)"
+t "实时目录一致性检查已落盘并刷新" bash -c '
+python3 "$HOME/dsh-fork/dsh-model-catalog-check.py" --quiet >/dev/null 2>&1 || true
+python3 -c "
+import json, os, time
+p = os.path.expanduser(\"~/.dsh/cognitive-pipeline/model-catalog.json\")
+assert os.path.exists(p), \"model-catalog.json 缺失\"
+d = json.load(open(p, encoding=\"utf8\"))
+assert time.time() - os.path.getmtime(p) < 300, \"目录检查结果陈旧\"
+assert d.get(\"verdict\") in (\"present\", \"missing\", \"unknown\"), d.get(\"verdict\")
+assert d.get(\"modelInUse\"), \"未记录在用模型\"
+"
+'
+t "目录差异必须可见(cl-105: 巡检报 model-ok 而实时目录已无该模型)" python3 -c '
+import json, os
+d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/model-catalog.json"), encoding="utf8"))
+if d.get("verdict") != "missing":
+    print("在用模型仍在目录中, 空过"); raise SystemExit(0)
+# 差异存在时, 结果文件必须显式记录, 且目录快照非空——差异不得被静默吞掉。
+assert d.get("missingFromCatalog") is True, "verdict=missing 但 missingFromCatalog 未置真"
+assert d.get("catalog"), "verdict=missing 但目录快照为空(无法复核)"
+'
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 

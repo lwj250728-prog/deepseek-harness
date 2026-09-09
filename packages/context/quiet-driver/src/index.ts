@@ -1073,6 +1073,8 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     if (stallAlertId === null) return
     void appendFile(ledgerPath, JSON.stringify({
       id: stallAlertId, status: 'done', closedAt: new Date().toISOString(),
+      // cl-104: 关闭记录同样必须带 claim——套件 10c 断言"账本每行都有 id 和 claim"。
+      claim: '帧产出已恢复, 停摆告警自动关闭',
       doneNote: '已恢复产出帧, 停摆告警自动关闭',
     }) + '\n').catch(() => undefined)
     stallAlertId = null
