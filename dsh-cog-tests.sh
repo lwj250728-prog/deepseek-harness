@@ -2352,6 +2352,46 @@ if python3 "$HOME/dsh-fork/dsh-probe-retire-check.py" --root "$tmp" --lib "$tmp/
 fi
 '
 
+# ── T82 注入集噪声指标(tp-065/cl-102: 帧生回流 / 静态占比 / 跳词通道有效性) ──
+echo "[T82] 注入集噪声指标(指标刷新 / 帧生占比 / 静态占比 / 跳词通道有效性)"
+t "噪声指标已落盘并刷新" bash -c '
+python3 "$HOME/dsh-fork/dsh-injection-noise.py" --quiet >/dev/null 2>&1 || true
+python3 - <<PY
+import json, os, time
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/injection-noise.json")
+assert os.path.exists(p), "指标文件缺失: dsh-injection-noise.py 未落盘"
+m = json.load(open(p, encoding="utf8"))
+age = time.time() - os.path.getmtime(p)
+assert age < 300, "指标文件陈旧 %.0fs(本次套件运行未刷新)" % age
+for k in ("frameBornInjectionShare", "staticTriggerShare", "channels", "window"):
+    assert k in m, "指标缺字段 %s" % k
+assert m["window"] >= 50, "窗口样本太少: %d" % m["window"]
+PY
+'
+t "帧生经验回流占比 ≤ 40%" python3 -c '
+import json, os
+m = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/injection-noise.json"), encoding="utf8"))
+v = m["frameBornInjectionShare"]
+assert v <= 0.40, "帧生注入占比 %.1f%% 超阈 40%%——自我回声已主导注入集" % (v * 100)
+'
+t "静态触发占比 ≤ 95%(通道塌缩警戒, 非噪声判据)" python3 -c '
+import json, os
+m = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/injection-noise.json"), encoding="utf8"))
+v = m["staticTriggerShare"]
+# 阈值说明: tp-065 原写 85%, 无数据依据; 实测 static 类是历史引用率最高的类
+# (09-06 前 26.3%), 高占比本身不等于噪声, 故上调为 95% 的"只剩一条通道"警戒线。
+assert v <= 0.95, "静态触发占比 %.1f%%: 注入通道已塌缩到只剩静态词匹配" % (v * 100)
+'
+t "跳词通道有效性(样本 ≥20 时引用率必须 >0)" python3 -c '
+import json, os
+m = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/injection-noise.json"), encoding="utf8"))
+settled = m.get("jumpChannelSettled", 0)
+cited = m.get("jumpChannelCited", 0)
+if settled < 20:
+    print("样本不足(%d), 空过" % settled); raise SystemExit(0)
+assert cited > 0, "跳词通道 %d 条已结算样本零引用——学习出来的通道比静态词还差, 应剪枝或修复" % settled
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
