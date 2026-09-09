@@ -2401,6 +2401,26 @@ stale = m.get("jumpStaleZeroEvidence", 0)
 assert stale == 0, "%d 条零证据跳词已过证据寿命仍驻留(前 5: %s)" % (stale, m.get("jumpStaleZeroEvidenceWords"))
 '
 
+# ── T83 跳词判据窗口健康度(tp-066/tp-067: 判据不得变成永不开火的死判据) ──
+echo "[T83] 跳词判据窗口健康(重建风暴防护 / 有证据变体跨重建存活)"
+t "判据窗口健康: 24h 内词表重建 ≤4 次" python3 -c '
+import json, os
+m = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/injection-noise.json"), encoding="utf8"))
+n = m.get("jumpRebuildCount24h")
+assert isinstance(n, int), "指标缺 jumpRebuildCount24h"
+# 跳词判死按"现世代"计, 世代起点每次重建前移: 重建过密 => 窗口永远攒不到样本,
+# T82 的跳词判死断言就退化成永不开火的死判据(机制在、条件已死 的又一种形态)。
+assert n <= 4, "24h 内重建 %d 次: 判据窗口被反复重置, 跳词判死断言已失效" % n
+'
+t "有证据的 LLM 变体跨重建必须 100% 存活" python3 -c '
+import json, os
+m = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/injection-noise.json"), encoding="utf8"))
+s = m.get("llmProvenSurvival")
+if s is None:
+    print("当前无有证据变体, 空过"); raise SystemExit(0)
+assert s >= 1.0, "有证据的 LLM 变体存活率 %.0f%% <100%%: 重建把已证明有用的关联换掉了" % (s * 100)
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──

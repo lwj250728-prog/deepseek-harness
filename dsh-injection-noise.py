@@ -140,6 +140,50 @@ def main() -> int:
                            and (j.get('hitCount') or 0) == 0
                            and now_ms - (j.get('createdAt') or now_ms) > JUMP_EVIDENCE_TTL_MS]
 
+    # 判据窗口健康度(cl-099 收尾): 跳词判死按"现世代"计, 而世代起点每次重建都会
+    # 前移——若重建过于频繁, 窗口永远攒不到样本, 断言就变成永不开火的死判据。
+    generation_age_h = (now_ms - generation_start) / 3600000 if generation_start else None
+    history_path = os.path.join(args.root, 'injection-noise-history.jsonl')
+    rebuilds: set[int] = set()
+    if os.path.exists(history_path):
+        for line in open(history_path, encoding='utf8'):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                stamp = json.loads(line).get('jumpGenerationStart')
+            except Exception:
+                continue
+            if isinstance(stamp, int) and now_ms - stamp < 24 * 3600 * 1000:
+                rebuilds.add(stamp)
+    if generation_start and now_ms - generation_start < 24 * 3600 * 1000:
+        rebuilds.add(generation_start)
+
+    # LLM 变体的世代存活率: 有证据的变体必须跨重建存活(它们才是"刻意的关联网络"),
+    # 零证据的允许换代(实测一次重建换了 82/120)。cohort 快照落盘供下次比对。
+    cohort_path = os.path.join(args.root, 'jump-cohort.json')
+    current_llm = {j['jumpWord'] for j in jumps_table.values() if j.get('source') == 'llm'}
+    current_proven = {j['jumpWord'] for j in jumps_table.values()
+                      if j.get('source') == 'llm'
+                      and ((j.get('citedCount') or 0) > 0 or (j.get('evidenceCount') or 0) > 0)}
+    previous: dict | None = None
+    if os.path.exists(cohort_path):
+        try:
+            previous = json.load(open(cohort_path, encoding='utf8'))
+        except Exception:
+            previous = None
+    survival = None
+    proven_survival = None
+    if isinstance(previous, dict) and previous.get('llm'):
+        prev_llm = set(previous['llm'])
+        prev_proven = set(previous.get('proven') or [])
+        survival = round(len(current_llm & prev_llm) / len(prev_llm), 4) if prev_llm else None
+        proven_survival = (round(len(current_proven & prev_proven) / len(prev_proven), 4)
+                           if prev_proven else None)
+    with open(cohort_path, 'w', encoding='utf8') as fh:
+        json.dump({'generatedAt': now_ms, 'llm': sorted(current_llm),
+                   'proven': sorted(current_proven)}, fh, ensure_ascii=False)
+
     cited_true = [r for r in injections.values() if r.get('cited') is True]
     cited_with_frame = sum(1 for r in cited_true if any(frame_born(x) for x in (r.get('expIds') or [])))
 
@@ -158,6 +202,11 @@ def main() -> int:
         'citedTrueWithFrameBorn': cited_with_frame,
         'channels': channels,
         'jumpGenerationStart': generation_start,
+        'jumpGenerationAgeHours': round(generation_age_h, 2) if generation_age_h is not None else None,
+        'jumpRebuildCount24h': len(rebuilds),
+        'llmCohortSize': len(current_llm),
+        'llmCohortSurvival': survival,
+        'llmProvenSurvival': proven_survival,
         'jumpGenerationSettled': len(gen_settled),
         'jumpGenerationCited': gen_cited,
         'jumpTableSize': len(jumps_table),
@@ -206,6 +255,10 @@ def main() -> int:
             '%s %s(%d/%d)' % (k, ('%.1f%%' % (v['rate'] * 100)) if v['rate'] is not None else 'n/a',
                               int(v['cited']), int(v['cited']) + int(v['uncited']))
             for k, v in sorted(channels.items())))
+        print('跳词表世代: 年龄 %.1fh, 24h 内重建 %d 次, LLM 变体 %d 条(存活率 %s, 有证据存活率 %s)'
+              % (generation_age_h or 0, len(rebuilds), len(current_llm),
+                 'n/a' if survival is None else '%.0f%%' % (survival * 100),
+                 'n/a' if proven_survival is None else '%.0f%%' % (proven_survival * 100)))
         print('跳词表: %d 条, 上次重建 %s, 现世代已结算 %d 条(引用 %d), 超龄零证据条目 %d'
               % (len(jumps_table),
                  datetime.datetime.fromtimestamp(generation_start / 1000).strftime('%m-%d %H:%M') if generation_start else 'n/a',
