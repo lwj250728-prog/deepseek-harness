@@ -1882,6 +1882,13 @@ const bad = out.filter(x => x.length === 2 && [...x].every(c => '的了是在不
 if (bad.length) { console.error('仍有停用字二元组', bad); process.exit(1); }
 \""
 # 只看构建之后写入的经验(效果证据): 修复前的历史行保留单字是已知事实, 不该让断言长期红。
+t "ensureWordKeywords 逐项剔单字(cl-101)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts"), encoding="utf8").read()
+i = s.index("private ensureWordKeywords")
+seg = s[i:i+900]
+assert "cleaned" in seg and "length === 1" in seg, "未逐项剔除单字"
+'
 t "构建后新经验不落单字CJK关键词" python3 -c '
 import json, os
 lib = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")

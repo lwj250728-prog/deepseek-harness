@@ -838,6 +838,15 @@ export class CognitivePipelineService extends Service {
    */
   private ensureWordKeywords(sar: SarTriplet): SarTriplet {
     const keywords = sar.actionKeywords
+    // cl-101: LLM 返回的列表里混进单个 CJK 字(实测 exp_292 的 '查')时, isCharLevelKeywords
+    // 判的是"单字占比>50%", 所以这种"1/3 是单字"的列表会原样落盘。先逐项剔除单字 CJK,
+    // 再走原有的字符级兜底——两道关都过不了的才重新派生。
+    const cleaned = keywords.filter(word => !(word.length === 1 && !/[a-z0-9]/i.test(word)))
+    if (cleaned.length !== keywords.length) {
+      if (cleaned.length > 0) return { ...sar, actionKeywords: cleaned }
+      const picked = this.deriveWordKeywords(sar.action)
+      return picked.length === 0 ? sar : { ...sar, actionKeywords: picked }
+    }
     if (!isCharLevelKeywords(keywords)) return sar
     const picked = this.deriveWordKeywords(sar.action)
     return picked.length === 0 ? sar : { ...sar, actionKeywords: picked }
