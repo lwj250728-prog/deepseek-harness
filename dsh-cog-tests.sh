@@ -1469,12 +1469,12 @@ assert not any(r.get("expId") == "exp_test" for r in rows), "测试数据污染�
 # ── T54 精排收益度量器(tp-050: 度量器本身错了就没人发现, 而它是"精排是否有益"的唯一判据) ──
 echo "[T54] 精排收益度量器(refine-eval: A/B 分组 + 小样本保护 + cron)"
 t "度量器存在且可执行" bash -c "test -x '$HOME/dsh-fork/dsh-refine-eval.py'"
-t "度量器可运行且输出A/B分组" bash -c "python3 '$HOME/dsh-fork/dsh-refine-eval.py' | grep -q 'A·精排提升' && python3 '$HOME/dsh-fork/dsh-refine-eval.py' | grep -q 'B·未开火'"
+t "度量器可运行且输出A1/A2/B分组" bash -c "python3 '$HOME/dsh-fork/dsh-refine-eval.py' | grep -q 'A1·真提升' && python3 '$HOME/dsh-fork/dsh-refine-eval.py' | grep -q 'A2·身份提升' && python3 '$HOME/dsh-fork/dsh-refine-eval.py' | grep -q 'B·未开火'"
 t "小样本不给结论" python3 -c '
 import re, subprocess, os
 out = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-refine-eval.py")], capture_output=True, text=True).stdout
-a = re.search(r"A·精排提升: 已结算 (\d+) 条", out); b = re.search(r"B·未开火: 已结算 (\d+) 条", out)
-assert a and b, "缺 A/B 计数"
+a = re.search(r"A1·真提升\(changed\): 已结算 (\d+) 条", out); b = re.search(r"B·未开火: 已结算 (\d+) 条", out)
+assert a and b, "缺 A1/B 计数"
 na, nb = int(a.group(1)), int(b.group(1))
 if min(na, nb) < 5:
     assert "样本不足" in out, "小样本未保护: A=%d B=%d" % (na, nb)
@@ -1620,9 +1620,11 @@ auto = [r for r in rows if str(r.get("situation", "")).startswith("自主回合"
 ret = [r for r in rows if not str(r.get("situation", "")).startswith("自主回合")]
 prom = [r for r in ret if r.get("promotedExpId")]
 out = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-refine-eval.py")], capture_output=True, text=True).stdout
-m = re.search(r"带审计键 (\d+)；其中精排提升 (\d+)", out)
-assert m, "输出格式变了: %s" % out[:200]
-assert int(m.group(2)) == len(prom), "A 组计数不符: 输出 %s vs 实算 %d" % (m.group(2), len(prom))
+m = re.search(r"带审计键 (\d+)；精排提升 (\d+)（真提升 (\d+) / 身份提升 noop (\d+)）", out)
+assert m, "输出格式变了: %s" % out[:240]
+assert int(m.group(2)) == len(prom), "提升总数不符: 输出 %s vs 实算 %d" % (m.group(2), len(prom))
+noop = [r for r in prom if r.get("promotedExpId") == r.get("originalTopExpId")]
+assert int(m.group(4)) == len(noop), "noop 计数不符: 输出 %s vs 实算 %d" % (m.group(4), len(noop))
 m2 = re.search(r"已排除自主回合预测 (\d+)", out)
 assert m2 and int(m2.group(1)) == len(auto), "排除数不符: %s vs %d" % (m2.group(1) if m2 else "?", len(auto))
 assert "自主回合预测(另一问题, 单列)" in out, "自主预测未单列"
@@ -1634,12 +1636,15 @@ ret = [r for r in rows if not str(r.get("situation", "")).startswith("自主回�
 prom = [r for r in ret if r.get("promotedExpId") and r.get("actualOutcome") is not None and isinstance(r.get("predictionError"), (int, float))]
 if not prom:
     raise SystemExit(0)
-want = statistics.mean(r["predictionError"] for r in prom)
+changed = [r for r in prom if r.get("promotedExpId") != r.get("originalTopExpId")]
+if not changed:
+    raise SystemExit(0)
+want = statistics.mean(r["predictionError"] for r in changed)
 out = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-refine-eval.py")], capture_output=True, text=True).stdout
-m = re.search(r"A·精排提升: 已结算 (\d+) 条, 平均误差 ([0-9.]+)", out)
-assert m, "A 组输出缺失"
-assert int(m.group(1)) == len(prom), "A 组结算数不符"
-assert abs(float(m.group(2)) - want) < 1e-3, "A 组均值不符: 输出 %s vs 实算 %.3f" % (m.group(2), want)
+m = re.search(r"A1·真提升\(changed\): 已结算 (\d+) 条, 平均误差 ([0-9.]+)", out)
+assert m, "A1 组输出缺失"
+assert int(m.group(1)) == len(changed), "A1 组结算数不符: 输出 %s vs 实算 %d" % (m.group(1), len(changed))
+assert abs(float(m.group(2)) - want) < 1e-3, "A1 组均值不符: 输出 %s vs 实算 %.3f" % (m.group(2), want)
 '
 
 # ── T59 采纳计数原子化(tp-053/cl-079: 同回合多目标采纳时并发读-改-写丢更新) ──
@@ -1753,6 +1758,40 @@ s = open(p, encoding="utf8").read()
 i = s.index("channel_weights: {")
 seg = s[i:i+800]
 assert "additionalProperties: false" in seg, "未找到 additionalProperties:false(检查点漂移)"
+'
+
+# ── T62 唤醒必须挂存量 preset(cl-084: 2026-09-09 17:34:53 quiet-driver 裸 resume 唤醒主会话
+# → 该 agent 未加入任何 preset; Web 组合的全局工具层为空(每个面向模型的工具都在 preset 里),
+# 于是主会话此后每次 bash 都得到裸 unknown tool "bash", read/write/subagent 同缺, 只剩插件工具) ──
+echo "[T62] 目标会话唤醒必须挂存量 preset(防'唤醒即剥光工具')"
+t "src 唤醒解析存量 preset 并在 setup 内 mount" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
+assert "resolveStoredPreset" in s, "缺存量 preset 解析"
+assert "presets.mount(agentCtx, presetId)" in s, "缺 setup 内的 preset 挂载"
+assert "agent-preset/selected" in s, "缺最新选择事件优先于创建头的解析(与 resolveSessionPreset 同义)"
+'
+t "src 无裸 resume(不带 setup 的唤醒)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
+assert "resume({ resumeSessionId: sessionId })" not in s, "仍存在不带 setup 的裸唤醒"
+'
+t "lib 含 preset 挂载(已部署)" bash -c "grep -q 'presets.mount(agentCtx, presetId)' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
+t "心跳 agent-resumed 必带 preset 字段(旧 lib 无此字段)" python3 -c '
+import json, os
+hb = os.path.expanduser("~/.dsh/cognitive-pipeline/quiet-driver-heartbeat.jsonl")
+lib = os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/lib/index.js")
+since = os.path.getmtime(lib) * 1000
+rows = []
+if os.path.exists(hb):
+    for line in open(hb, encoding="utf8"):
+        line = line.strip()
+        if line:
+            try: rows.append(json.loads(line))
+            except Exception: pass
+bad = [r for r in rows
+       if r.get("reason") == "agent-resumed" and r.get("ts", 0) >= since and "preset" not in r]
+assert not bad, "修复部署后的 agent-resumed 心跳缺 preset 字段"
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"

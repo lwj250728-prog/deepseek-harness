@@ -519,7 +519,12 @@ export class HotEngine {
         text: `${hit.exp.sar.situation}。${hit.exp.sar.action}。${hit.exp.sar.outcome}`,
         similarity: hit.similarity,
       })), { sessionId, signal })
-      if (decision.bestExpId !== null) promoted = decision.bestExpId
+      // cl-087: 只有**真的换人**才算提升。实测 13 条"提升"里 5 条是 bestExpId == 原首位
+      // (身份提升/noop)——它们被记成 promotedExpId 后污染 A 组, 让"精排有没有用"的判读
+      // 混入"精排只是确认了原有顺序"。noop 不再计入 promotedExpId。
+      if (decision.bestExpId !== null && decision.bestExpId !== originalTopExpId) {
+        promoted = decision.bestExpId
+      }
       if (decision.shouldKeep || decision.rejectedExpId === null) break
       if (!remaining.has(decision.rejectedExpId)) break
       remaining.delete(decision.rejectedExpId)

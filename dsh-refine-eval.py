@@ -49,7 +49,10 @@ def main():
     promoted = [r for r in audited if r.get('promotedExpId')]
     no_refine = [r for r in rows if r.get('retrievalNote') is None and r.get('originalTopExpId') is None]
 
-    print(f'检索类预测 {len(rows)}（已排除自主回合预测 {len(auto)}）；带审计键 {len(audited)}；其中精排提升 {len(promoted)}')
+    noop = [r for r in promoted if r.get('promotedExpId') == r.get('originalTopExpId')]
+    changed = [r for r in promoted if r.get('promotedExpId') != r.get('originalTopExpId')]
+    print(f'检索类预测 {len(rows)}（已排除自主回合预测 {len(auto)}）；带审计键 {len(audited)}；'
+          f'精排提升 {len(promoted)}（真提升 {len(changed)} / 身份提升 noop {len(noop)}）')
     print(f'精排门控未开火 {len(no_refine)}')
     if auto:
         settled_auto = [r for r in auto if resolved(r)]
@@ -58,8 +61,11 @@ def main():
             print(f'自主回合预测(另一问题, 单列): {len(auto)} 条, 已结算 {len(settled_auto)} 条, '
                   f'平均误差 {statistics.mean(errs_auto):.3f}')
 
+    # cl-087: A 组必须再拆——"真提升"(换人)与"身份提升"(noop, bestExpId==原首位)误差语义不同,
+    # 混在一起会把"精排只是确认了原顺序"算成精排的收益/损失。
     groups = {
-        'A·精排提升': [r for r in promoted if resolved(r)],
+        'A1·真提升(changed)': [r for r in changed if resolved(r)],
+        'A2·身份提升(noop)': [r for r in noop if resolved(r)],
         'B·未开火': [r for r in no_refine if resolved(r)],
     }
     for name, g in groups.items():
@@ -70,11 +76,11 @@ def main():
         print(f'{name}: 已结算 {len(g)} 条, 平均误差 {statistics.mean(errs):.3f}, '
               f'中位 {statistics.median(errs):.3f}, 最大 {max(errs):.3f}')
 
-    if len(groups['A·精排提升']) < MIN_N or len(groups['B·未开火']) < MIN_N:
-        print(f'\n样本不足（门槛各 {MIN_N} 条）——只报计数，不给结论。')
+    if len(groups['A1·真提升(changed)']) < MIN_N or len(groups['B·未开火']) < MIN_N:
+        print(f'\n样本不足（真提升与未开火各需 {MIN_N} 条）——只报计数，不给结论。')
         return 0
 
-    a = statistics.mean(r['predictionError'] for r in groups['A·精排提升'])
+    a = statistics.mean(r['predictionError'] for r in groups['A1·真提升(changed)'])
     b = statistics.mean(r['predictionError'] for r in groups['B·未开火'])
     print(f'\nA {a:.3f} vs B {b:.3f} → 差 {a - b:+.3f}')
     if a > b + 0.10:
@@ -86,8 +92,9 @@ def main():
     print('\n明细（最近 10 条提升）：')
     for r in promoted[-10:]:
         err = r.get('predictionError')
+        tag = 'noop' if r.get('promotedExpId') == r.get('originalTopExpId') else 'changed'
         print(f"  {r['predictionId']}  {r.get('originalTopExpId')} → {r.get('promotedExpId')}"
-              f"  误差={'-' if err is None else format(err, '.3f')}")
+              f"  [{tag}]  误差={'-' if err is None else format(err, '.3f')}")
     return 0
 
 
