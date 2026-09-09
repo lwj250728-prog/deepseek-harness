@@ -93,6 +93,9 @@ import type { CognitionObjectKind } from './cognition-objects.ts'
  * action-vector-identical meta experience already exists (default 0.8). */
 const META_DEDUP_COSINE = 0.8
 
+/** 跳词选择性门(cl-098): top-trigger 证据占比下限。 */
+const MIN_JUMP_TOP_SHARE = 0.5
+
 /** Pure-chat pre-filter: a turn with no tool calls, no failure, and short
  * output never reaches the accumulation gate (the per-turn LLM cost guard). */
 const ACCUMULATE_MIN_ACTION_CHARS = 160
@@ -2111,6 +2114,7 @@ export class CognitivePipelineService extends Service {
    * @param call - optional session/signal context for the LLM enhancement.
    * @returns the build summary.
    */
+  /** 跳词保留门槛(cl-098): top-trigger 证据占比低于此值 = 无判别力。 */
   async learnTriggerJumps(call?: PipelineCallContext): Promise<{
     jumpCount: number
     cooccurrenceCount: number
@@ -2132,6 +2136,12 @@ export class CognitivePipelineService extends Service {
       const kept = [...candidates]
         .sort((a, b) => b.acc.importance - a.acc.importance)
         .slice(0, this.resolved.triggerJumpMaxPerTrigger)
+      // cl-098 第二步(选择性门): 实测全表 top-trigger 证据占比中位 0.07、只有 9% 的词 >0.5;
+      // jump 通道 67 条已结算 0 引用。一个跳词若把证据摊在 20 个触发词上, 它对"命中哪个触发"
+      // 毫无判别力——这种词进表只会制造噪声注入。只保留证据高度集中的跳词。
+      const evidenceTotal = kept.reduce((sum, candidate) => sum + candidate.acc.evidenceCount, 0)
+      const topShare = evidenceTotal === 0 ? 0 : kept[0]!.acc.evidenceCount / evidenceTotal
+      if (topShare < MIN_JUMP_TOP_SHARE) continue
       const prior = existing.get(jumpWord)
       jumps.set(jumpWord, {
         jumpWord,
