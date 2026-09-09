@@ -1036,9 +1036,20 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     })
   }
 
+  // 2026-09-09 17:0x (cl-080): 自主驱动静默死亡可见化。实测 15:31 重启后 GUI 客户端断开、
+  // 用户离场, quiet-driver 连续 87 分钟 0 帧(5min tick 应有 ~17 次), 而跳过路径只写 info 日志
+  // (journal 里一条都没有)→ 一次 87 分钟的自主停摆没留任何痕迹。每次 tick 落一条心跳,
+  // 让"没在思考"变成可测的事实。
+  const heartbeatPath = join(dirname(config.thinkLogPath), 'quiet-driver-heartbeat.jsonl')
+  const beat = (reason: string, extra: Record<string, unknown> = {}): void => {
+    void appendFile(heartbeatPath, JSON.stringify({ ts: Date.now(), reason, ...extra }) + '\n').catch(() => undefined)
+  }
+
   let frames = 0
   const timer = setInterval(async () => {
     if (!config.enabled) return
+    // 每个 tick 先落一条 tick 心跳: 定时器本身活着与否由此可测(跳过原因另行打点)。
+    beat('tick')
     // cl-013(2026-09-08): 每 tick 刷新载体模型——模型级迁移不改 PID, 不刷新则帧头自锚
     // 察觉不到用户切换模型(今日 v4-flash→v4.1 实例: PID 未变, 自锚不可见)。
     const live = resolveModel()
@@ -1055,6 +1066,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
         ctx.logger.info('[quiet-driver] #004 depth tick: 静默窗中央深度帧')
       } else if (!userActiveNow) {
         frames += 1
+        beat('silent-skip', { frames })
         return  // 静默窗前半段: 跳过浅帧(降频意图保留)
       } else {
         // 用户刚活跃 → 退出静默, 正常走后续 tick
@@ -1065,6 +1077,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     const agent = targetAgent()
     if (agent === undefined) {
       ctx.logger.info('[quiet-driver] tick: target agent not live — skip')
+      beat('agent-not-live', { frames })
       return
     }
     ensureTracking(agent) // attach user-activity listener as soon as the agent exists
@@ -1075,6 +1088,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       silentStreak = 0; silentSkipUntil = 0  // 用户活跃重置静默
       if (config.bypassMode) {
         ctx.logger.info('[quiet-driver] tick #%d: user active — side-channel (载体 B)', frames)
+        beat('user-active', { frames })
         void runSideChannel(frames, 'user-active')
       } else {
         ctx.logger.info('[quiet-driver] tick #%d: user active — yield', frames)
@@ -1084,6 +1098,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     if (agent.status !== 'idle') {
       // Not dialoguing but agent busy (long task) → yield, wait for next tick.
       ctx.logger.info('[quiet-driver] tick #%d: quiet but busy — yield', frames)
+      beat('busy', { frames, status: agent.status })
       return
     }
     if (config.onlyWhenIdle) {

@@ -1638,6 +1638,52 @@ assert "bumpMany(new Map(hits" in s, "触发路径未合并调用"
 t "产物含原子实现(已部署)" bash -c "grep -q bumpMany '$HOME/dsh-fork/packages/context/dormant-goal/lib/index.js'"
 t "修复脚本幂等且当前无漂移" bash -c "python3 '$HOME/dsh-fork/dsh-fix-adoption-count.py' --dry-run | grep -q '无漂移'"
 
+# ── T60 自主驱动看门狗(cl-080: 15:31 重启后 GUI 断开+用户离场 → 87 分钟 0 帧且无任何痕迹) ──
+echo "[T60] 自主驱动看门狗(心跳打点/产物/停摆可测)"
+t "源码含心跳打点" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
+assert "quiet-driver-heartbeat.jsonl" in s, "缺心跳账本路径"
+q = chr(39)
+for reason in ("tick", "agent-not-live", "busy", "silent-skip", "user-active"):
+    assert "beat(" + q + reason + q in s, "缺打点 %s" % reason
+'
+t "产物含心跳(已部署)" bash -c "grep -q quiet-driver-heartbeat '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
+t "心跳新鲜(进程已跑够一个周期)" python3 -c '
+import json, os, subprocess, time
+hb = os.path.expanduser("~/.dsh/cognitive-pipeline/quiet-driver-heartbeat.jsonl")
+svc = os.popen("systemctl --user show dsh-web.service -p ActiveEnterTimestamp --value").read().strip()
+ep = subprocess.run(["date", "-d", svc, "+%s"], capture_output=True, text=True).stdout.strip()
+assert ep.isdigit(), "无法解析服务启动时间"
+uptime_ms = time.time() * 1000 - int(ep) * 1000
+THRESH = 20 * 60 * 1000
+lib = os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/lib/index.js")
+if int(ep) * 1000 < os.path.getmtime(lib) * 1000:
+    raise SystemExit(0)  # 进程还没加载含心跳的 lib(需重启)
+if uptime_ms < THRESH:
+    raise SystemExit(0)  # 进程刚起, 还没到该有心跳的时候
+assert os.path.exists(hb), "心跳账本不存在(定时器未跑或机制未加载)"
+rows = [json.loads(l) for l in open(hb, encoding="utf8") if l.strip()]
+assert rows, "心跳账本为空"
+newest = max(r.get("ts", 0) for r in rows)
+assert time.time() * 1000 - newest < THRESH, "自主驱动停摆: 最新心跳 %.0f 分钟前" % ((time.time() * 1000 - newest) / 60000)
+'
+t "心跳含跳过原因分类" python3 -c '
+import json, os, time, subprocess
+hb = os.path.expanduser("~/.dsh/cognitive-pipeline/quiet-driver-heartbeat.jsonl")
+svc = os.popen("systemctl --user show dsh-web.service -p ActiveEnterTimestamp --value").read().strip()
+ep = subprocess.run(["date", "-d", svc, "+%s"], capture_output=True, text=True).stdout.strip()
+lib = os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/lib/index.js")
+if int(ep) * 1000 < os.path.getmtime(lib) * 1000:
+    raise SystemExit(0)
+if int(ep) * 1000 + 20 * 60 * 1000 > time.time() * 1000:
+    raise SystemExit(0)
+rows = [json.loads(l) for l in open(hb, encoding="utf8") if l.strip()]
+known = {"tick", "silent-skip", "agent-not-live", "busy", "user-active"}
+bad = [r.get("reason") for r in rows if r.get("reason") not in known]
+assert not bad, "未知跳过原因: %s" % bad[:3]
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
