@@ -2301,6 +2301,57 @@ stuck = [r["injectionId"] for r in rows.values()
 assert len(stuck) <= 1, "构建后仍滞留 %d 条: %s" % (len(stuck), stuck[:5])
 '
 
+# ── T81 临时探针退场守卫(tp-064: 诊断物不得变成永久物) ──
+echo "[T81] 探针退场守卫(真实状态 / 超期未退场必红 / 超期已退场必绿 / 删文件留代码必红)"
+t "退场守卫: 真实状态" python3 "$HOME/dsh-fork/dsh-probe-retire-check.py"
+t "退场守卫负向: 超期未退场必须红" bash -c '
+set -e
+tmp=$(mktemp -d); now=$(date +%s%3N); trap "rm -rf $tmp" EXIT
+python3 - "$tmp" "$now" <<PY
+import json, sys, datetime
+tmp, now = sys.argv[1], int(sys.argv[2])
+past = now - 25*3600*1000
+open(f"{tmp}/settle-debug.jsonl","w",encoding="utf8").write(json.dumps({"t": past})+"\n")
+open(f"{tmp}/fake-lib.js","w",encoding="utf8").write("const f = \"settle-debug.jsonl\"\n")
+open(f"{tmp}/fake-src.ts","w",encoding="utf8").write("// cl-100 PROBE\n")
+iso = datetime.datetime.fromtimestamp((past+86400000)/1000).isoformat()
+open(f"{tmp}/cl-100-diagnosis.md","w",encoding="utf8").write(f"probe-deadline: {iso}\n")
+PY
+if python3 "$HOME/dsh-fork/dsh-probe-retire-check.py" --root "$tmp" --lib "$tmp/fake-lib.js" --src "$tmp/fake-src.ts" --now "$now" >/dev/null 2>&1; then
+  echo "守卫未开火(应红却绿)"; exit 1
+fi
+'
+t "退场守卫负向: 超期已退场必须绿" bash -c '
+set -e
+tmp=$(mktemp -d); now=$(date +%s%3N); trap "rm -rf $tmp" EXIT
+python3 - "$tmp" "$now" <<PY
+import sys, datetime
+tmp, now = sys.argv[1], int(sys.argv[2])
+past = now - 25*3600*1000
+open(f"{tmp}/fake-lib.js","w",encoding="utf8").write("const f = \"ok\"\n")
+open(f"{tmp}/fake-src.ts","w",encoding="utf8").write("// clean\n")
+iso = datetime.datetime.fromtimestamp((past+86400000)/1000).isoformat()
+open(f"{tmp}/cl-100-diagnosis.md","w",encoding="utf8").write(f"probe-deadline: {iso}\n")
+PY
+python3 "$HOME/dsh-fork/dsh-probe-retire-check.py" --root "$tmp" --lib "$tmp/fake-lib.js" --src "$tmp/fake-src.ts" --now "$now" >/dev/null
+'
+t "退场守卫负向: 删掉数据文件但留下写它的代码必须红" bash -c '
+set -e
+tmp=$(mktemp -d); now=$(date +%s%3N); trap "rm -rf $tmp" EXIT
+python3 - "$tmp" "$now" <<PY
+import sys, datetime
+tmp, now = sys.argv[1], int(sys.argv[2])
+past = now - 25*3600*1000
+open(f"{tmp}/fake-lib.js","w",encoding="utf8").write("const f = \"settle-debug.jsonl\"\n")
+open(f"{tmp}/fake-src.ts","w",encoding="utf8").write("// cl-100 PROBE\n")
+iso = datetime.datetime.fromtimestamp((past+86400000)/1000).isoformat()
+open(f"{tmp}/cl-100-diagnosis.md","w",encoding="utf8").write(f"probe-deadline: {iso}\n")
+PY
+if python3 "$HOME/dsh-fork/dsh-probe-retire-check.py" --root "$tmp" --lib "$tmp/fake-lib.js" --src "$tmp/fake-src.ts" --now "$now" >/dev/null 2>&1; then
+  echo "守卫未开火: 删数据文件即可逃逸(这正是首版守卫的漏洞)"; exit 1
+fi
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
