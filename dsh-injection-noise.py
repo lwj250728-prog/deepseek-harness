@@ -163,6 +163,11 @@ def main() -> int:
         'jumpTableSize': len(jumps_table),
         'jumpStaleZeroEvidence': len(stale_zero_evidence),
         'jumpStaleZeroEvidenceWords': stale_zero_evidence[:20],
+        'jumpTop': sorted(
+            ({'word': j['jumpWord'], 'source': j.get('source'),
+              'hitCount': j.get('hitCount') or 0, 'citedCount': j.get('citedCount') or 0}
+             for j in jumps_table.values()),
+            key=lambda x: (-x['hitCount'], -x['citedCount']))[:10],
         'thresholds': {
             'frameBornInjectionShareMax': FRAME_BORN_INJECTION_MAX,
             'staticTriggerShareMax': STATIC_TRIGGER_MAX,
