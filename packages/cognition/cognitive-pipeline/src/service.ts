@@ -7,6 +7,8 @@
  * @module @deepseek-ai/dsh-cognitive-pipeline/service
  */
 
+import { appendFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-shell'
@@ -1240,12 +1242,15 @@ export class CognitivePipelineService extends Service {
    * activity, so a quiet turn shows no bubble.
    * @param sessionId - the session owning the turn.
    * @param episode - the reconstructed turn material.
+   * @param options - `accumulate: false` settles citations but writes no
+   *   experience (cl-100: an autonomous frame turn has no genuine user input, so
+   *   it must still settle its citations yet must not be accumulated).
    * @returns the summary, or null when nothing happened.
    */
-  async summarizeTurn(sessionId: string, episode: TurnEpisode): Promise<TurnCognitionSummary | null> {
+  async summarizeTurn(sessionId: string, episode: TurnEpisode, options: { accumulate?: boolean } = {}): Promise<TurnCognitionSummary | null> {
     const citation = await this.settleInjectionCitations(sessionId, episode.outcome)
     let newExperiences: TurnCognitionSummary['newExperiences'] = []
-    if (this.resolved.autoAccumulate) {
+    if (this.resolved.autoAccumulate && options.accumulate !== false) {
       const expId = await this.accumulateTurn(episode)
       if (expId !== null) {
         const exp = this.store.getExperience(expId)
@@ -2382,6 +2387,13 @@ export class CognitivePipelineService extends Service {
       .filter(record => record.sessionId === sessionId && record.cited === null)
     let settled = 0
     let cited = 0
+    // cl-100 PROBE: 结算路径取证——谁在结算、结算了谁、判定依据是什么。
+    const probe = (payload: Record<string, unknown>): void => {
+      try {
+        appendFileSync(join(this.resolved.root, 'settle-debug.jsonl'),
+          `${JSON.stringify({ t: Date.now(), sessionId, textLen: turnText.length, pending: pending.length, ...payload })}\n`)
+      } catch { /* 取证失败不得影响主流程 */ }
+    }
     // cl-044: 一次性会话(如 quiet-frame 旁路)注入后不会再有下一轮, 其记录永远停在
     // cited=null——既不计入引用, 也永不折入 jump/chain/strategy 账本(75 条 >24h 未结算)。
     // 超过 TTL 的未结算注入按"未被引用"结算: 会话已结束, 这是事实而非惩罚。
@@ -2389,6 +2401,7 @@ export class CognitivePipelineService extends Service {
     for (const stale of this.store.injectionsSnapshot()) {
       if (stale.cited !== null || stale.sessionId === sessionId) continue
       if (stale.createdAt > cutoff) continue
+      probe({ path: 'ttl-stale', injectionId: stale.injectionId, ageMs: Date.now() - stale.createdAt })
       this.store.settleInjection(stale.injectionId, false)
       this.store.foldJumpCitation(stale.jumpWords, false)
       if (stale.chainId !== null) {
@@ -2401,6 +2414,8 @@ export class CognitivePipelineService extends Service {
     for (const record of pending) {
       const mentioned = record.expIds.some(expId => turnText.includes(expId))
         || (record.chainId !== null && turnText.includes(record.chainId))
+      probe({ path: 'pending', injectionId: record.injectionId, expIds: record.expIds, mentioned,
+        ageMs: Date.now() - record.createdAt })
       this.store.settleInjection(record.injectionId, mentioned)
       this.store.foldJumpCitation(record.jumpWords, mentioned)
       if (record.chainId !== null) {

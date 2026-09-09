@@ -200,6 +200,18 @@ export function reconstructTurn(session: Session, endEvent: SessionEvent<'turn/e
   }
 }
 
+/**
+ * Whether a reconstructed turn carries real assistant text, as opposed to only
+ * the synthetic `轮次结束（reason）` marker {@link reconstructTurn} appends.
+ * cl-100: citation settlement is only meaningful when the model actually spoke.
+ * @param outcome - the reconstructed outcome text.
+ * @param reason - the turn/end reason kind.
+ * @returns true when the outcome contains more than the end marker.
+ */
+function hasAssistantText(outcome: string, reason: string | undefined): boolean {
+  return outcome.replace(`轮次结束（${reason ?? 'unknown'}）`, '').trim().length > 0
+}
+
 /** Whether one tool call plausibly terminates or restarts the agent's own host
  * process — the self-reflexive operations after which this session's ledger
  * cannot observe what actually happened (the causal chain is broken at the
@@ -333,10 +345,25 @@ export async function apply(ctx: Context, config: CognitivePipelineConfig = {}):
     // (completed/error/interrupted/...), 产物指纹都能判定"这一轮有没有落盘东西"。
     settleAutonomous(String(session.id))
     const reason = (event.data as { reason?: { kind?: string } }).reason?.kind
-    if (reason !== 'completed' && reason !== 'error') return
+    if (reason !== 'completed' && reason !== 'error') {
+      // cl-100: 中断/中止的回合此前完全不结算——只要模型产出了文本, 引用判定
+      // 就该发生(否则该回合的注入只能等 24h TTL 按"未引用"结账)。
+      const partial = reconstructTurn(session, event)
+      if (hasAssistantText(partial.outcome, reason)) {
+        void service.summarizeTurn(session.id, partial, { accumulate: false }).catch((error: unknown) => {
+          ctx.logger.warn(`cognitive-pipeline: partial turn settlement failed: ${String(error)}`)
+        })
+      }
+      return
+    }
     const episode = reconstructTurn(session, event)
-    if (episode.situation.trim().length === 0) return
-    void service.summarizeTurn(session.id, episode).then((summary) => {
+    // cl-100: 帧回合(自主回合)没有 source.kind==='user' 的用户消息, 旧逻辑在
+    // `situation` 为空时直接 return, 于是帧回合的注入永不结算——实测 09-09 起
+    // 105 条注入只产生 11 次结算, 其余滞留到 TTL 按"未引用"结账。结算只看
+    // assistant 产出文本, 与"有没有真实用户输入"无关; 只有累计成经验才需要。
+    const hasUser = episode.situation.trim().length > 0
+    if (!hasUser && !hasAssistantText(episode.outcome, reason)) return
+    void service.summarizeTurn(session.id, episode, { accumulate: hasUser }).then((summary) => {
       if (summary !== null) session.append('cognition/turn-summary', summary)
     }).catch((error: unknown) => {
       ctx.logger.warn(`cognitive-pipeline: turn summary failed: ${String(error)}`)
