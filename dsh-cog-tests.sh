@@ -1494,6 +1494,7 @@ assert "function autonomousFrame" in s, "缺自主回合判定"
 i = s.index("function autonomousFrame")
 seg = s[i:i+700]
 assert "kind === " in seg and "user" in seg and "plugin" in seg, "判定未区分真实用户与插件帧"
+assert "messages.length - 1" in seg, "判定未按最后一条带来源的消息(历史含真实用户消息时会误判)"
 '
 t "pre-step创建预测" python3 -c '
 import os

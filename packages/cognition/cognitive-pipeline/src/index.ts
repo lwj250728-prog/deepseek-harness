@@ -78,15 +78,20 @@ function textOf(message: unknown): string {
  * @returns the injected frame text when the turn is autonomous, else undefined.
  */
 function autonomousFrame(messages: readonly unknown[]): string | undefined {
-  let injected: string | undefined
-  for (const message of messages) {
-    const source = (message as { source?: { kind?: string; plugin?: string } }).source
-    if (source?.kind === 'user') return undefined
-    if (source?.plugin === undefined) continue
-    const text = textOf(message)
-    if (text.length > 0 && injected === undefined) injected = text
+  // 只看**最后一条带来源的**用户侧消息: pre-step 的 messages 可能带完整历史,
+  // 若按"出现过任何真实用户消息"判定, 一个曾经有用户发言的会话会永远判不出自主回合
+  // (09-09 15:0x 自查发现该误判风险)。从尾往头找第一条有 source 的消息:
+  // kind==='user' → 不是自主回合; 带 plugin → 就是插件帧。
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const source = (messages[index] as { source?: { kind?: string; plugin?: string } }).source
+    if (source === undefined) continue
+    if (source.kind === 'user') return undefined
+    if (source.plugin !== undefined) {
+      const text = textOf(messages[index])
+      return text.length > 0 ? text : undefined
+    }
   }
-  return injected
+  return undefined
 }
 
 /** Objective artifact fingerprint: mtime+size of the durable outputs this
