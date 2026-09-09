@@ -2180,6 +2180,16 @@ for s in ("dsh-injection-bound.py", "dsh-learned-sparse.py", "dsh-capacity-scan.
 '
 t "三脚本各自可跑" bash -c "cd '$HOME/dsh-fork' && timeout 300 python3 dsh-injection-bound.py >/dev/null && timeout 300 python3 dsh-learned-sparse.py >/dev/null && timeout 300 python3 dsh-capacity-scan.py >/dev/null"
 
+# ── T77 死注入通道诊断(cl-098: jump 通道 67 条已结算、引用率 0%) ──
+echo "[T77] 注入通道引用率诊断(按触发源/死亡通道标记)"
+t "诊断脚本存在且可运行" bash -c "test -x '$HOME/dsh-fork/dsh-citation-by-trigger.py' && timeout 300 python3 '$HOME/dsh-fork/dsh-citation-by-trigger.py' | grep -q '总引用率'"
+t "按触发源拆分" bash -c "timeout 300 python3 '$HOME/dsh-fork/dsh-citation-by-trigger.py' | grep -q 'static' && timeout 300 python3 '$HOME/dsh-fork/dsh-citation-by-trigger.py' | grep -q 'jump'"
+t "死亡通道会被标记" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/dsh-citation-by-trigger.py"), encoding="utf8").read()
+assert "死亡通道" in s and "MIN_SETTLED" in s, "缺死亡通道判据"
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
