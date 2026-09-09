@@ -2106,6 +2106,15 @@ seg = s[i:i+800]
 assert "return true" in seg, "未失败开放"
 '
 t "产物含可用性校验(已部署)" bash -c "grep -q 'modelStillAvailable' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
+t "模型可用性巡检已接线" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
+assert "checkModelAvailability" in s, "缺巡检"
+assert "cl-model-expired-" in s, "缺告警入账"
+i = s.index("const timer = setInterval")
+assert "checkModelAvailability()" in s[i:i+900], "巡检未接入 tick"
+'
+t "巡检产物已部署" bash -c "grep -q 'cl-model-expired' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
 
 # ── T74 学习式稀疏权重实验(cl-095: 离线无增益则不上线) ──
 echo "[T74] 学习式稀疏权重实验(可运行/两方案对照/判读诚实)"

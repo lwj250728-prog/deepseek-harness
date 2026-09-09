@@ -1256,6 +1256,39 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     }
   }
 
+  // 2026-09-10 02:3x (cl-094 第③项): 模型可用性巡检——灰测模型今天到期, 若通道被撤,
+  // 帧/回合会整体失败(与 20:30 那次同形: 看起来"在跑", 其实每轮都错)。这里每 ~30 分钟
+  // 查一次目录, 模型不在就写一条可见告警(而不是等守卫从"输出重复"里反推)。
+  let lastModelCheckAt = 0
+  let modelAlertId: string | null = null
+  const checkModelAvailability = async (): Promise<void> => {
+    const now = Date.now()
+    if (now - lastModelCheckAt < 30 * 60 * 1000) return
+    lastModelCheckAt = now
+    const selection = resolveModel()
+    if (selection === undefined) return
+    if (await modelStillAvailable(selection.provider, selection.model)) {
+      if (modelAlertId !== null) {
+        void appendFile(join(dirname(config.thinkLogPath), 'claims-ledger.jsonl'), JSON.stringify({
+          id: modelAlertId, status: 'done', closedAt: new Date().toISOString(),
+          doneNote: '模型已恢复可用, 到期告警自动关闭',
+        }) + '\n').catch(() => undefined)
+        modelAlertId = null
+      }
+      return
+    }
+    beat('model-unavailable', { model: selection.model })
+    if (modelAlertId !== null) return
+    modelAlertId = `cl-model-expired-${new Date().toISOString().slice(0, 10)}`
+    void appendFile(join(dirname(config.thinkLogPath), 'claims-ledger.jsonl'), JSON.stringify({
+      id: modelAlertId, ts: new Date().toISOString(),
+      claim: `载体模型 ${selection.model} 已不在可用目录(可能到期)——帧/回合将整体失败, 需换模`,
+      source: 'quiet-driver 模型可用性巡检', status: 'open',
+      reviewBy: new Date().toISOString().slice(0, 10), reviewBasis: '换模后自动关闭',
+      note: '换模前先冻结知识层(dsh-freeze-wiki.sh)并给权重打来源模型标签; 换模后重跑技能层门控。',
+    }) + '\n').catch(() => undefined)
+  }
+
   let frames = 0
   const timer = setInterval(async () => {
     if (!config.enabled) return
@@ -1265,6 +1298,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     // 察觉不到用户切换模型(今日 v4-flash→v4.1 实例: PID 未变, 自锚不可见)。
     const live = resolveModel()
     if (live !== undefined) carrier.model = `${live.provider}/${live.model}`
+    void checkModelAvailability()
     // #004 静默降频(校准 2026-09-07 11:0x): 原静默=纯空白跳过(用户离线期停止思考, 用户批评"三问设计出来是要自进化")。
     // 校准后: 静默窗口内不产高频浅确认帧, 但低频深度帧照常——25min 窗口内 5min tick 大多跳过,
     // 窗口中央(约静默开始+12min)产一次深度全检帧(带诱导), 把"安静"变"深想"。
