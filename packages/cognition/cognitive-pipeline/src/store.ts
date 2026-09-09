@@ -276,6 +276,9 @@ export class CognitiveStore {
           // 旧 channel_weights.json 无 lexical 键 → 默认 1(不惩罚新通道)
           lexical: clampWeight(parsed.lexical),
         }
+        // 键迁移后立即回写, 使运行时文件与内存一致(T37 断言依赖它, 否则要等下一次
+        // EWMA 权重更新才落盘)。
+        if (parsed.lexical === undefined) this.enqueue('channel_weights.json', this.channelWeights)
       }
     }
     if (exploration !== '') {
