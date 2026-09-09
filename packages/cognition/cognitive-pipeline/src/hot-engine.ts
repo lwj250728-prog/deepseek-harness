@@ -81,6 +81,8 @@ export interface HotEngineConfig {
   /** Bounded LLM-refine drops: how many inapplicable top candidates may be
    * removed in one prediction (default 2). */
   readonly refineMaxDrops: number
+  /** Relative fused-score gap below which the rerank fires (cl-070). */
+  readonly refineRelativeGap: number
   /** Active-exploration daily budget (scheme 2, default 3). */
   readonly exploreDailyBudget: number
   /** Irreversible-action markers that exclude a novel attempt from the
@@ -478,8 +480,16 @@ export class HotEngine {
     sessionId: GenerateOptions['sessionId'] | undefined,
     signal: AbortSignal | undefined,
   ): Promise<{ note: string | null; ranked: RankedHit[] }> {
+    // cl-070: 原门控只认"分类体系已建立且路由余量低"或 flat-top——而我们的分类体系是
+    // no-taxonomy(version 0), 于是精排自接入起从未触发(pred_128 实测: coverage=no-taxonomy,
+    // ood=none, advice 无'检索复核')。改为**检索分数本身**的判据: 融合分 top1 与 top2 的
+    // 相对差小于阈值即认为头名不稳, 需要精排。不依赖分类体系, 也不需要等 flat-top。
+    const top1Score = ranked[0]?.fused ?? 0
+    const top2Score = ranked[1]?.fused ?? 0
+    const relativeGap = top1Score <= 0 ? 1 : (top1Score - top2Score) / top1Score
     const lowConfidence = (taxonomyContext.coverage === 'covered' && taxonomyContext.margin < this.config.retrievalFailureMargin)
       || oodSignal === 'flat-top'
+      || (ranked.length >= 2 && relativeGap < this.config.refineRelativeGap)
     if (!lowConfidence || ranked.length === 0) return { note: null, ranked: [...ranked] }
     const remaining = new Set(ranked.map(hit => hit.exp.expId))
     const reasons: string[] = []

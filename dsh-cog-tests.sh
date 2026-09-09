@@ -1107,6 +1107,24 @@ s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/li
 assert "bestExpId" in s and "best_exp_id" in s, "lib 未部署精排提升"
 '
 
+# ── T45 精排门控可用性(2026-09-09 13:0x 固化——cl-070: 原门控依赖 no-taxonomy 永假) ──
+echo "[T45] 精排门控(须有与分类体系无关的触发条件——否则精排永远空转)"
+t "src含相对分差门控" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/hot-engine.ts")).read()
+assert "refineRelativeGap" in s and "relativeGap" in s, "未见相对分差门控"
+'
+t "配置项已定义" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts")).read()
+assert "refineRelativeGap: z.number()" in s, "配置 schema 缺 refineRelativeGap"
+'
+t "lib含相对分差(已部署)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")).read()
+assert "refineRelativeGap" in s, "lib 未部署"
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
