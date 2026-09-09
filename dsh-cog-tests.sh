@@ -1535,6 +1535,39 @@ if auto:
     assert all(r.get("actualOutcome") is not None for r in aged), "自主预测超15分钟未结算"
 '
 
+# ── T57 推进判据=目标专属见证(cl-077: 全局锚只回答"机器在动吗", 会把暂停目标的采纳也判成推进) ──
+echo "[T57] 推进判据=目标专属见证(映射覆盖/双判据对照/区分性)"
+t "每个active目标都有专属见证" python3 -c '
+import json, os
+s = open(os.path.expanduser("~/dsh-fork/dsh-incubation-stats.py"), encoding="utf8").read()
+i = s.index("GOAL_WITNESS = {")
+block = s[i:s.index("}", i)]
+pool = [json.loads(l) for l in open(os.path.expanduser("~/.dsh/cognitive-pipeline/dormant-goals.jsonl"), encoding="utf8") if l.strip()]
+for g in pool:
+    if g.get("status") == "active":
+        assert g["id"] in block, "active 目标 %s 无专属见证" % g["id"]
+'
+t "advanced用专属见证" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/dsh-incubation-stats.py"), encoding="utf8").read()
+i = s.index("def advanced(goal_id, adopted_at):")
+seg = s[i:i+300]
+assert "GOAL_WITNESS" in seg, "advanced 未用专属映射"
+assert "def advanced_global(" in s, "缺全局对照判据"
+'
+t "统计输出含专属与全局两列" bash -c "grep -q '推进率(专属)' '$DIR/incubation-stats.md' && grep -q '推进率(全局锚对照)' '$DIR/incubation-stats.md'"
+t "判据区分性: 暂停目标的专属率与全局率不同" python3 -c '
+import json, os
+s = open(os.path.expanduser("~/dsh-fork/dsh-incubation-stats.py"), encoding="utf8").read()
+pool = {json.loads(l)["id"]: json.loads(l).get("status") for l in open(os.path.expanduser("~/.dsh/cognitive-pipeline/dormant-goals.jsonl"), encoding="utf8") if l.strip()}
+import subprocess
+out = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-incubation-stats.py"), "--json"], capture_output=True, text=True).stdout
+rows = json.loads(out)
+for r in rows:
+    if pool.get(r["goalId"]) == "paused" and r["witness"] == ["draftsChars"]:
+        assert r["advanced"] <= r["advanced_global"], "专属判据比全局更宽, 方向反了"
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
