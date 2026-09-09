@@ -1927,6 +1927,31 @@ assert "chainId" in seg and "ct === cc" in seg, "未按链比较"
 assert "allowed = mode === " in s, "缺 off/always 分支"
 '
 t "产物含提升门控(已部署)" bash -c "grep -q 'refinePromotion' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
+t "条件性见证: 构建后不再跨链提升" python3 -c '
+import json, os, subprocess, time
+base = os.path.expanduser("~/.dsh/cognitive-pipeline")
+lib = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")
+svc = os.popen("systemctl --user show dsh-web.service -p ActiveEnterTimestamp --value").read().strip()
+ep = subprocess.run(["date", "-d", svc, "+%s"], capture_output=True, text=True).stdout.strip()
+cut = max(os.path.getmtime(lib) * 1000, int(ep) * 1000) if ep.isdigit() else os.path.getmtime(lib) * 1000
+chain = {}
+for l in open(os.path.join(base, "experiences.jsonl"), encoding="utf8"):
+    if l.strip():
+        e = json.loads(l)
+        chain[e.get("expId")] = e.get("chainId")
+rows = [json.loads(l) for l in open(os.path.join(base, "predictions.jsonl"), encoding="utf8") if l.strip()]
+bad = []
+for r in rows:
+    if (r.get("timestamp") or 0) <= cut:
+        continue
+    p, o = r.get("promotedExpId"), r.get("originalTopExpId")
+    if not p or p == o:
+        continue
+    cp, co = chain.get(p), chain.get(o)
+    if not (cp and co and cp == co):
+        bad.append((r["predictionId"], o, p))
+assert not bad, "构建后仍出现跨链提升(cl-089 未生效): %s" % bad[:3]
+'
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
