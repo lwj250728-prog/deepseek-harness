@@ -2382,14 +2382,23 @@ v = m["staticTriggerShare"]
 # (09-06 前 26.3%), 高占比本身不等于噪声, 故上调为 95% 的"只剩一条通道"警戒线。
 assert v <= 0.95, "静态触发占比 %.1f%%: 注入通道已塌缩到只剩静态词匹配" % (v * 100)
 '
-t "跳词通道有效性(样本 ≥20 时引用率必须 >0)" python3 -c '
+t "跳词通道有效性(现世代样本 ≥20 时引用率必须 >0)" python3 -c '
 import json, os
 m = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/injection-noise.json"), encoding="utf8"))
-settled = m.get("jumpChannelSettled", 0)
-cited = m.get("jumpChannelCited", 0)
+# 判据口径修正(cl-099): 原先用全库跳词注入统计, 而 67 条零引用样本全部来自
+# 上一代词表(ts/sh/2/草稿...), 该表已在 09-10 04:07 重建时退役。世代边界 =
+# 词表最大 updatedAt; 只对"现代表"的样本判死, 旧账仍留在指标里备查。
+settled = m.get("jumpGenerationSettled", 0)
+cited = m.get("jumpGenerationCited", 0)
 if settled < 20:
-    print("样本不足(%d), 空过" % settled); raise SystemExit(0)
-assert cited > 0, "跳词通道 %d 条已结算样本零引用——学习出来的通道比静态词还差, 应剪枝或修复" % settled
+    print("现世代样本不足(%d), 空过" % settled); raise SystemExit(0)
+assert cited > 0, "现世代跳词 %d 条已结算样本零引用——学习出来的通道比静态词还差" % settled
+'
+t "跳词表卫生(超龄零证据条目必须为 0)" python3 -c '
+import json, os
+m = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/injection-noise.json"), encoding="utf8"))
+stale = m.get("jumpStaleZeroEvidence", 0)
+assert stale == 0, "%d 条零证据跳词已过证据寿命仍驻留(前 5: %s)" % (stale, m.get("jumpStaleZeroEvidenceWords"))
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"

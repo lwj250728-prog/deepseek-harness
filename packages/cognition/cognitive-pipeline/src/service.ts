@@ -106,6 +106,14 @@ const ACCUMULATE_MIN_ACTION_CHARS = 160
  * one-shot session that injected and never produced another turn would
  * otherwise stay pending forever and never fold into the learning ledgers. */
 const INJECTION_SETTLE_TTL_MS = 24 * 60 * 60 * 1000
+
+/** 跳词的证据寿命(cl-099): 零证据/零引用的表项不得永久驻留。
+ *  实测 400 条跳词中 398 条从未开火、0 条被引用, 其中 120 条 LLM 变体全部
+ *  evidenceCount=0——它们靠 `triggerJumpLlmFloor` 硬保进表, 而 prune 门要求
+ *  开火 ≥ triggerJumpPruneHits(5) 次才生效, 于是这条"靠引用回路做证据门"的
+ *  规则从未真正执行。证据寿命给两类表项退场: ①零证据 LLM 变体过寿命即退场
+ *  ②开过火但从未被引用、且过了寿命的跳词直接剪枝(不等 5 次开火)。 */
+const JUMP_EVIDENCE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 /** 关键词是否退化为字符级(cl-058): 用"单字占比"而非平均值——6 个词里混入 1 个英文词
  *  就能把平均值抬过 1.6, 从而漏修(exp_230 实测)。单字过半即判退化。 */
 function isCharLevelKeywords(keywords: readonly string[]): boolean {
@@ -2272,6 +2280,11 @@ export class CognitivePipelineService extends Service {
     for (const [word, prior] of existing) {
       if (prior.source !== 'llm') continue
       if (jumps.has(word)) continue
+      // cl-099: 继承前先过证据寿命——被引用过或有证据的永久保留; 新鲜的保留
+      // (给它机会开火并被引用); 既无证据又不新鲜的退场, 不再无限累积。
+      const proven = prior.citedCount > 0 || (prior.evidenceCount ?? 0) > 0
+      const fresh = now - prior.createdAt < JUMP_EVIDENCE_TTL_MS
+      if (!proven && !fresh) continue
       jumps.set(word, prior)
     }
 
@@ -2286,11 +2299,17 @@ export class CognitivePipelineService extends Service {
     if (list.length > cap) {
       const llmJumps = list.filter(jump => jump.source === 'llm')
         .sort((a, b) => maxJumpWeight(b) - maxJumpWeight(a))
-        .slice(0, llmFloor)
+      // cl-099: 保留位优先给"有证据的"变体, 其次给仍在寿命内的新变体;
+      // 过寿命且零证据的变体不再占用保留位(它们本已在上一步被过滤掉, 这里是
+      // 双保险, 防止未来改动重新放它们进来)。
+      const provenLlm = llmJumps.filter(jump => jump.citedCount > 0 || (jump.evidenceCount ?? 0) > 0)
+      const freshLlm = llmJumps.filter(jump => !provenLlm.includes(jump)
+        && now - jump.createdAt < JUMP_EVIDENCE_TTL_MS)
+      const llmKept = [...provenLlm, ...freshLlm].slice(0, llmFloor)
       const cooccurrence = list.filter(jump => jump.source !== 'llm')
         .sort((a, b) => maxJumpWeight(b) - maxJumpWeight(a))
-        .slice(0, Math.max(0, cap - llmJumps.length))
-      list = [...cooccurrence, ...llmJumps]
+        .slice(0, Math.max(0, cap - llmKept.length))
+      list = [...cooccurrence, ...llmKept]
     }
 
     // Reinforcement: measured jumps (enough hits) are boosted by citation rate
@@ -2298,6 +2317,7 @@ export class CognitivePipelineService extends Service {
     let pruned = 0
     const reinforced: TriggerJump[] = []
     for (const jump of list) {
+      const age = now - jump.createdAt
       if (jump.hitCount >= this.resolved.triggerJumpPruneHits) {
         const rate = jump.citedCount / jump.hitCount
         if (rate <= this.resolved.triggerJumpPruneRate) {
@@ -2310,6 +2330,10 @@ export class CognitivePipelineService extends Service {
           triggers: jump.triggers.map(entry => ({ ...entry, weight: clamp01(entry.weight + boost) })),
           updatedAt: now,
         })
+      } else if (jump.hitCount > 0 && jump.citedCount === 0 && age > JUMP_EVIDENCE_TTL_MS) {
+        // cl-099: 开过火、从未被引用、且已过证据寿命——不必等到 5 次开火才判死
+        // (实测全表 398 条从未开火, 旧门永远够不着)。
+        pruned += 1
       } else {
         reinforced.push(jump)
       }
