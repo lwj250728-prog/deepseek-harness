@@ -214,12 +214,17 @@ export function apply(ctx: Context, config: Config): void {
     saveDomains(failPath, domains)
   }, 'dormant-goal failure domains')
 
-  const bump = (goalId: string, adopt: boolean): void => {
+  // 2026-09-09 15:3x (cl-079): 原实现每个目标各做一次"读-改-写", 同一回合多个目标被采纳时
+  // 两次读-改-写并发跑在同一文件上, 后写覆盖先写 → adoptedCount 少记(实测差额从基线 2 漂到 1)。
+  // 现在把一回合内所有需要 bump 的目标合并成**一次**读-改-写。
+  const bumpMany = (deltas: Map<string, boolean>): void => {
+    if (deltas.size === 0) return
     void readFile(poolPath, 'utf8').then(raw => {
       const lines = raw.split('\n').filter(Boolean)
       const out = lines.map(line => {
         const g = JSON.parse(line) as PoolGoal & { triggerCount?: number; adoptedCount?: number }
-        if (g.id === goalId) {
+        const adopt = deltas.get(g.id)
+        if (adopt !== undefined) {
           g.triggerCount = (g.triggerCount ?? 0) + 1
           if (adopt) g.adoptedCount = (g.adoptedCount ?? 0) + 1
         }
@@ -228,6 +233,7 @@ export function apply(ctx: Context, config: Config): void {
       import('node:fs/promises').then(fs => fs.writeFile(poolPath, out.join('\n') + '\n')).catch(() => undefined)
     }).catch(() => undefined)
   }
+
 
   const reload = async (): Promise<void> => {
     try {
@@ -330,7 +336,7 @@ export function apply(ctx: Context, config: Config): void {
     const set = pending.get(agent.session.id) ?? new Map<string, string>()
     for (const h of hits) set.set(h.goal.id, poolSnapshot(h.goal))
     pending.set(agent.session.id, set)
-    for (const h of hits) bump(h.goal.id, false)
+    bumpMany(new Map(hits.map(h => [h.goal.id, false])))
     return { kind: 'enter', messages: [...decision.messages, block] }
   }, 'dormant-goal sentinel')
 
@@ -391,6 +397,7 @@ export function apply(ctx: Context, config: Config): void {
     void (async () => {
       await reload()
       const byId = new Map(pool.map(g => [g.id, g]))
+      const adopted = new Map<string, boolean>()
       for (const [goalId, before] of triggered) {
         const now = byId.get(goalId)
         const after = now === undefined ? undefined : poolSnapshot(now)
@@ -400,7 +407,7 @@ export function apply(ctx: Context, config: Config): void {
           && words.some(w => assistantText.includes(w))
         const structural = after !== undefined && after !== before
         if (!structural && !keywordFallback) continue
-        bump(goalId, true)
+        adopted.set(goalId, true)
         void appendFile(incubationLog, JSON.stringify({
           ts: new Date().toISOString(),
           goalId,
@@ -410,6 +417,7 @@ export function apply(ctx: Context, config: Config): void {
           after: after ?? null,
         }) + '\n').catch(() => undefined)
       }
+      bumpMany(adopted)
     })().catch(() => undefined)
   }, 'dormant-goal adoption')
 }

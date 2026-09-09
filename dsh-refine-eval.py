@@ -35,14 +35,28 @@ def resolved(r):
     return r.get('actualOutcome') is not None and isinstance(r.get('predictionError'), (int, float))
 
 
+def is_autonomous(r):
+    """cl-062 起, 自主回合会自动创建预测(问"本轮是否产出落盘产物")——那是另一个问题,
+    混进精排 A/B 会把两种误差语义平均成一个数(tp-052 实测 A 均值 0.400→0.408)。"""
+    return str(r.get('situation', '')).startswith('自主回合')
+
+
 def main():
     rows = load()
+    auto = [r for r in rows if is_autonomous(r)]
+    rows = [r for r in rows if not is_autonomous(r)]
     audited = [r for r in rows if 'originalTopExpId' in r]
     promoted = [r for r in audited if r.get('promotedExpId')]
     no_refine = [r for r in rows if r.get('retrievalNote') is None and r.get('originalTopExpId') is None]
 
-    print(f'预测总数 {len(rows)}；带审计键 {len(audited)}；其中精排提升 {len(promoted)}')
+    print(f'检索类预测 {len(rows)}（已排除自主回合预测 {len(auto)}）；带审计键 {len(audited)}；其中精排提升 {len(promoted)}')
     print(f'精排门控未开火 {len(no_refine)}')
+    if auto:
+        settled_auto = [r for r in auto if resolved(r)]
+        if settled_auto:
+            errs_auto = [r['predictionError'] for r in settled_auto]
+            print(f'自主回合预测(另一问题, 单列): {len(auto)} 条, 已结算 {len(settled_auto)} 条, '
+                  f'平均误差 {statistics.mean(errs_auto):.3f}')
 
     groups = {
         'A·精排提升': [r for r in promoted if resolved(r)],

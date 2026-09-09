@@ -1374,18 +1374,36 @@ for key in ("incubation-baseline.json", "undecidable", "adopted_counter"):
 assert "不可判定" in s, "缺表头/说明"
 '
 t "指标报告含不可判定列" bash -c "grep -q '不可判定' '$DIR/incubation-stats.md'"
-t "不可判定项=计数器与有据采纳的差额" python3 -c '
+# 差额必须恒定 = 基线存量残差: 新采纳同时进计数器与日志, 差额不变;
+# 差额缩小=丢了一次 bump(计数器被覆盖), 差额增大=丢了一条日志。两种都是缺陷, 不是"旧状态"。
+# (2026-09-09 15:2x 实测差额 2→1, 该断言正是对的——问题在数据, 不在断言。)
+t "基线记录自身自洽" python3 -c '
+import json, os
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+base = json.load(open(os.path.join(D, "incubation-baseline.json"), encoding="utf8")).get("goals", {})
+for gid, v in base.items():
+    c, l, u = v.get("adoptedCountAtBaseline"), v.get("loggedAtBaseline"), v.get("undecidableAdoptions")
+    assert isinstance(c, int) and isinstance(l, int) and isinstance(u, int), gid
+    assert u == max(0, c - l), "%s 基线不自洽: counter %s - logged %s != %s" % (gid, c, l, u)
+'
+t "计数与日志不倒退(丢更新检测)" python3 -c '
 import json, os
 D = os.path.expanduser("~/.dsh/cognitive-pipeline")
 goals = [json.loads(l) for l in open(os.path.join(D, "dormant-goals.jsonl"), encoding="utf8") if l.strip()]
 log = [json.loads(l) for l in open(os.path.join(D, "incubation-log.jsonl"), encoding="utf8") if l.strip()]
 base = json.load(open(os.path.join(D, "incubation-baseline.json"), encoding="utf8")).get("goals", {})
+bad = []
 for g in goals:
     gid = g["id"]
     logged = len([a for a in log if a.get("goalId") == gid])
     counter = g.get("adoptedCount") or 0
-    und = (base.get(gid) or {}).get("undecidableAdoptions", max(0, counter - logged))
-    assert und == max(0, counter - logged), "%s 不可判定数与差额不符: %s vs %s" % (gid, und, counter - logged)
+    if gid in base:
+        assert logged >= base[gid]["loggedAtBaseline"], "%s 日志条数倒退" % gid
+        assert counter >= base[gid]["adoptedCountAtBaseline"], "%s 计数器倒退" % gid
+    if gid in base:
+        want = base[gid]["undecidableAdoptions"]
+        got = max(0, counter - logged)
+        assert got == want, "%s 差额漂移: 当前 %d vs 基线 %d(缩小=丢bump/增大=丢日志)" % (gid, got, want)
 '
 
 # ── T53 停机修复工具可离线验证(cl-076 后续: 修复脚本本身要能在临时目录上跑通, 不靠"停机时祈祷") ──
@@ -1567,6 +1585,58 @@ for r in rows:
     if pool.get(r["goalId"]) == "paused" and r["witness"] == ["draftsChars"]:
         assert r["advanced"] <= r["advanced_global"], "专属判据比全局更宽, 方向反了"
 '
+
+# ── T58 度量器同源问题隔离(tp-052: cl-062 让自主预测混进精排 A/B, 两个问题被平均成一个数) ──
+echo "[T58] 精排度量器同源隔离(自主回合预测单列, 不并入 A/B)"
+t "源码含自主预测分类" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/dsh-refine-eval.py"), encoding="utf8").read()
+assert "def is_autonomous" in s and "自主回合" in s, "缺分类"
+assert "已排除自主回合预测" in s, "输出未标注排除数"
+'
+t "输出数字与账本自算一致" python3 -c '
+import json, os, re, subprocess, statistics
+rows = [json.loads(l) for l in open(os.path.expanduser("~/.dsh/cognitive-pipeline/predictions.jsonl"), encoding="utf8") if l.strip()]
+auto = [r for r in rows if str(r.get("situation", "")).startswith("自主回合")]
+ret = [r for r in rows if not str(r.get("situation", "")).startswith("自主回合")]
+prom = [r for r in ret if r.get("promotedExpId")]
+out = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-refine-eval.py")], capture_output=True, text=True).stdout
+m = re.search(r"带审计键 (\d+)；其中精排提升 (\d+)", out)
+assert m, "输出格式变了: %s" % out[:200]
+assert int(m.group(2)) == len(prom), "A 组计数不符: 输出 %s vs 实算 %d" % (m.group(2), len(prom))
+m2 = re.search(r"已排除自主回合预测 (\d+)", out)
+assert m2 and int(m2.group(1)) == len(auto), "排除数不符: %s vs %d" % (m2.group(1) if m2 else "?", len(auto))
+assert "自主回合预测(另一问题, 单列)" in out, "自主预测未单列"
+'
+t "A组均值只用同源样本" python3 -c '
+import json, os, re, subprocess, statistics
+rows = [json.loads(l) for l in open(os.path.expanduser("~/.dsh/cognitive-pipeline/predictions.jsonl"), encoding="utf8") if l.strip()]
+ret = [r for r in rows if not str(r.get("situation", "")).startswith("自主回合")]
+prom = [r for r in ret if r.get("promotedExpId") and r.get("actualOutcome") is not None and isinstance(r.get("predictionError"), (int, float))]
+if not prom:
+    raise SystemExit(0)
+want = statistics.mean(r["predictionError"] for r in prom)
+out = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-refine-eval.py")], capture_output=True, text=True).stdout
+m = re.search(r"A·精排提升: 已结算 (\d+) 条, 平均误差 ([0-9.]+)", out)
+assert m, "A 组输出缺失"
+assert int(m.group(1)) == len(prom), "A 组结算数不符"
+assert abs(float(m.group(2)) - want) < 1e-6, "A 组均值不符: 输出 %s vs 实算 %.3f" % (m.group(2), want)
+'
+
+# ── T59 采纳计数原子化(tp-053/cl-079: 同回合多目标采纳时并发读-改-写丢更新) ──
+echo "[T59] 采纳计数原子化(一次读-改-写 + 数据不变量 + 修复脚本)"
+t "源码合并为一次读-改-写" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/src/index.ts"), encoding="utf8").read()
+assert "const bumpMany" in s, "缺 bumpMany"
+i = s.index("const bumpMany")
+seg = s[i:i+1200]
+assert seg.count("writeFile(") == 1, "bumpMany 内不止一次写"
+assert "bumpMany(adopted)" in s, "采纳路径未合并调用"
+assert "bumpMany(new Map(hits" in s, "触发路径未合并调用"
+'
+t "产物含原子实现(已部署)" bash -c "grep -q bumpMany '$HOME/dsh-fork/packages/context/dormant-goal/lib/index.js'"
+t "修复脚本幂等且当前无漂移" bash -c "python3 '$HOME/dsh-fork/dsh-fix-adoption-count.py' --dry-run | grep -q '无漂移'"
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
