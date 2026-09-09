@@ -922,6 +922,35 @@ assert "lexical" in d, "运行时 channel_weights 缺 lexical: %s" % list(d)
 assert 0.2 <= d["lexical"] <= 3, "lexical 权重越界: %s" % d["lexical"]
 '
 
+# ── T38 载体剥离三问机制化 + 词元素通道回归(2026-09-09 10:0x 固化——cl-002 证伪信号 + cl-052 前提) ──
+echo "[T38] 载体剥离三问(新设计文档借人类概念须附三问) + 词元素通道离线回归"
+t "新设计文档须附载体剥离三问" python3 -c '
+import glob, os, re, time
+d = os.path.expanduser("~/.dsh/cognitive-pipeline")
+CUTOFF = time.mktime(time.strptime("2026-09-09 10:00", "%Y-%m-%d %H:%M"))
+concept = re.compile(r"贝叶斯|认知科学|类比|熟悉感|遗忘曲线|多巴胺|注意力机制|情绪")
+mechanism = re.compile(r"机制|设计|通道|管线")
+missing = []
+for p in glob.glob(os.path.join(d, "*.md")):
+    if os.path.getmtime(p) < CUTOFF: continue
+    t = open(p, encoding="utf8").read()
+    if concept.search(t) and mechanism.search(t) and "载体剥离" not in t:
+        missing.append(os.path.basename(p))
+assert not missing, "借用人类概念的新设计文档缺载体剥离三问: %s" % missing
+'
+t "词元素通道仍优于现有多通道融合" python3 -c '
+import subprocess, os, re
+out = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-bayes-retrieval-experiment.py")],
+                     capture_output=True, text=True, timeout=300).stdout
+def pct(label):
+    m = re.search(re.escape(label) + r".*?(\d+)%", out)
+    assert m, "未找到 %s 的输出" % label
+    return int(m.group(1))
+lex = pct("词元素通道(单字BM25·全文)")
+fuse = pct("融合(语义+结果+行动, 等权)")
+assert lex >= fuse, "词元素通道 %d%% < 现有多通道融合 %d%%（cl-052 前提失效，需重估）" % (lex, fuse)
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
