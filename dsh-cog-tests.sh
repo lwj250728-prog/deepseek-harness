@@ -2050,6 +2050,21 @@ if not recent:
 assert any(r.get("model") for r in recent), "唤醒心跳缺 model 字段"
 '
 
+# ── T71 权重来源模型标签(cl-086 换模清单第2项: 权重不可默认跨模型迁移) ──
+echo "[T71] 检索权重来源模型标签(打标脚本/账本/可追溯)"
+t "打标脚本存在且可运行" bash -c "test -x '$HOME/dsh-fork/dsh-weights-provenance.py' && python3 '$HOME/dsh-fork/dsh-weights-provenance.py' >/dev/null 2>&1"
+t "来源账本含模型与权重" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/channel-weights-provenance.jsonl")
+assert os.path.exists(p), "来源账本不存在"
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+assert rows, "来源账本为空"
+last = rows[-1]
+assert last.get("model"), "缺 model"
+assert isinstance(last.get("weights"), dict) and "lexical" in last["weights"], "缺权重快照"
+assert last.get("ts"), "缺时间戳"
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
