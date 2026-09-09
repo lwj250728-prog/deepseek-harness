@@ -2264,6 +2264,43 @@ assert not left, "噪声词仍在表中: %s" % left
 '
 t "选择性门已部署" bash -c "grep -q 'MIN_JUMP_TOP_SHARE' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
 
+# ── T80 帧回合引用结算见证(tp-063/cl-100: 注入回合必须就是结算回合) ──
+echo "[T80] 帧回合结算见证(修复已部署 / 同回合结算样本 / 无长期滞留)"
+t "cl-100 修复已部署(lib 含 hasAssistantText 与 accumulate 解耦)" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js"), encoding="utf8").read()
+assert "hasAssistantText" in src, "lib 缺 hasAssistantText(帧回合结算判据)"
+assert "accumulate" in src, "lib 缺 accumulate 选项(结算与累计未解耦)"
+'
+t "settle-debug 存在同回合结算样本(ageMs<1h)" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/settle-debug.jsonl")
+if not os.path.exists(p):
+    # 探针是诊断期临时物(cl-100 待办④), 已按计划移除时本断言退化为"无探针即无要求",
+    # 持久见证由下一条"构建后无长期滞留注入"承担。
+    print("探针已按计划移除, 持久见证见下一条"); raise SystemExit(0)
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+# 判据: 结算发生在注入所在回合的回合末, 故 ageMs ≈ 该回合时长。TTL 结算是 24h,
+# "拖到下一回合才结算"通常也是小时级 —— 1h 门足以把三者区分开。
+same = [r for r in rows if r.get("path") == "pending" and (r.get("ageMs") or 10**12) < 3600000]
+assert same, "无同回合结算样本(注入回合≠结算回合): %d 条探针, %d 条 pending" % (len(rows), sum(1 for r in rows if r.get("path") == "pending"))
+'
+t "构建后无长期滞留注入(修复前 09-09 起 105 注入仅 11 次结算)" python3 -c '
+import json, os, time
+lib = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")
+cut = os.path.getmtime(lib) * 1000   # 构建时刻之后的注入才受 cl-100 修复保护
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/injections.jsonl")
+rows = {}
+for l in open(p, encoding="utf8"):
+    if l.strip():
+        r = json.loads(l); rows[r["injectionId"]] = r
+now = time.time() * 1000
+# 构建后创建、且已超 2h 仍 cited=null 的记录最多 1 条(当前正在跑的回合)
+stuck = [r["injectionId"] for r in rows.values()
+         if r.get("cited") is None and r["createdAt"] > cut and now - r["createdAt"] > 2 * 3600 * 1000]
+assert len(stuck) <= 1, "构建后仍滞留 %d 条: %s" % (len(stuck), stuck[:5])
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
