@@ -2115,6 +2115,19 @@ i = s.index("const timer = setInterval")
 assert "checkModelAvailability()" in s[i:i+900], "巡检未接入 tick"
 '
 t "巡检产物已部署" bash -c "grep -q 'cl-model-expired' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
+t "条件性见证: 巡检双痕迹一致(tp-060)" python3 -c '
+import json, os
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+hb = os.path.join(D, "quiet-driver-heartbeat.jsonl")
+rows = [json.loads(l) for l in open(hb, encoding="utf8") if l.strip()] if os.path.exists(hb) else []
+beats = [r for r in rows if r.get("reason") == "model-unavailable"]
+led = [json.loads(l) for l in open(os.path.join(D, "claims-ledger.jsonl"), encoding="utf8") if l.strip()]
+open_alerts = [r for r in led if str(r.get("id", "")).startswith("cl-model-expired") and r.get("status") in ("open", "in-progress")]
+if beats:
+    assert open_alerts, "心跳报了 model-unavailable 但账本无未关闭的 cl-model-expired-* 告警(巡检漏入账)"
+if open_alerts:
+    assert beats, "账本有 cl-model-expired-* 但心跳无 model-unavailable 痕迹(告警来源不明)"
+'
 
 # ── T74 学习式稀疏权重实验(cl-095: 离线无增益则不上线) ──
 echo "[T74] 学习式稀疏权重实验(可运行/两方案对照/判读诚实)"
