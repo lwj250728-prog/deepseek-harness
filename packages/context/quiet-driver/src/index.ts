@@ -1080,11 +1080,64 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     stallStreak += 1
     if (stallStreak >= STALL_ALERT_AFTER) raiseStallAlert(reason, stallStreak)
   }
+  // 2026-09-09 18:5x (cl-084): 唤醒必须挂上目标会话的存量 preset。
+  // 实测 17:34:53 的裸 resume({resumeSessionId}) 把主会话 63251d85 重新发布成一个
+  // "没加入任何 preset"的 agent——Web 组合的全局工具层是空的(每个面向模型的工具都
+  // 属于某个 preset, 见 apps/cli/tests/web-agent-presets.e2e.ts 的全局层断言), 于是
+  // 该会话此后每次调用 bash 都得到裸 `unknown tool "bash"`, read/write/subagent 同缺,
+  // 只剩插件注册的认知工具, 直到 17:29 之后的服务重启。Host 自己的 resume 路径一律
+  // 带 `setup: composeAgent(storedPreset)`(packages/host/apiproxy/src/api-proxy.ts),
+  // 这里补上同一契约: 先按"最新 agent-preset/selected 事件优先于创建头"解析存量
+  // preset(与 dsh-agent-presets 的 resolveSessionPreset 同义), 再在 setup 里 mount。
+  const resolveStoredPreset = async (): Promise<{
+    presets: { mount(agentCtx: Context, id: string): Promise<unknown> } | undefined
+    presetId: string | undefined
+  }> => {
+    const presets = ctx.get('agentPresets') as {
+      defaultId?: string
+      mount(agentCtx: Context, id: string): Promise<unknown>
+    } | undefined
+    const persistence = ctx.get('sessionPersistence') as {
+      inspect(id: SessionId): Promise<{
+        meta: { agentPreset?: string }
+        events: readonly { type?: string; data?: { agentPreset?: string } }[]
+      }>
+    } | undefined
+    let presetId: string | undefined
+    if (persistence !== undefined) {
+      try {
+        const inspected = await persistence.inspect(sessionId)
+        for (let index = inspected.events.length - 1; index >= 0; index -= 1) {
+          const event = inspected.events[index]
+          if (event?.type === 'agent-preset/selected' && event.data?.agentPreset !== undefined) {
+            presetId = event.data.agentPreset
+            break
+          }
+        }
+        presetId ??= inspected.meta.agentPreset
+      } catch (error: unknown) {
+        ctx.logger.warn('[quiet-driver] preset resolution failed for %s: %s', sessionId, String(error).slice(0, 160))
+      }
+    }
+    presetId ??= presets?.defaultId
+    return { presets, presetId }
+  }
+
   const wakeTargetAgent = async (): Promise<void> => {
     try {
-      const handle = await ctx.agents.resume({ resumeSessionId: sessionId })
-      ctx.logger.info('[quiet-driver] target agent resumed: %s', handle.agent.session.id)
-      beat('agent-resumed')
+      const { presets, presetId } = await resolveStoredPreset()
+      const setup = presets === undefined || presetId === undefined
+        ? undefined
+        : async (agentCtx: Context): Promise<void> => {
+            await presets.mount(agentCtx, presetId)
+          }
+      const handle = await ctx.agents.resume({
+        resumeSessionId: sessionId,
+        ...setup === undefined ? {} : { setup },
+      })
+      ctx.logger.info('[quiet-driver] target agent resumed: %s (preset=%s)',
+        handle.agent.session.id, presetId ?? '(none)')
+      beat('agent-resumed', { preset: presetId ?? null })
     } catch (error) {
       beat('agent-resume-failed', { error: String(error).slice(0, 160) })
     }
@@ -1178,6 +1231,18 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
             }
             const actionable = ready[0] ?? null  // 单执行原则: 一次只推一个
             if (actionable !== null) {
+              // cl-085: 行动帧点名了目标 → 顺手给目标会话设粘性链锚, 让本轮写入的经验
+              // 继承该目标(否则链永远长不出来: 实测 goal-retrieval-optimization 的链
+              // consolidate 返回 member_count=0, 因为检索侧经验多未带锚)。
+              // 只对**有目标 id** 的行动帧做, 三问帧不设(它不属于任何目标)。
+              const pipelineSvc = ctx.get('cognitivePipeline') as {
+                store?: { setChainAnchor(sessionId: string, chainId: string | null): void }
+              } | undefined
+              try {
+                pipelineSvc?.store?.setChainAnchor(String(sessionId), actionable.id)
+              } catch (error: unknown) {
+                ctx.logger.warn('[quiet-driver] setChainAnchor failed: %s', String(error))
+              }
               const repeatCount = await countRepeatActionFrames(config.thinkLogPath, actionable.nextAction, actionable.id)
               const message = createUserMessage({
                 content: [{ type: 'text', text: buildActionFrameText(carrier, actionable, repeatCount) }],

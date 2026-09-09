@@ -855,6 +855,9 @@ export class CognitivePipelineService extends Service {
       if ((documentFrequency.get(element) ?? 0) / documentCount > 0.5) continue
       // cl-083: 关键词要词级——单字 CJK 是切分残渣(实测混进 '传'/'的'), ASCII 单词任意长度都算词。
       if (element.length < 2 && !/[a-z0-9]/.test(element)) continue
+      // cl-083 残留处理: 用**语料自身**当词典——只在一个 action 里出现过的 CJK 二元组
+      // 多半是跨词边界残渣(实测 '注点'/'点按'/'行该'/'该帧'), 直接弃用; ASCII 词不受此限。
+      if (!/[a-z0-9]/.test(element) && (documentFrequency.get(element) ?? 0) < 2) continue
       counts.set(element, (counts.get(element) ?? 0) + 1)
     }
     return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([element]) => element)

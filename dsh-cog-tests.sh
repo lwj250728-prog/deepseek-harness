@@ -1892,6 +1892,24 @@ s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/sr
 assert "cl-083" in s and "element.length < 2" in s, "关键词层未限词级"
 '
 
+# ── T66 派帧设链锚 + 语料词典过滤(cl-085 / cl-083 残留) ──
+echo "[T66] 行动帧设链锚(经验继承目标) + 关键词语料词典过滤"
+t "行动帧派发时设链锚" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
+assert "setChainAnchor(String(sessionId), actionable.id)" in s, "行动帧未设链锚"
+i = s.index("setChainAnchor(String(sessionId), actionable.id)")
+seg = s[max(0, i-900):i]
+assert "actionable !== null" in seg, "设锚不在行动帧路径内"
+'
+t "产物含设链锚(已部署)" bash -c "grep -q 'setChainAnchor' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
+t "关键词语料词典过滤在源码" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts"), encoding="utf8").read()
+assert "语料自身当词典" in s or "documentFrequency.get(element) ?? 0) < 2" in s, "缺语料词典过滤"
+'
+t "产物含语料词典过滤(已部署)" bash -c "grep -q 'documentFrequency.get(element)' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
