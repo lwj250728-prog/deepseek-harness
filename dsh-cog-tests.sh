@@ -2106,6 +2106,14 @@ seg = s[i:i+800]
 assert "return true" in seg, "未失败开放"
 '
 t "产物含可用性校验(已部署)" bash -c "grep -q 'modelStillAvailable' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
+t "巡检查的是会话实际模型(cl-096)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
+assert "const sessionModel = " in s, "缺 sessionModel"
+i = s.index("const checkModelAvailability")
+seg = s[i:i+700]
+assert "sessionModel() ?? resolveModel()" in seg, "巡检仍只看全局默认(监控错对象)"
+'
 t "模型可用性巡检已接线" python3 -c '
 import os
 s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()

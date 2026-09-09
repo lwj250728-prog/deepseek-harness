@@ -1259,13 +1259,25 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
   // 2026-09-10 02:3x (cl-094 第③项): 模型可用性巡检——灰测模型今天到期, 若通道被撤,
   // 帧/回合会整体失败(与 20:30 那次同形: 看起来"在跑", 其实每轮都错)。这里每 ~30 分钟
   // 查一次目录, 模型不在就写一条可见告警(而不是等守卫从"输出重复"里反推)。
+  // 2026-09-10 02:4x (cl-096): 巡检必须查**会话实际在用的模型**, 不是全局默认。
+  // resolveModel() 在 config.model==='default' 时返回 agentDefaultModel.currentSelection()
+  // ——那是 profile 默认(deepseek-v4-flash), 而本会话跑的是 deepseek-v4.1-flash-expires-on-0910。
+  // 若灰测模型下线而默认仍在, 首版巡检会报"可用"、告警永不触发(监控错了对象)。
+  const sessionModel = (): { provider: string; model: string } | undefined => {
+    const agent = targetAgent()
+    const cfg = agent?.session.requestHeader()?.config
+    if (typeof cfg?.provider === 'string' && typeof cfg?.model === 'string') {
+      return { provider: cfg.provider, model: cfg.model }
+    }
+    return undefined
+  }
   let lastModelCheckAt = 0
   let modelAlertId: string | null = null
   const checkModelAvailability = async (): Promise<void> => {
     const now = Date.now()
     if (now - lastModelCheckAt < 30 * 60 * 1000) return
     lastModelCheckAt = now
-    const selection = resolveModel()
+    const selection = sessionModel() ?? resolveModel()
     if (selection === undefined) return
     if (await modelStillAvailable(selection.provider, selection.model)) {
       if (modelAlertId !== null) {
@@ -1296,7 +1308,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     beat('tick')
     // cl-013(2026-09-08): 每 tick 刷新载体模型——模型级迁移不改 PID, 不刷新则帧头自锚
     // 察觉不到用户切换模型(今日 v4-flash→v4.1 实例: PID 未变, 自锚不可见)。
-    const live = resolveModel()
+    const live = sessionModel() ?? resolveModel()
     if (live !== undefined) carrier.model = `${live.provider}/${live.model}`
     void checkModelAvailability()
     // #004 静默降频(校准 2026-09-07 11:0x): 原静默=纯空白跳过(用户离线期停止思考, 用户批评"三问设计出来是要自进化")。
