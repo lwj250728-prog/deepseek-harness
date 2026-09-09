@@ -76,6 +76,37 @@ def main():
         print(f'{name}: 已结算 {len(g)} 条, 平均误差 {statistics.mean(errs):.3f}, '
               f'中位 {statistics.median(errs):.3f}, 最大 {max(errs):.3f}')
 
+    # cl-089: 链级诊断——精排是"链内重排"还是"跨链改道"? 跨链且误差变差=误路由。
+    exp_chain = {}
+    for r in load():
+        pass
+    try:
+        exps = [json.loads(l) for l in open(os.path.expanduser('~/.dsh/cognitive-pipeline/experiences.jsonl'), encoding='utf8') if l.strip()]
+        for e in exps:
+            exp_chain[e.get('expId')] = e.get('chainId')
+    except Exception:
+        exps = []
+    buckets = {'noop': [], 'intra-chain': [], 'cross-chain': [], 'unknown': []}
+    for r in promoted:
+        a, b = r.get('originalTopExpId'), r.get('promotedExpId')
+        if a == b:
+            buckets['noop'].append(r); continue
+        ca, cb = exp_chain.get(a), exp_chain.get(b)
+        if ca is None or cb is None:
+            buckets['unknown'].append(r)
+        elif ca == cb:
+            buckets['intra-chain'].append(r)
+        else:
+            buckets['cross-chain'].append(r)
+    print('\n链级诊断（精排把谁换成了谁）：')
+    for name, g in buckets.items():
+        if not g:
+            print(f'  {name:<12} 0 条')
+            continue
+        errs = [r['predictionError'] for r in g if resolved(r)]
+        stat = f'平均误差 {statistics.mean(errs):.3f}' if errs else '无已结算样本'
+        print(f'  {name:<12} {len(g)} 条（已结算 {len(errs)}）  {stat}')
+
     if len(groups['A1·真提升(changed)']) < MIN_N or len(groups['B·未开火']) < MIN_N:
         print(f'\n样本不足（真提升与未开火各需 {MIN_N} 条）——只报计数，不给结论。')
         return 0

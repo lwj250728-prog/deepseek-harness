@@ -1822,6 +1822,36 @@ for spec in d:
     assert isinstance(spec.get("description"), str), "环路缺 description"
 '
 
+# ── T64 检索损失与精排选择的分离测量(cl-089: 窗口已含正确项 90%, 精排却跨链改道且更差) ──
+echo "[T64] 去混淆测量(检索损失曲线 / 精排链级诊断 / 不写管线状态)"
+t "注入上界脚本存在且可运行" bash -c "test -x '$HOME/dsh-fork/dsh-injection-bound.py' && timeout 300 python3 '$HOME/dsh-fork/dsh-injection-bound.py' | grep -q '检索损失'"
+t "报告含 recall@K 曲线与上界" bash -c "timeout 300 python3 '$HOME/dsh-fork/dsh-injection-bound.py' | grep -q 'recall@5' && timeout 300 python3 '$HOME/dsh-fork/dsh-injection-bound.py' | grep -q '上界·按构造'"
+t "精排链级诊断已接入度量器" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/dsh-refine-eval.py"), encoding="utf8").read()
+for key in ("intra-chain", "cross-chain", "链级诊断"):
+    assert key in s, "缺 %s" % key
+'
+t "链级诊断在早退之前输出" python3 -c '
+import subprocess, os
+out = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-refine-eval.py")], capture_output=True, text=True).stdout
+assert "链级诊断" in out, "诊断未输出(可能被小样本早退跳过)"
+'
+t "脚本不写管线状态" bash -c "grep -q '不写管线状态' '$HOME/dsh-fork/dsh-injection-bound.py'"
+t "条件性见证: 构建后不再出现 noop 提升" python3 -c '
+import json, os, subprocess, time
+base = os.path.expanduser("~/.dsh/cognitive-pipeline")
+lib = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")
+svc = os.popen("systemctl --user show dsh-web.service -p ActiveEnterTimestamp --value").read().strip()
+ep = subprocess.run(["date", "-d", svc, "+%s"], capture_output=True, text=True).stdout.strip()
+cut = max(os.path.getmtime(lib) * 1000, int(ep) * 1000) if ep.isdigit() else os.path.getmtime(lib) * 1000
+rows = [json.loads(l) for l in open(os.path.join(base, "predictions.jsonl"), encoding="utf8") if l.strip()]
+new = [r for r in rows if (r.get("timestamp") or 0) > cut]
+bad = [r["predictionId"] for r in new
+       if r.get("promotedExpId") and r.get("promotedExpId") == r.get("originalTopExpId")]
+assert not bad, "cl-087 未生效: 构建后仍有 noop 提升 %s" % bad[:3]
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
