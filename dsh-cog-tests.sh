@@ -1960,7 +1960,7 @@ import os
 s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
 for key in ("noteDispatchResult", "staleDispatchCount", "suspendDispatchUntil", "dispatch-suspended"):
     assert key in s, "缺 %s" % key
-assert "responseText === previousOutput" in s, "判据不是逐字比对"
+assert "responseText === lastResponseText" in s, "判据不是逐字比对(内存 lastResponseText)"
 '
 t "派发前检查暂停状态" python3 -c '
 import os
@@ -1977,7 +1977,12 @@ rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
 rows = [r for r in rows if r.get("kind") == "direct-frame" and r.get("output")]
 if len(rows) < 3:
     raise SystemExit(0)
-# 只看最近 6 条: 连续两条 output 逐字相同 = 未被消费(旧行为), 守卫上线后应消失
+# 只看 lib 构建之后的帧(历史重复是已知旧行为, 不该让断言长期红)
+lib = os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/lib/index.js")
+cut = os.path.getmtime(lib) * 1000
+rows = [r for r in rows if (r.get("ts") or 0) > cut]
+if len(rows) < 2:
+    raise SystemExit(0)
 tail = rows[-6:]
 dup = [(tail[i].get("ts"), str(tail[i].get("output"))[:40]) for i in range(1, len(tail))
        if tail[i].get("output") == tail[i-1].get("output")]
@@ -1985,6 +1990,40 @@ dup = [(tail[i].get("ts"), str(tail[i].get("output"))[:40]) for i in range(1, le
 bad = [d for d in dup if tail[[r.get("ts") for r in tail].index(d[0])].get("consumed") is not False]
 assert not bad, "重复输出帧未被标注 consumed=False: %s" % bad[:2]
 '
+
+# ── T69 唤醒须带模型(cl-092: 00:5x 每轮报 {{model}} 无值 → 帧"投递了却不消费"的根因) ──
+echo "[T69] 唤醒带模型(种子+选择监听器/与 Host 同构)"
+t "唤醒解析存量模型并传 agentOptions" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
+assert "resolveStoredModel" in s, "缺模型解析"
+assert "agentOptions: storedModel" in s, "未把模型作为 agentOptions 种子"
+assert "request/header" in s, "未从会话日志取 request/header"
+'
+t "唤醒装模型选择监听器" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
+assert "installModelSelection(agentCtx" in s, "未装选择监听器"
+i = s.index("const wakeTargetAgent")
+seg = s[i:i+2400]
+assert "installModelSelection" in seg, "监听器不在唤醒路径内"
+'
+t "产物含唤醒模型接线(已部署)" bash -c "grep -q 'installModelSelection' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js' && grep -q 'agentOptions' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
+t "条件性见证: 唤醒心跳带 model" python3 -c '
+import json, os
+hb = os.path.expanduser("~/.dsh/cognitive-pipeline/quiet-driver-heartbeat.jsonl")
+lib = os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/lib/index.js")
+if not os.path.exists(hb):
+    raise SystemExit(0)
+rows = [json.loads(l) for l in open(hb, encoding="utf8") if l.strip()]
+cut = os.path.getmtime(lib) * 1000
+recent = [r for r in rows if (r.get("ts") or 0) > cut and r.get("reason") == "agent-resumed"]
+if not recent:
+    raise SystemExit(0)  # 尚未发生唤醒
+assert any(r.get("model") for r in recent), "唤醒心跳缺 model 字段"
+'
+
+echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。

@@ -19,6 +19,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
+import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -1159,21 +1160,71 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     return { presets, presetId }
   }
 
+  // 2026-09-10 01:1x (cl-092): 唤醒还必须带**模型**。实测 00:5x 每轮报
+  // `prompt variable "{{model}}" has no value for this assembly (section "deployment:persona")`——
+  // agent-loop 把 {{model}} 绑到 `agent.options.model`(packages/core/agent-loop/src/index.ts)，
+  // 而 Host 的 create/resume 一律传 `agentOptions: {provider, model}` 并装
+  // installModelSelection 监听器(packages/host/apiproxy/src/api-proxy.ts)；本函数此前只 mount
+  // preset，没给模型 → resume 出来的 agent 每轮在组装 persona 时就失败 → 帧"投递了却不消费"
+  // (output 恒为陈旧文本)的全部根因。这里补齐同一契约: 从会话日志的最后一个 request/header
+  // 取 provider/model, 既作为 agentOptions 种子, 也作为选择监听器的回退值。
+  const resolveStoredModel = async (): Promise<{ provider: string; model: string } | undefined> => {
+    const persistence = ctx.get('sessionPersistence') as {
+      inspect(id: SessionId): Promise<{
+        events: readonly { type?: string; data?: { config?: { provider?: string; model?: string } } }[]
+      }>
+    } | undefined
+    if (persistence === undefined) return undefined
+    try {
+      const inspected = await persistence.inspect(sessionId)
+      for (let index = inspected.events.length - 1; index >= 0; index -= 1) {
+        const event = inspected.events[index]
+        if (event?.type !== 'request/header') continue
+        const config = event.data?.config
+        if (typeof config?.provider === 'string' && typeof config?.model === 'string') {
+          return { provider: config.provider, model: config.model }
+        }
+      }
+    } catch (error: unknown) {
+      ctx.logger.warn('[quiet-driver] model resolution failed for %s: %s', sessionId, String(error).slice(0, 160))
+    }
+    return undefined
+  }
+
   const wakeTargetAgent = async (): Promise<void> => {
     try {
       const { presets, presetId } = await resolveStoredPreset()
-      const setup = presets === undefined || presetId === undefined
-        ? undefined
-        : async (agentCtx: Context): Promise<void> => {
-            await presets.mount(agentCtx, presetId)
-          }
+      const storedModel = await resolveStoredModel()
+      const setup = async (agentCtx: Context): Promise<void> => {
+        if (presets !== undefined && presetId !== undefined) await presets.mount(agentCtx, presetId)
+        // 与 Host 同构: 装模型选择监听器, 让 system-prompt/assemble 时 variables.model 有值。
+        const agent = agentCtx.agent
+        if (agent === undefined) return
+        const selection = {
+          get current() {
+            const logged = agent.session.requestHeader()?.config
+            if (typeof logged?.provider === 'string' && typeof logged?.model === 'string') {
+              return {
+                provider: logged.provider,
+                model: logged.model,
+                ...logged.reasoningEffort === undefined ? {} : { reasoningEffort: logged.reasoningEffort },
+              }
+            }
+            return storedModel
+          },
+          set current(_next: unknown) { /* 唤醒路径不承担切模型职责 */ },
+          assembled: undefined as unknown,
+        }
+        installModelSelection(agentCtx, selection as never)
+      }
       const handle = await ctx.agents.resume({
         resumeSessionId: sessionId,
-        ...setup === undefined ? {} : { setup },
+        ...storedModel === undefined ? {} : { agentOptions: storedModel },
+        setup,
       })
-      ctx.logger.info('[quiet-driver] target agent resumed: %s (preset=%s)',
-        handle.agent.session.id, presetId ?? '(none)')
-      beat('agent-resumed', { preset: presetId ?? null })
+      ctx.logger.info('[quiet-driver] target agent resumed: %s (preset=%s, model=%s)',
+        handle.agent.session.id, presetId ?? '(none)', storedModel?.model ?? '(none)')
+      beat('agent-resumed', { preset: presetId ?? null, model: storedModel?.model ?? null })
     } catch (error) {
       beat('agent-resume-failed', { error: String(error).slice(0, 160) })
     }
