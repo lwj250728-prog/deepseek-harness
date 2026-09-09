@@ -1085,23 +1085,28 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
   let suspendDispatchUntil = 0
   const STALE_DISPATCH_LIMIT = 2
   const SUSPEND_MS = 30 * 60 * 1000
-  const noteDispatchResult = (responseText: string, previousOutput: string | undefined): boolean => {
-    if (responseText.length === 0 || previousOutput === undefined) {
+  // 用**内存**里上一条响应文本做比对, 不能用 readLastFrameContext 的返回值——
+  // 后者对 direct-frame 返回哨兵 'full-check-done'、对 action-frame 返回 'action-frame-sent',
+  // 恒与真实响应不同, 导致守卫永不触发(实测 6 条帧 output 逐字相同仍 consumed=true)。
+  let lastResponseText = ''
+  const noteDispatchResult = (responseText: string): boolean => {
+    if (responseText.length === 0) {
       staleDispatchCount = 0
       return true
     }
-    if (responseText === previousOutput) {
+    if (responseText === lastResponseText) {
       staleDispatchCount += 1
       beat('dispatch-unconsumed', { staleDispatchCount })
       if (staleDispatchCount >= STALE_DISPATCH_LIMIT) {
         suspendDispatchUntil = Date.now() + SUSPEND_MS
         raiseStallAlert('dispatch-unconsumed', staleDispatchCount)
-        ctx.logger.warn('[quiet-driver] 帧未被消费(输出与上帧逐字相同) ×%d → 暂停派帧 %d 分钟',
+        ctx.logger.warn('[quiet-driver] 帧未被消费(响应与上一帧逐字相同) ×%d → 暂停派帧 %d 分钟',
           staleDispatchCount, Math.round(SUSPEND_MS / 60000))
       }
       return false
     }
     staleDispatchCount = 0
+    lastResponseText = responseText
     clearStallAlert()
     return true
   }
@@ -1401,7 +1406,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
           // (原 output 恒空 = 空闲唤醒的认知产物全丢; 补上沉淀环, 不需主会话自律。)
           const responseText = await extractAssistantResponse(ctx, agent)
           // cl-091: 判定本帧是否真被消费(输出与上一帧逐字相同 = 没被消费)。
-          const consumed = noteDispatchResult(responseText, frameCtx.output)
+          const consumed = noteDispatchResult(responseText)
           // 记录直驱帧到 think-log（含协议模式+主会话应答产出），供 v18 下帧参考。
           await logFrame(config.thinkLogPath, {
             ts: Date.now(), kind: 'direct-frame', frameNo: frames, mode,
