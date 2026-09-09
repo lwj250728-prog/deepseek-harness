@@ -1220,6 +1220,28 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     }
   }
 
+  // cl-106: 巡检的"真相源"是插件硬编码清单(llm.listModels 返回 DEFAULT_MODELS),
+  // 结构上发现不了到期。这里旁读实时目录检查结果(由 dsh-model-catalog-check.py
+  // 落盘, cron 每 30 分钟刷新): 目录说"不在"就算不在——只影响告警, 不影响唤醒
+  // 回退(回退仍是用户待拍板项 cl-094)。
+  const readLiveCatalogVerdict = async (model: string): Promise<'present' | 'missing' | 'unknown'> => {
+    try {
+      const { readFile, stat } = await import('node:fs/promises')
+      const target = join(dirname(config.thinkLogPath), 'model-catalog.json')
+      const info = await stat(target)
+      if (Date.now() - info.mtimeMs > 2 * 60 * 60 * 1000) return 'unknown'  // 陈旧 => 不判
+      const parsed = JSON.parse(await readFile(target, 'utf8')) as {
+        verdict?: unknown, modelInUse?: unknown
+      }
+      if (parsed.modelInUse !== model) return 'unknown'
+      if (parsed.verdict === 'missing') return 'missing'
+      if (parsed.verdict === 'present') return 'present'
+      return 'unknown'
+    } catch {
+      return 'unknown'
+    }
+  }
+
   const wakeTargetAgent = async (): Promise<void> => {
     try {
       const { presets, presetId } = await resolveStoredPreset()
@@ -1288,9 +1310,12 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     const selection = sessionModel() ?? resolveModel()
     if (selection === undefined) return
     const availability = await modelStillAvailable(selection.provider, selection.model)
+    const liveVerdict = await readLiveCatalogVerdict(selection.model)
+    // cl-106: 两个真相源取"更悲观"的一个——插件清单说在、实时目录说不在, 就是不在。
+    const missing = availability === 'missing' || liveVerdict === 'missing'
     // cl-103: 成功/未知路径都留痕——"查过且模型在"与"查不到"必须可证,
     // 否则"没有告警"就是不可证伪的信号(cl-105 的巡检正是靠这个盲区静默失效)。
-    if (availability !== 'missing') {
+    if (!missing) {
       beat(availability === 'available' ? 'model-ok' : 'model-check-unknown', { model: selection.model })
       if (modelAlertId !== null) {
         void appendFile(join(dirname(config.thinkLogPath), 'claims-ledger.jsonl'), JSON.stringify({
@@ -1304,7 +1329,10 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       }
       return
     }
-    beat('model-unavailable', { model: selection.model })
+    beat('model-unavailable', {
+      model: selection.model,
+      source: availability === 'missing' ? 'plugin-catalog' : 'live-catalog',
+    })
     if (modelAlertId !== null) return
     modelAlertId = `cl-model-expired-${new Date().toISOString().slice(0, 10)}`
     void appendFile(join(dirname(config.thinkLogPath), 'claims-ledger.jsonl'), JSON.stringify({

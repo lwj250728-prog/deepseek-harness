@@ -2498,6 +2498,46 @@ assert d.get("missingFromCatalog") is True, "verdict=missing 但 missingFromCata
 assert d.get("catalog"), "verdict=missing 但目录快照为空(无法复核)"
 '
 
+# ── T87 实时目录真相源优先(cl-106: 目录说不在就是不在) ──
+echo "[T87] 实时目录真相源(告警链已接 / 矛盾不可共存)"
+t "巡检已接实时目录(更悲观者胜)" bash -c "
+grep -q 'readLiveCatalogVerdict' '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts' &&
+grep -q 'live-catalog' '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts'
+"
+t "目录说不在时, 最近一条模型心跳不得是 model-ok" python3 -c '
+import json, os
+cat = os.path.expanduser("~/.dsh/cognitive-pipeline/model-catalog.json")
+hb = os.path.expanduser("~/.dsh/cognitive-pipeline/quiet-driver-heartbeat.jsonl")
+if not (os.path.exists(cat) and os.path.exists(hb)):
+    print("缺文件, 空过"); raise SystemExit(0)
+d = json.load(open(cat, encoding="utf8"))
+if d.get("verdict") != "missing":
+    print("在用模型仍在目录中, 空过"); raise SystemExit(0)
+rows = [json.loads(l) for l in open(hb, encoding="utf8") if l.strip()]
+model_beats = [r for r in rows if str(r.get("reason") or "").startswith("model-")]
+assert model_beats, "无模型相关心跳"
+last = model_beats[-1]
+# cl-106: 实时目录说"不在"时, 心跳仍报 model-ok 就是两个真相源在互相打脸,
+# 且会让 T73 的一致性检查形同虚设。
+assert last.get("reason") != "model-ok", "目录 verdict=missing 而最近心跳是 model-ok(矛盾共存)"
+'
+t "目录说不在时账本必须有未关闭告警" python3 -c '
+import json, os
+cat = os.path.expanduser("~/.dsh/cognitive-pipeline/model-catalog.json")
+led = os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
+d = json.load(open(cat, encoding="utf8")) if os.path.exists(cat) else {}
+if d.get("verdict") != "missing":
+    print("目录 verdict 非 missing, 空过"); raise SystemExit(0)
+by_id = {}
+for l in open(led, encoding="utf8"):
+    if not l.strip(): continue
+    r = json.loads(l)
+    if r.get("id"): by_id[r["id"]] = r
+alerts = [r for r in by_id.values()
+          if str(r.get("id","")).startswith("cl-model-expired") and r.get("status") in ("open","in-progress")]
+assert alerts, "实时目录已无在用模型, 但账本没有未关闭的 cl-model-expired-* 告警"
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
