@@ -866,6 +866,28 @@ for f in ("experiences.jsonl", "experiences-frames.jsonl"):
 assert not bad, "字符级关键词残留: %s" % bad[:3]
 '
 
+# ── T36 章-账本一致性(2026-09-09 08:2x 固化——exp_238: 账本写入被中断, 章落盘而账本漏记) ──
+echo "[T36] 章-账本一致性(最新章须出现在账本末轮; 全部新标尺章须被账本提及)"
+t "最新章已在账本末轮" python3 -c '
+import glob, os, re
+d = os.path.expanduser("~/dsh-workshop/novels/qizhongjiyi")
+drafts = sorted(glob.glob(os.path.join(d, "drafts/00*.md")))
+assert drafts, "无草稿"
+maxch = int(re.search(r"(\d+)", os.path.basename(drafts[-1])).group(1))
+prog = open(os.path.join(d, "audit/progress.md"), encoding="utf8").read()
+tail = "\n".join(prog.splitlines()[-12:])
+assert ("ch%d" % maxch) in tail, "最新章 ch%d 未出现在账本末轮(写入可能被中断)" % maxch
+'
+t "全部新标尺章均被账本提及" python3 -c '
+import glob, os, re
+d = os.path.expanduser("~/dsh-workshop/novels/qizhongjiyi")
+drafts = sorted(glob.glob(os.path.join(d, "drafts/00*.md")))
+maxch = int(re.search(r"(\d+)", os.path.basename(drafts[-1])).group(1))
+prog = open(os.path.join(d, "audit/progress.md"), encoding="utf8").read()
+missing = [n for n in range(15, maxch + 1) if ("ch%d" % n) not in prog]
+assert not missing, "账本漏记章节: %s" % missing[:5]
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
