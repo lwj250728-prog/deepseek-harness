@@ -24,6 +24,7 @@ import type {
   ExplorationTaskStatus,
   InjectionRecord,
   LoopExecutionReceipt,
+  MetaLoopSpec,
   Prediction,
   SolidifiedStrategy,
   TaxonomyState,
@@ -138,6 +139,8 @@ export class CognitiveStore {
   private explorationState: ExplorationState = { date: todayKey(), used: 0, entries: [] }
   private explorationTasks = new Map<string, ExplorationTask>()
   private loopExecutions = new Map<string, LoopExecutionReceipt>()
+  /** 持久化的元认知环路规格(cl-088: 环路必须跨重启存活, 否则"可学习的决策"每次重启归零)。 */
+  private loopSpecs: MetaLoopSpec[] = []
   private acceptance = new Map<string, AcceptanceCheck>()
   private claimAudits = new Map<string, ClaimAudit>()
   private triggerJumps = new Map<string, TriggerJump>()
@@ -179,7 +182,7 @@ export class CognitiveStore {
       experiences, experienceFrames, predictions, tempStrategies, clusters, calibration,
       channelWeights, exploration, tasks, loopExecutions, acceptance,
       claimAudits, triggerJumps, injections, chains, chainPatterns, taxonomy,
-      solidifiedStrategies, variants, discriminantAxes, chainAnchors,
+      solidifiedStrategies, variants, discriminantAxes, chainAnchors, loopSpecs,
     ] = await Promise.all([
       readFile(this.file('experiences.jsonl'), 'utf8').catch(() => ''),
       // 2026-09-08 cl-030: 帧旁路经验独立存储(CLS 情景层), 加载时合并入内存——
@@ -204,7 +207,20 @@ export class CognitiveStore {
       readFile(this.file('variants.json'), 'utf8').catch(() => ''),
       readFile(this.file('discriminant_axes.json'), 'utf8').catch(() => ''),
       readFile(this.file('chain_anchors.json'), 'utf8').catch(() => ''),
+      // cl-088: 元认知环路此前只在内存, 每次重启丢失(实测 inspect_memory.loops=[] 而 register_loop 曾报 registered)
+      readFile(this.file('loops.json'), 'utf8').catch(() => ''),
     ])
+    if (loopSpecs !== '') {
+      try {
+        const parsed = JSON.parse(loopSpecs) as unknown
+        if (Array.isArray(parsed)) {
+          this.loopSpecs = parsed.filter((spec): spec is MetaLoopSpec =>
+            typeof spec === 'object' && spec !== null
+            && typeof (spec as { name?: unknown }).name === 'string'
+            && typeof (spec as { description?: unknown }).description === 'string')
+        }
+      } catch { /* 坏文件按空处理 */ }
+    }
     if (chainAnchors !== '') {
       const parsed = JSON.parse(chainAnchors) as unknown
       if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
@@ -1156,6 +1172,20 @@ export class CognitiveStore {
   /** Snapshot of every acceptance criterion, insertion order.
    * @returns the criterion list.
    */
+  /** 持久化元认知环路规格(cl-088)。
+   * @param specs - the full loop spec list to persist.
+   */
+  saveLoopSpecs(specs: readonly MetaLoopSpec[]): void {
+    this.loopSpecs = [...specs]
+    this.enqueue('loops.json', this.loopSpecs)
+  }
+
+  /** 已持久化的环路规格。
+   * @returns the loop specs loaded at startup / written since. */
+  loopSpecsSnapshot(): readonly MetaLoopSpec[] {
+    return [...this.loopSpecs]
+  }
+
   acceptanceSnapshot(): readonly AcceptanceCheck[] {
     return [...this.acceptance.values()]
   }

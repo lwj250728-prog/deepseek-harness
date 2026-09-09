@@ -766,6 +766,8 @@ export class CognitivePipelineService extends Service {
   /** Resolve after the store finished loading (never rejects). */
   async ready(): Promise<void> {
     await this.readinessPromise
+    // cl-088: 启动时重放持久化的环路规格——直接写注册表, 不再触发一次落盘。
+    for (const spec of this.store.loopSpecsSnapshot()) this.loops.register(spec)
   }
 
   /** Flush all pending persistence writes. */
@@ -1446,6 +1448,9 @@ export class CognitivePipelineService extends Service {
    */
   registerLoop(spec: MetaLoopSpec): this {
     this.loops.register(spec)
+    // cl-088: 环路必须跨重启存活——否则"可学习的决策"每次重启归零(实测两次注册后
+    // inspect_memory.loops 仍是空数组)。持久化整份规格表, 启动时重放。
+    this.store.saveLoopSpecs(this.loops.list())
     return this
   }
 

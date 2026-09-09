@@ -1794,6 +1794,34 @@ bad = [r for r in rows
 assert not bad, "修复部署后的 agent-resumed 心跳缺 preset 字段"
 '
 
+# ── T63 环路跨重启存活(cl-088: 两次 register_loop 后 inspect_memory.loops 仍是空数组) ──
+echo "[T63] 元认知环路持久化(落盘/重放/文件格式)"
+t "store 读写 loops.json" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/store.ts"), encoding="utf8").read()
+assert "loops.json" in s and "saveLoopSpecs" in s and "loopSpecsSnapshot" in s, "缺环路持久化"
+'
+t "registerLoop 落盘 + ready 重放" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts"), encoding="utf8").read()
+i = s.index("registerLoop(spec: MetaLoopSpec)")
+assert "saveLoopSpecs" in s[i:i+400], "注册未落盘"
+j = s.index("async ready()")
+assert "loopSpecsSnapshot" in s[j:j+400], "启动未重放"
+'
+t "产物含环路持久化(已部署)" bash -c "grep -q 'loops.json' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js' && grep -q 'loopSpecsSnapshot' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
+t "loops.json 格式正确(存在时)" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/loops.json")
+if not os.path.exists(p):
+    raise SystemExit(0)  # 尚未注册过环路(重启后注册即出现)
+d = json.load(open(p, encoding="utf8"))
+assert isinstance(d, list), "loops.json 不是数组"
+for spec in d:
+    assert isinstance(spec.get("name"), str) and spec.get("name"), "环路缺 name"
+    assert isinstance(spec.get("description"), str), "环路缺 description"
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
