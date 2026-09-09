@@ -1448,6 +1448,43 @@ rows = [json.loads(l) for l in open(os.path.join(src, "experiences.jsonl"), enco
 assert not any(r.get("expId") == "exp_test" for r in rows), "测试数据污染了真实库"
 '
 
+# ── T54 精排收益度量器(tp-050: 度量器本身错了就没人发现, 而它是"精排是否有益"的唯一判据) ──
+echo "[T54] 精排收益度量器(refine-eval: A/B 分组 + 小样本保护 + cron)"
+t "度量器存在且可执行" bash -c "test -x '$HOME/dsh-fork/dsh-refine-eval.py'"
+t "度量器可运行且输出A/B分组" bash -c "python3 '$HOME/dsh-fork/dsh-refine-eval.py' | grep -q 'A·精排提升' && python3 '$HOME/dsh-fork/dsh-refine-eval.py' | grep -q 'B·未开火'"
+t "小样本不给结论" bash -c "python3 '$HOME/dsh-fork/dsh-refine-eval.py' | grep -q '样本不足'"
+t "度量器已挂cron" bash -c "crontab -l 2>/dev/null | grep -q dsh-refine-eval"
+
+# ── T55 偏离元经验继承链锚(tp-051: cl-074 接线 + 条件性运行时见证) ──
+echo "[T55] 偏离元经验继承链锚(cl-074: 接线/产物/条件性见证)"
+t "verify_claim调用点透传链锚" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/tools.ts")).read()
+assert "claimAnchor" in s and "chainId: claimAnchor.chainId" in s, "未透传链锚"
+i = s.index("claimAnchor")
+assert "resolveChainAnchor" in s[:i] or "resolveChainAnchor" in s[i:i+200], "锚未先解析"
+'
+t "偏离分支把链锚交给rememberMeta" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts")).read()
+i = s.index("metaKind: " + chr(39) + "acceptance-deviation" + chr(39))
+seg = s[max(0, i-600):i+200]
+assert "chainId" in seg, "偏离分支未接链锚"
+j = s.index("chainId?: string")
+assert j > 0, "rememberMeta 入参缺 chainId"
+'
+t "产物含偏离链锚透传(已部署)" bash -c "grep -q 'chainId: input.chainId' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
+t "条件性见证: 构建后偏离经验必须带锚" python3 -c '
+import json, os
+base = os.path.expanduser("~/.dsh/cognitive-pipeline")
+lib = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")
+cut = os.path.getmtime(lib) * 1000
+rows = [json.loads(l) for l in open(os.path.join(base, "experiences.jsonl"), encoding="utf8") if l.strip()]
+dev = [r for r in rows if r.get("metaKind") == "acceptance-deviation" and (r.get("timestamp") or 0) > cut]
+bad = [r["expId"] for r in dev if not r.get("chainId")]
+assert not bad, "构建后的偏离经验无链锚: %s" % bad
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
