@@ -240,14 +240,62 @@ export async function apply(ctx: Context, config: CognitivePipelineConfig = {}):
   // 于是校准尺与精排 A/B 样本双双冻结(实测 09-09 白天 A 组只有 1 条)。这里在 pre-step
   // 判定"本轮是否为自主回合", 是则自动创建一条预测(问的是"本轮会产出落盘产物吗"),
   // 并在 turn/end 用客观产物指纹结算——预测不再依赖模型是否想起来调用工具。
-  const pendingAutonomous = new Map<string, { predictionId: string; before: string }>()
+  const pendingAutonomous = new Map<string, { predictionId: string; before: string; sessionId: string; createdAt: number }>()
   const lastAutonomousAt = new Map<string, number>()
+  /** 结算一条自主预测: 产物指纹变了=该回合真的落盘了东西。 */
+  const settleAutonomous = (key: string): void => {
+    const pending = pendingAutonomous.get(key)
+    if (pending === undefined) return
+    pendingAutonomous.delete(key)
+    void artifactFingerprint().then((after) => {
+      const produced = after !== pending.before
+      return service.report({
+        predictionId: pending.predictionId,
+        actualOutcome: produced
+          ? '本轮产出落盘产物（账本/脚本/草稿等受监视路径的 mtime 或体积发生变化）'
+          : '本轮无落盘产物（受监视路径指纹未变）',
+        outcomeQuality: produced ? 8 : 3,
+      }, { sessionId: pending.sessionId as never })
+    }).catch((error: unknown) => {
+      ctx.logger.warn(`cognitive-pipeline: autonomous prediction feedback failed: ${String(error)}`)
+    })
+  }
+  /** cl-081: 兜底扫描——turn/end 可能缺失(实测 quiet-frame 子会话 17:01 建了预测却无 turn/end
+   * 事件, 预测永久悬空), 所以任何一次 pre-step 都顺手结算超龄未结算项。 */
+  const AUTONOMOUS_SETTLE_TTL_MS = 10 * 60 * 1000
+  /** 跨进程兜底: 扫账本里超龄未结算的自主预测(重启会清空内存 map, 只靠内存永远补不上)。 */
+  const sweepStaleFromStore = (): void => {
+    const now = Date.now()
+    for (const prediction of service.store.predictionsSnapshot()) {
+      if (!prediction.situation.startsWith('自主回合')) continue
+      if (prediction.actualOutcome !== null) continue
+      if (now - prediction.timestamp < AUTONOMOUS_SETTLE_TTL_MS) continue
+      void service.report({
+        predictionId: prediction.predictionId,
+        actualOutcome: '无法判定（该回合结算机制当时缺失/进程重启，产物指纹未采集）',
+        outcomeQuality: 5,
+      }, {}).catch(() => undefined)
+    }
+  }
+  let lastStaleSweepAt = 0
+  const sweepAutonomous = (): void => {
+    const now = Date.now()
+    for (const [key, pending] of pendingAutonomous) {
+      if (now - pending.createdAt >= AUTONOMOUS_SETTLE_TTL_MS) settleAutonomous(key)
+    }
+    if (now - lastStaleSweepAt > AUTONOMOUS_SETTLE_TTL_MS) {
+      lastStaleSweepAt = now
+      sweepStaleFromStore()
+    }
+  }
+  if (service.resolved.autonomousPrediction) sweepStaleFromStore()
   if (service.resolved.autonomousPrediction) {
     ctx.on('agent/pre-step', async (
       { agent, messages: stepMessages }: { agent: Agent; messages: UserMessage[] },
       next: () => Promise<PreStepDecision>,
     ) => {
       const decision = await next()
+      sweepAutonomous()
       const frame = autonomousFrame(stepMessages)
       if (frame === undefined) return decision
       const session = agent.session
@@ -263,7 +311,9 @@ export async function apply(ctx: Context, config: CognitivePipelineConfig = {}):
           situation: `自主回合(无用户在场)｜帧指示: ${frame.slice(0, 400)}`,
           action: `执行该帧的下一步并落盘产物: ${action}`,
         }, { sessionId: session.id })
-        pendingAutonomous.set(key, { predictionId: result.predictionId, before })
+        pendingAutonomous.set(key, {
+          predictionId: result.predictionId, before, sessionId: String(session.id), createdAt: Date.now(),
+        })
         lastAutonomousAt.set(key, Date.now())
       } catch (error) {
         ctx.logger.warn(`cognitive-pipeline: autonomous prediction failed: ${String(error)}`)
@@ -279,25 +329,11 @@ export async function apply(ctx: Context, config: CognitivePipelineConfig = {}):
   // activity (a quiet turn appends nothing).
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     if (event.type !== 'turn/end') return
+    // cl-062: 自主回合预测结算——放在原因过滤**之前**: 无论回合以什么原因结束
+    // (completed/error/interrupted/...), 产物指纹都能判定"这一轮有没有落盘东西"。
+    settleAutonomous(String(session.id))
     const reason = (event.data as { reason?: { kind?: string } }).reason?.kind
     if (reason !== 'completed' && reason !== 'error') return
-    // cl-062: 自主回合预测结算——产物指纹变了=该回合真的落盘了东西。
-    const pending = pendingAutonomous.get(String(session.id))
-    if (pending !== undefined) {
-      pendingAutonomous.delete(String(session.id))
-      void artifactFingerprint().then((after) => {
-        const produced = after !== pending.before
-        return service.report({
-          predictionId: pending.predictionId,
-          actualOutcome: produced
-            ? '本轮产出落盘产物（账本/脚本/草稿等受监视路径的 mtime 或体积发生变化）'
-            : '本轮无落盘产物（受监视路径指纹未变）',
-          outcomeQuality: produced ? 8 : 3,
-        }, { sessionId: session.id })
-      }).catch((error: unknown) => {
-        ctx.logger.warn(`cognitive-pipeline: autonomous prediction feedback failed: ${String(error)}`)
-      })
-    }
     const episode = reconstructTurn(session, event)
     if (episode.situation.trim().length === 0) return
     void service.summarizeTurn(session.id, episode).then((summary) => {

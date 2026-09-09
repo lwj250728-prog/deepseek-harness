@@ -1539,18 +1539,27 @@ assert "autonomousPredictionCooldownMs" in open(i).read(), "冷却未接线"
 '
 t "产物含自主预测(已部署)" bash -c "grep -q 'autonomousPrediction' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
 t "条件性见证: 自主预测必须带审计键并结算" python3 -c '
-import json, os, time
+import json, os, subprocess, time
 base = os.path.expanduser("~/.dsh/cognitive-pipeline")
 lib = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")
-cut = os.path.getmtime(lib) * 1000
+svc = os.popen("systemctl --user show dsh-web.service -p ActiveEnterTimestamp --value").read().strip()
+ep = subprocess.run(["date", "-d", svc, "+%s"], capture_output=True, text=True).stdout.strip()
+# 只查"当前进程"创建的预测: 之前的悬空项是 cl-081 的历史实例, 不该让断言长期变红。
+cut = max(os.path.getmtime(lib) * 1000, int(ep) * 1000) if ep.isdigit() else os.path.getmtime(lib) * 1000
 rows = [json.loads(l) for l in open(os.path.join(base, "predictions.jsonl"), encoding="utf8") if l.strip()]
 auto = [r for r in rows if str(r.get("situation", "")).startswith("自主回合") and (r.get("timestamp") or 0) > cut]
-if auto:
-    for r in auto:
-        assert "originalTopExpId" in r, "自主预测缺审计键: %s" % r.get("predictionId")
-    settled = [r for r in auto if r.get("actualOutcome") is not None]
-    aged = [r for r in auto if time.time() * 1000 - (r.get("timestamp") or 0) > 15 * 60 * 1000]
-    assert all(r.get("actualOutcome") is not None for r in aged), "自主预测超15分钟未结算"
+for r in auto:
+    assert "originalTopExpId" in r, "自主预测缺审计键: %s" % r.get("predictionId")
+aged = [r for r in auto if time.time() * 1000 - (r.get("timestamp") or 0) > 15 * 60 * 1000]
+assert all(r.get("actualOutcome") is not None for r in aged), "自主预测超15分钟未结算"
+'
+t "结算兜底: 有超龄扫描" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/index.ts"), encoding="utf8").read()
+assert "sweepAutonomous" in s and "AUTONOMOUS_SETTLE_TTL_MS" in s, "缺兜底扫描"
+i = s.index("settleAutonomous(String(session.id))")
+j = s.index("reason !== " + chr(39) + "completed" + chr(39))
+assert i < j, "结算仍在原因过滤之后(非 completed 回合会漏结算)"
 '
 
 # ── T57 推进判据=目标专属见证(cl-077: 全局锚只回答"机器在动吗", 会把暂停目标的采纳也判成推进) ──
