@@ -75,22 +75,39 @@ def parse(ts):
 
 
 def advanced(goal_id, adopted_at):
-    """采纳后 24h 内 changeCount 是否增加（用变更历史 + 当前 lastChanged 判）。"""
+    """采纳后 24h 内 changeCount 是否**增加**（比较数值, 不是"之后有快照就算"）。
+
+    2026-09-09 12:2x 修正: 首版只要采纳后存在快照就判 True——那是"有记录"不是"有推进",
+    与今天修过的 cl-063 同族(判据比证据宽松)。
+    """
     w = watch.get(goal_id)
     if w is None:
         return None  # 无监视记录 → 无法判定
-    last = parse(w.get('lastChanged'))
-    if last is not None and last > adopted_at:
-        return (last - adopted_at).total_seconds() <= 24 * 3600
-    # 回看历史快照
+    now_count = w.get('changeCount', 0)
+    # 采纳前的最近一次快照(或目标创建时的 0)
+    before_count = None
+    for h in history:
+        if h.get('goalId') != goal_id:
+            continue
+        hts = parse(h.get('ts'))
+        if hts is not None and hts <= adopted_at:
+            before_count = h.get('changeCount', 0)
+    if before_count is None:
+        before_count = 0
+    # 采纳后 24h 内是否观测到增量
     for h in history:
         if h.get('goalId') != goal_id:
             continue
         hts = parse(h.get('ts'))
         if hts is None or hts <= adopted_at:
             continue
-        if hts - adopted_at <= datetime.timedelta(hours=24):
+        if hts - adopted_at > datetime.timedelta(hours=24):
+            continue
+        if h.get('changeCount', 0) > before_count:
             return True
+    last = parse(w.get('lastChanged'))
+    if last is not None and last > adopted_at and now_count > before_count:
+        return (last - adopted_at) <= datetime.timedelta(hours=24)
     return False
 
 
@@ -137,8 +154,8 @@ else:
         '',
         '判据说明：',
         '- 触发 = 哨兵 pre-step 命中（dormant-goals.jsonl.triggerCount）',
-        '- 采纳 = 回合文本命中配置关键词，采纳时刻记于 incubation-log.jsonl',
-        '- 推进 = 采纳后 24h 内 goal-watch.changeCount 增加（结构性证据，非文本关键词）',
+        '- 采纳 = 结构性证据：回合内目标 nextAction/notes 真的变了（incubation-log.jsonl 记 evidence=pool-change；关键词仅在池不可读时兜底）',
+        '- 推进 = 采纳后 24h 内 goal-watch.changeCount **数值增加**（非'之后有快照'）',
         '- 待观察 = 采纳未满 24h 或缺少监视记录',
     ]
     text = '\n'.join(lines) + '\n'
