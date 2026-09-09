@@ -484,8 +484,11 @@ export class HotEngine {
     const remaining = new Set(ranked.map(hit => hit.exp.expId))
     const reasons: string[] = []
     let dropped = 0
+    // cl-068: 候选窗口从 3 放宽到 5——离线实测 recall@5=89%/recall@10=95%, 而 top-1 仅 76%,
+    // 给精排官更大头寸; 同时它会返回 best_exp_id 用于**提升**而不只是剔除。
+    let promoted: string | null = null
     for (let attempt = 0; attempt < this.config.refineMaxDrops; attempt += 1) {
-      const candidates = ranked.filter(hit => remaining.has(hit.exp.expId)).slice(0, 3)
+      const candidates = ranked.filter(hit => remaining.has(hit.exp.expId)).slice(0, 5)
       if (candidates.length === 0) break
       const decision = await refineRetrieval(this.ctx, this.route, {
         situation: input.situation,
@@ -495,15 +498,24 @@ export class HotEngine {
         text: `${hit.exp.sar.situation}。${hit.exp.sar.action}。${hit.exp.sar.outcome}`,
         similarity: hit.similarity,
       })), { sessionId, signal })
+      if (decision.bestExpId !== null) promoted = decision.bestExpId
       if (decision.shouldKeep || decision.rejectedExpId === null) break
       if (!remaining.has(decision.rejectedExpId)) break
       remaining.delete(decision.rejectedExpId)
       dropped += 1
       if (decision.reason !== null && decision.reason.length > 0) reasons.push(decision.reason)
     }
-    if (dropped === 0) return { note: null, ranked: [...ranked] }
-    const note = ` | 检索复核：LLM 判定 Top1 不适用，已剔除 ${dropped} 条候选（${reasons.join('；') || '前提或情境不可迁移'}）`
-    return { note, ranked: ranked.filter(hit => remaining.has(hit.exp.expId)) }
+    if (dropped === 0 && promoted === null) return { note: null, ranked: [...ranked] }
+    const kept = ranked.filter(hit => remaining.has(hit.exp.expId))
+    // 提升: 把精排官指定的那条移到最前(其余顺序不变)
+    const ordered = promoted === null
+      ? kept
+      : [...kept.filter(hit => hit.exp.expId === promoted), ...kept.filter(hit => hit.exp.expId !== promoted)]
+    const parts: string[] = []
+    if (dropped > 0) parts.push(`剔除 ${dropped} 条（${reasons.join('；') || '前提或情境不可迁移'}）`)
+    if (promoted !== null && kept[0]?.exp.expId !== promoted) parts.push(`精排提升 ${promoted} 至首位`)
+    const note = parts.length === 0 ? null : ` | 检索复核：${parts.join('；')}`
+    return { note, ranked: ordered }
   }
 
   /**

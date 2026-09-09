@@ -797,7 +797,7 @@ export async function deriveReference(
  * @returns the keep decision.
  */
 export function refineRetrievalFallback(): RefineRetrievalDecision {
-  return { shouldKeep: true, rejectedExpId: null, reason: null }
+  return { shouldKeep: true, rejectedExpId: null, bestExpId: null, reason: null }
 }
 
 /**
@@ -826,17 +826,18 @@ export async function refineRetrieval(
       maxTokens: 400,
     }), 'refine-retrieval')
     const shouldKeep = parsed.should_keep !== false
-    if (shouldKeep) return refineRetrievalFallback()
+    const reason = typeof parsed.reason === 'string' && parsed.reason.length > 0 ? parsed.reason : null
+    // cl-068: 候选内精排——LLM 可指定"最适用的一条", 引擎据此把它提到最前。
+    // 只接受确实在候选列表里的 expId(防止模型编造)。
+    const known = new Set(candidates.map(candidate => candidate.expId))
+    const bestRaw = parsed.best_exp_id
+    const bestExpId = typeof bestRaw === 'string' && known.has(bestRaw) ? bestRaw : null
+    if (shouldKeep) return { shouldKeep: true, rejectedExpId: null, bestExpId, reason }
     const rejectedExpId = parsed.rejected_exp_id
-    const reason = parsed.reason
     if (typeof rejectedExpId !== 'string' || rejectedExpId.length === 0) {
       throw new CognitivePipelineError('cognitive-pipeline: refine-retrieval rejected without an expId', 'REFINE_RETRIEVAL_SCHEMA_FAILED')
     }
-    return {
-      shouldKeep: false,
-      rejectedExpId,
-      reason: typeof reason === 'string' && reason.length > 0 ? reason : null,
-    }
+    return { shouldKeep: false, rejectedExpId, bestExpId, reason }
   } catch (error) {
     ctx.logger.warn(`cognitive-pipeline: refine-retrieval degraded to fallback: ${String(error)}`)
     return refineRetrievalFallback()

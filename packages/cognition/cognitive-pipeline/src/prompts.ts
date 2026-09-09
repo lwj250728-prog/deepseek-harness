@@ -310,11 +310,14 @@ export const REFINE_RETRIEVAL_SYSTEM_PROMPT = [
   '1. 判断排第一的候选经验是否【真正适用于】当前情境与行动——余弦相似不代表情境可迁移。',
   '2. 重点关注前提是否一致：相同行动在不同前提（用户熟练度、环境约束、时间压力等）下可能策略相反。',
   '3. 只有当你确信 Top1 会误导（前提矛盾、情境不可迁移）时才拒绝；否则保留。',
+  '4. 精排：无论是否拒绝，都要从候选里挑出【最适用当前情境与行动】的那一条（填 best_exp_id）。',
+  '   若你认可 Top1，就填 Top1 的 expId；若你发现后面某条更贴合前提，就填它的 expId——引擎会把它提到最前。',
   '【输出JSON格式】：',
   '{',
   '  "should_keep": true,',
   '  "rejected_exp_id": "string|null（拒绝时填被拒经验的expId）",',
-  '  "reason": "string|null（拒绝理由，一句）"',
+  '  "best_exp_id": "string|null（候选中最适用的一条；必须是候选列表里出现过的 expId）",',
+  '  "reason": "string|null（一句）"',
   '}',
 ].join('\n')
 

@@ -1087,6 +1087,26 @@ s = open(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/src/index.
 assert "structural" in s and "keywordFallback" in s, "采纳判据未改为结构性+兜底"
 '
 
+# ── T44 检索精排可提升(2026-09-09 12:5x 固化——cl-068: 从"只剔除"扩展为"可排序") ──
+echo "[T44] 检索精排(候选窗口 5 + best_exp_id 提升, 头寸来自 recall@10=95% vs top-1=76%)"
+t "src含bestExpId提升" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/hot-engine.ts")).read()
+assert "bestExpId" in s and "精排提升" in s, "未见提升逻辑"
+assert ".slice(0, 5)" in s, "候选窗口未放宽到 5"
+'
+t "提示词含best_exp_id" python3 -c '
+import os
+s = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/prompts.ts")
+t = open(s).read()
+assert "best_exp_id" in t, "提示词未要求返回 best_exp_id"
+'
+t "lib含精排提升(已部署)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")).read()
+assert "bestExpId" in s and "best_exp_id" in s, "lib 未部署精排提升"
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。

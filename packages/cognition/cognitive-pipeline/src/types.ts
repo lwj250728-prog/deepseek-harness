@@ -529,6 +529,13 @@ export interface RefineRetrievalDecision {
   readonly shouldKeep: boolean
   /** The expId the LLM judged inapplicable when rejecting. */
   readonly rejectedExpId: string | null
+  /**
+   * The candidate the LLM judged most applicable (cl-068). The old contract
+   * could only DROP a candidate; offline measurement showed recall@10 = 95%
+   * while fused top-1 was only 76%, i.e. the headroom is in reordering, not in
+   * pruning. When set, this candidate is promoted to the front of the ranking.
+   */
+  readonly bestExpId: string | null
   /** One-line reason, surfaced in the advice for observability. */
   readonly reason: string | null
 }
