@@ -12,7 +12,12 @@
  * @module @deepseek-ai/dsh-cognitive-pipeline
  */
 
+import { stat } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-system-prompt'
@@ -54,6 +59,64 @@ export type { CognitiveLlmRoute } from './llm.ts'
  * by log-anchored claim audits. */
 export { findToolCallEvidence } from './log-evidence.ts'
 export type { ToolCallEvidence } from './log-evidence.ts'
+
+/** Text of one user message (concatenated text blocks). */
+function textOf(message: unknown): string {
+  const content = (message as { content?: readonly { type?: string; text?: string }[] }).content
+  if (!Array.isArray(content)) return ''
+  return content.filter(block => block.type === 'text').map(block => block.text ?? '').join(' ').trim()
+}
+
+/**
+ * cl-062: is this turn autonomous? An autonomous turn's only user-side input is
+ * a plugin-injected frame (quiet-driver's action/three-question/test-review
+ * frames); a genuine operator message has `source.kind === 'user'`. The model
+ * is the only caller of `predict_outcome`, so while the operator is away the
+ * calibration ruler and the refine A/B sample would otherwise freeze — the
+ * exact freeze this detection exists to break.
+ * @param messages - the pre-step user-side messages.
+ * @returns the injected frame text when the turn is autonomous, else undefined.
+ */
+function autonomousFrame(messages: readonly unknown[]): string | undefined {
+  let injected: string | undefined
+  for (const message of messages) {
+    const source = (message as { source?: { kind?: string; plugin?: string } }).source
+    if (source?.kind === 'user') return undefined
+    if (source?.plugin === undefined) continue
+    const text = textOf(message)
+    if (text.length > 0 && injected === undefined) injected = text
+  }
+  return injected
+}
+
+/** Objective artifact fingerprint: mtime+size of the durable outputs this
+ * agent actually produces. A turn "produced something" iff this changes. */
+const WATCHED = [
+  '~/.dsh/cognitive-pipeline/claims-ledger.jsonl',
+  '~/.dsh/cognitive-pipeline/dormant-goals.jsonl',
+  '~/.dsh/cognitive-pipeline/experiences.jsonl',
+  '~/.dsh/cognitive-pipeline/test-pending.jsonl',
+  '~/.dsh/cognitive-pipeline/predictions.jsonl',
+  '~/.dsh/cognitive-pipeline/incubation-log.jsonl',
+  '~/dsh-fork/dsh-cog-tests.sh',
+  '~/dsh-workshop/novels/qizhongjiyi/audit/progress.md',
+  '~/dsh-fork',
+  '~/.dsh/cognitive-pipeline',
+]
+
+async function artifactFingerprint(): Promise<string> {
+  const parts: string[] = []
+  for (const raw of WATCHED) {
+    const path = raw.startsWith('~') ? join(homedir(), raw.slice(1)) : raw
+    try {
+      const info = await stat(path)
+      parts.push(`${raw}:${info.mtimeMs}:${info.size}`)
+    } catch {
+      parts.push(`${raw}:missing`)
+    }
+  }
+  return parts.join('|')
+}
 
 /** Reconstruct one completed turn into candidate accumulation material.
  * Reads the turn's events back from the session ledger: the genuine user
@@ -168,6 +231,42 @@ export async function apply(ctx: Context, config: CognitivePipelineConfig = {}):
     registerPipelineTools(ctx, service)
   }
 
+  // cl-062: 自主回合预测闭环。用户离场时, predict_outcome 的唯一调用者是模型自己,
+  // 于是校准尺与精排 A/B 样本双双冻结(实测 09-09 白天 A 组只有 1 条)。这里在 pre-step
+  // 判定"本轮是否为自主回合", 是则自动创建一条预测(问的是"本轮会产出落盘产物吗"),
+  // 并在 turn/end 用客观产物指纹结算——预测不再依赖模型是否想起来调用工具。
+  const pendingAutonomous = new Map<string, { predictionId: string; before: string }>()
+  const lastAutonomousAt = new Map<string, number>()
+  if (service.resolved.autonomousPrediction) {
+    ctx.on('agent/pre-step', async (
+      { agent, messages: stepMessages }: { agent: Agent; messages: UserMessage[] },
+      next: () => Promise<PreStepDecision>,
+    ) => {
+      const decision = await next()
+      const frame = autonomousFrame(stepMessages)
+      if (frame === undefined) return decision
+      const session = agent.session
+      const key = String(session.id)
+      if (pendingAutonomous.has(key)) return decision
+      const last = lastAutonomousAt.get(key) ?? 0
+      if (Date.now() - last < service.resolved.autonomousPredictionCooldownMs) return decision
+      try {
+        const before = await artifactFingerprint()
+        const action = /nextAction[:：]\s*([^\n]{1,300})/.exec(frame)?.[1]?.trim()
+          ?? frame.slice(0, 300)
+        const result = await service.predict({
+          situation: `自主回合(无用户在场)｜帧指示: ${frame.slice(0, 400)}`,
+          action: `执行该帧的下一步并落盘产物: ${action}`,
+        }, { sessionId: session.id })
+        pendingAutonomous.set(key, { predictionId: result.predictionId, before })
+        lastAutonomousAt.set(key, Date.now())
+      } catch (error) {
+        ctx.logger.warn(`cognitive-pipeline: autonomous prediction failed: ${String(error)}`)
+      }
+      return decision
+    })
+  }
+
   // Completed-turn cognition activity: settle the turn's injection citations
   // (unconditionally — the jump-weight reinforcement loop depends on it),
   // accumulate the episode when autoAccumulate is on, and surface the summary
@@ -177,6 +276,23 @@ export async function apply(ctx: Context, config: CognitivePipelineConfig = {}):
     if (event.type !== 'turn/end') return
     const reason = (event.data as { reason?: { kind?: string } }).reason?.kind
     if (reason !== 'completed' && reason !== 'error') return
+    // cl-062: 自主回合预测结算——产物指纹变了=该回合真的落盘了东西。
+    const pending = pendingAutonomous.get(String(session.id))
+    if (pending !== undefined) {
+      pendingAutonomous.delete(String(session.id))
+      void artifactFingerprint().then((after) => {
+        const produced = after !== pending.before
+        return service.report({
+          predictionId: pending.predictionId,
+          actualOutcome: produced
+            ? '本轮产出落盘产物（账本/脚本/草稿等受监视路径的 mtime 或体积发生变化）'
+            : '本轮无落盘产物（受监视路径指纹未变）',
+          outcomeQuality: produced ? 8 : 3,
+        }, { sessionId: session.id })
+      }).catch((error: unknown) => {
+        ctx.logger.warn(`cognitive-pipeline: autonomous prediction feedback failed: ${String(error)}`)
+      })
+    }
     const episode = reconstructTurn(session, event)
     if (episode.situation.trim().length === 0) return
     void service.summarizeTurn(session.id, episode).then((summary) => {

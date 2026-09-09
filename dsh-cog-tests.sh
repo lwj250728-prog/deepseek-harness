@@ -1485,6 +1485,55 @@ bad = [r["expId"] for r in dev if not r.get("chainId")]
 assert not bad, "构建后的偏离经验无链锚: %s" % bad
 '
 
+# ── T56 自主回合预测闭环(cl-062: 用户离场期校准与精排样本冻结——模型不调用工具就没有预测) ──
+echo "[T56] 自主回合预测闭环(判定/创建/客观结算/冷却)"
+t "含自主回合判定" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/index.ts")).read()
+assert "function autonomousFrame" in s, "缺自主回合判定"
+i = s.index("function autonomousFrame")
+seg = s[i:i+700]
+assert "kind === " in seg and "user" in seg and "plugin" in seg, "判定未区分真实用户与插件帧"
+'
+t "pre-step创建预测" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/index.ts")).read()
+assert "agent/pre-step" in s, "未挂 pre-step"
+i = s.index("agent/pre-step")
+seg = s[i:i+1600]
+assert "service.predict(" in seg, "pre-step 内未创建预测"
+'
+t "turn/end用产物指纹结算" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/index.ts")).read()
+assert "artifactFingerprint" in s and "service.report(" in s, "未做客观结算"
+i = s.index("const pending = pendingAutonomous.get")
+seg = s[i:i+900]
+assert "after !== pending.before" in seg, "结算判据不是指纹变化"
+'
+t "有冷却限流" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts")).read()
+assert "autonomousPredictionCooldownMs" in s, "缺冷却配置"
+i = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/index.ts")
+assert "autonomousPredictionCooldownMs" in open(i).read(), "冷却未接线"
+'
+t "产物含自主预测(已部署)" bash -c "grep -q 'autonomousPrediction' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
+t "条件性见证: 自主预测必须带审计键并结算" python3 -c '
+import json, os, time
+base = os.path.expanduser("~/.dsh/cognitive-pipeline")
+lib = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")
+cut = os.path.getmtime(lib) * 1000
+rows = [json.loads(l) for l in open(os.path.join(base, "predictions.jsonl"), encoding="utf8") if l.strip()]
+auto = [r for r in rows if str(r.get("situation", "")).startswith("自主回合") and (r.get("timestamp") or 0) > cut]
+if auto:
+    for r in auto:
+        assert "originalTopExpId" in r, "自主预测缺审计键: %s" % r.get("predictionId")
+    settled = [r for r in auto if r.get("actualOutcome") is not None]
+    aged = [r for r in auto if time.time() * 1000 - (r.get("timestamp") or 0) > 15 * 60 * 1000]
+    assert all(r.get("actualOutcome") is not None for r in aged), "自主预测超15分钟未结算"
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。

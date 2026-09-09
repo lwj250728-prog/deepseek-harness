@@ -205,6 +205,16 @@ export interface CognitivePipelineConfig {
   /** Automatically accumulate completed turns as experiences when the LLM
    * route judges them worth it (default false; pure chat never reaches the gate). */
   autoAccumulate?: boolean
+  /** cl-062: create one prediction per AUTONOMOUS turn (a turn whose only user
+   * message is a plugin-injected frame) and resolve it at turn end against an
+   * objective artifact fingerprint. Without this the calibration ruler and the
+   * refine A/B sample freeze whenever the operator is away, because the model
+   * is the only caller of predict_outcome. Default true. */
+  autonomousPrediction?: boolean
+  /** Minimum gap between two autonomous-turn predictions in one session
+   * (default 30 min). Bounds the LLM cost of the refine route while the
+   * operator is away — frames fire far more often than calibration needs. */
+  autonomousPredictionCooldownMs?: number
   /** Minimum invoked audits before a criterion's deviation rate can flag
    * rework and record a deviation meta experience (default 3). */
   acceptanceMinEvidenceCount?: number
@@ -298,6 +308,10 @@ export interface ResolvedCognitivePipelineConfig {
   readonly simulationTtlMs: number
   /** Whether completed turns are automatically accumulated via the LLM gate. */
   readonly autoAccumulate: boolean
+  /** Whether autonomous turns get an automatically created and resolved prediction. */
+  readonly autonomousPrediction: boolean
+  /** Minimum gap between autonomous-turn predictions per session. */
+  readonly autonomousPredictionCooldownMs: number
   /** Minimum gap between offline consolidations (chain assembly + jump
    * refresh), so repeated idle ticks stay cheap. */
   readonly offlineConsolidationIntervalMs: number
@@ -388,6 +402,8 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   simulationPermanentThreshold: z.number().min(0).default(2),
   simulationTtlMs: z.number().step(1).min(60_000).default(30 * 24 * 60 * 60 * 1000),
   autoAccumulate: z.boolean().default(false),
+  autonomousPrediction: z.boolean().default(true),
+  autonomousPredictionCooldownMs: z.number().step(1).min(60_000).default(30 * 60 * 1000),
   acceptanceMinEvidenceCount: z.number().step(1).min(1).default(3),
   acceptanceDeviationThreshold: z.number().min(0).max(1).default(0.5),
   acceptanceCommandExecution: z.boolean().default(false),
@@ -479,6 +495,8 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
     simulationPermanentThreshold: config.simulationPermanentThreshold ?? 2,
     simulationTtlMs: config.simulationTtlMs ?? 30 * 24 * 60 * 60 * 1000,
     autoAccumulate: config.autoAccumulate ?? false,
+    autonomousPrediction: config.autonomousPrediction ?? true,
+    autonomousPredictionCooldownMs: config.autonomousPredictionCooldownMs ?? 30 * 60 * 1000,
     offlineConsolidationIntervalMs: config.offlineConsolidationIntervalMs ?? 60 * 60 * 1000,
     acceptanceMinEvidenceCount: config.acceptanceMinEvidenceCount ?? 3,
     acceptanceDeviationThreshold: config.acceptanceDeviationThreshold ?? 0.5,
