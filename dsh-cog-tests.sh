@@ -112,17 +112,21 @@ rm -f "$TMPP" "$TMPB1" "$TMPB2"
 # ── T7 数据链路防复发(2026-09-08 08:2x 固化——tp-010: oq010-probe 解锁逻辑) ──
 echo "[T7] 数据链路(oq010-probe 解锁: 数据入→nextAction 去'待'前缀→行动帧可推)"
 GOALS7="$DIR/dormant-goals.jsonl"
-BAK7=$(mktemp); cp "$GOALS7" "$BAK7"
+# 2026-09-09 12:3x 修正: 原实现直接改**活文件**再还原——运行中的服务会 bump() 重写同一文件,
+# 与测试抢写, 还原后偶发不一致(连续两次误红)。改为改副本: 活文件全程只读。
+WORK7=$(mktemp); cp "$GOALS7" "$WORK7"
+BAK7="$WORK7"
 # 原始 nextAction(还原保真的比对基准)——2026-09-09 08:5x 修正: 原断言写死"以'待'开头",
 # 而该目标 nextAction 已按 cl-059 改写为可执行子步, 故改为"还原后与原始一致"。
-NA7_ORIG=$(python3 -c "
+NA7_ORIG_FILE=$(mktemp)
+python3 -c "
 import json
 for l in open('$GOALS7'):
     d=json.loads(l)
     if d.get('id')=='goal-digital-life-incubation': print(d.get('nextAction',''))
-")
+" > "$NA7_ORIG_FILE"
 # 7a. 解锁段执行: 模拟 probe 检测到数据的分支逻辑(与 dsh-oq010-probe.sh 相同)
-UNLOCK7=$(python3 - "$GOALS7" << 'PYEOF'
+UNLOCK7=$(python3 - "$WORK7" << 'PYEOF'
 import json, sys
 p = sys.argv[1]
 rows = []
@@ -144,22 +148,33 @@ PYEOF
 # 7b. 断言解锁: nextAction 不以"待"开头且含"执行 oq-010"
 NA7=$(python3 -c "
 import json
-for l in open('$GOALS7'):
+for l in open('$WORK7'):
     d=json.loads(l)
     if d.get('id')=='goal-digital-life-incubation': print(d.get('nextAction',''))
 ")
 t "解锁段执行成功(模拟数据入中心)" test -n "$UNLOCK7"
 t "解锁后 nextAction 去'待'前缀" bash -c "! [[ '$NA7' == 待* ]]"
 t "解锁后含'执行 oq-010'(行动帧可推)" bash -c "[[ '$NA7' == *'执行 oq-010'* ]]"
-# 7c. 还原
-cp "$BAK7" "$GOALS7"
+# 7c. 活文件未被改动(测试只动副本)
 NA7B=$(python3 -c "
 import json
 for l in open('$GOALS7'):
     d=json.loads(l)
     if d.get('id')=='goal-digital-life-incubation': print(d.get('nextAction',''))
 ")
-t "还原后与原始nextAction一致" bash -c "[[ '$NA7B' == '$NA7_ORIG' ]]"
+rm -f "$WORK7"
+# 2026-09-09 12:3x 修正: nextAction 文本含单引号, 塞进 bash 插值会语法崩 → 用 Python 比对
+t "测试未改动活文件" python3 -c "
+import json
+def na(p):
+    for l in open(p, encoding='utf8'):
+        d = json.loads(l)
+        if d.get('id') == 'goal-digital-life-incubation': return d.get('nextAction', '')
+    return ''
+orig = open('$NA7_ORIG_FILE', encoding='utf8').read().strip()
+assert na('$GOALS7') == orig, '活文件 nextAction 被测试改动'
+"
+rm -f "$NA7_ORIG_FILE"
 rm -f "$BAK7"
 
 # ── T8 probe 404 误判防复发(2026-09-08 08:3x 固化——tp-011) ──
