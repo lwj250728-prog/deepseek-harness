@@ -54,6 +54,21 @@ def main() -> int:
         return sum(1 for r in g if r.get('cited')) / max(len(g), 1) * 100
     print(f'  带 jumpWords: {len(with_jump)} 条, 引用率 {rate(with_jump):.1f}%'
           f'｜不带: {len(without)} 条, 引用率 {rate(without):.1f}%')
+    # cl-100: 按日看引用率——整体低可能是"某天起崩塌", 而不是一直如此。
+    import datetime, collections
+    byday = collections.defaultdict(lambda: [0, 0])
+    for r in rows:
+        if r.get('cited') is None:
+            continue
+        d = datetime.datetime.fromtimestamp((r.get('createdAt') or 0) / 1000).strftime('%m-%d')
+        byday[d][1] += 1
+        if r.get('cited'):
+            byday[d][0] += 1
+    print('\n按日引用率:')
+    for d in sorted(byday):
+        c, s = byday[d]
+        print(f'  {d}  已结算 {s:>4} | 被引用 {c:>3} | {c / s * 100:>5.1f}%')
+
     if dead:
         print(f'\n判读: {", ".join(dead)} 通道引用率为 0 —— 需查触发器是否过宽或内容是否无关, 不建议继续加量。')
     else:

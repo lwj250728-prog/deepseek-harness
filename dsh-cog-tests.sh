@@ -2197,6 +2197,7 @@ assert "MAX_JUMP_DF_RATIO" in s, "缺频率门"
 assert "tooCommon(token)" in s, "频率门未接入候选过滤"
 '
 t "产物含频率门(已部署)" bash -c "grep -q 'tooCommon' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
+t "含按日引用率时间线(cl-100)" bash -c "timeout 300 python3 '$HOME/dsh-fork/dsh-citation-by-trigger.py' | grep -q '按日引用率'"
 t "死亡通道会被标记" python3 -c '
 import os
 s = open(os.path.expanduser("~/dsh-fork/dsh-citation-by-trigger.py"), encoding="utf8").read()
