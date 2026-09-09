@@ -101,6 +101,14 @@ const ACCUMULATE_MIN_ACTION_CHARS = 160
  * one-shot session that injected and never produced another turn would
  * otherwise stay pending forever and never fold into the learning ledgers. */
 const INJECTION_SETTLE_TTL_MS = 24 * 60 * 60 * 1000
+/** 关键词是否退化为字符级(cl-058): 用"单字占比"而非平均值——6 个词里混入 1 个英文词
+ *  就能把平均值抬过 1.6, 从而漏修(exp_230 实测)。单字过半即判退化。 */
+function isCharLevelKeywords(keywords: readonly string[]): boolean {
+  if (keywords.length === 0) return true
+  const singles = keywords.filter(keyword => keyword.length === 1).length
+  return singles / keywords.length > 0.5
+}
+
 
 /** Plugin configuration (all fields optional; engine defaults apply). */
 export interface CognitivePipelineConfig {
@@ -796,10 +804,7 @@ export class CognitivePipelineService extends Service {
    */
   private ensureWordKeywords(sar: SarTriplet): SarTriplet {
     const keywords = sar.actionKeywords
-    const avgLength = keywords.length === 0
-      ? 0
-      : keywords.reduce((sum, keyword) => sum + keyword.length, 0) / keywords.length
-    if (keywords.length > 0 && avgLength >= 1.6) return sar
+    if (!isCharLevelKeywords(keywords)) return sar
     const picked = this.deriveWordKeywords(sar.action)
     return picked.length === 0 ? sar : { ...sar, actionKeywords: picked }
   }
@@ -839,10 +844,7 @@ export class CognitivePipelineService extends Service {
     let repaired = 0
     for (const exp of this.store.experiencesSnapshot()) {
       const keywords = exp.sar.actionKeywords
-      const avgLength = keywords.length === 0
-        ? 0
-        : keywords.reduce((sum, keyword) => sum + keyword.length, 0) / keywords.length
-      if (keywords.length > 0 && avgLength >= 1.6) continue
+      if (!isCharLevelKeywords(keywords)) continue
       const picked = this.deriveWordKeywords(exp.sar.action)
       if (picked.length === 0) continue
       const sar: SarTriplet = { ...exp.sar, actionKeywords: picked }

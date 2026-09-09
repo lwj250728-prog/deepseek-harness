@@ -861,8 +861,8 @@ for f in ("experiences.jsonl", "experiences-frames.jsonl"):
         r = json.loads(l)
         kw = ((r.get("sar") or {}).get("actionKeywords") or [])
         if not kw: continue
-        avg = sum(len(k) for k in kw) / len(kw)
-        if avg < 1.6: bad.append(r.get("expId"))
+        singles = sum(1 for k in kw if len(k) == 1)
+        if singles / len(kw) > 0.5: bad.append(r.get("expId"))
 assert not bad, "字符级关键词残留: %s" % bad[:3]
 '
 
