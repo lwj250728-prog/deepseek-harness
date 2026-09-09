@@ -1153,6 +1153,18 @@ assert "changeCount\", 0" not in seg.replace(chr(39), chr(34)), "推进判据仍
 assert "draftsChars" in seg and "gitCommits" in seg and "suitePasses" in seg, "推进判据未用外部锚"
 '
 
+# ── T47 工具脚本语法闸(2026-09-09 13:3x 固化——cl-072: 测试脚本自身语法错时无法自保) ──
+echo "[T47] 工具脚本语法闸(dsh-script-lint: bash -n + py_compile, 独立于套件)"
+t "语法闸脚本存在且可执行" bash -c "test -x '$HOME/dsh-fork/dsh-script-lint.sh'"
+t "语法闸覆盖套件自身" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/dsh-script-lint.sh")).read()
+assert "dsh-*.sh" in s and "bash -n" in s, "未覆盖 .sh 语法检查"
+assert "py_compile" in s, "未覆盖 .py 语法检查"
+'
+t "语法闸当前全绿" bash -c "bash '$HOME/dsh-fork/dsh-script-lint.sh' | grep -q '全部脚本语法通过'"
+t "语法闸已挂cron" bash -c "crontab -l 2>/dev/null | grep -q dsh-script-lint"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
