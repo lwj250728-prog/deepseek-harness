@@ -997,6 +997,26 @@ assert total > 0, "哨兵累计触发为 0——机制可能又死了(cl-060 复
 print("累计触发 %d | 累计采纳 %d" % (total, sum(g.get("adoptedCount") or 0 for g in goals)))
 '
 
+# ── T40 目标池向量维度一致(2026-09-09 11:5x 固化——cl-060 根因: 池向量 1024 维 vs 运行时 384 维) ──
+echo "[T40] 目标池向量维度(池内向量须等于源码 ACTION_VECTOR_DIM——防维度错配再次让哨兵静默死亡)"
+t "池向量维度与源码一致" python3 -c '
+import json, os, re
+src = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/vectorizer.ts")).read()
+m = re.search(r"ACTION_VECTOR_DIM\s*=\s*(\d+)", src)
+assert m, "取不到 ACTION_VECTOR_DIM"
+dim = int(m.group(1))
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/dormant-goals.jsonl")
+bad = []
+for l in open(p, encoding="utf8"):
+    if not l.strip(): continue
+    g = json.loads(l)
+    for key in ("repVector", "kernelVector", "focusVector"):
+        v = g.get(key)
+        if v is not None and len(v) != dim:
+            bad.append("%s.%s=%d" % (g.get("id"), key, len(v)))
+assert not bad, "维度错配(源码 %d): %s" % (dim, bad[:3])
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
