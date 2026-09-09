@@ -43,6 +43,11 @@ with open(ledger, 'w', encoding='utf8') as f:
 PYINNER
   exit 2
 fi
+# tp-059/cl-092: 套件对自身完整性的断言——结果汇总行曾被补丁当锚点吞掉, 两次运行无人察觉。
+if ! grep -q '结果: \$PASS 通过 / \$FAIL 失败' "$0"; then
+  echo "[FATAL] 套件缺少结果汇总行(被补丁误吞?)——未执行任何测试"
+  exit 2
+fi
 if ! bash "$HOME/dsh-fork/dsh-script-lint.sh" >/tmp/dsh-cog-lint.out 2>&1; then
   echo "[FATAL] 工具脚本语法闸未过, 未执行测试:"
   tail -20 /tmp/dsh-cog-lint.out | sed 's/^/    /'
