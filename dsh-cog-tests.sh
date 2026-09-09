@@ -1319,7 +1319,7 @@ except Exception:
 stale = {s: g for s, g in anchors.items() if g in pool and pool[g] != "active"}
 assert not stale, "存在会被守卫清除的陈旧锚: %s" % stale
 '
-t "停机窗口脚本就位" bash -c "test -x '$HOME/dsh-fork/dsh-exp253-reanchor.sh' && bash -n '$HOME/dsh-fork/dsh-exp253-reanchor.sh'"
+t "停机窗口脚本就位" bash -c "test -x '$HOME/dsh-fork/dsh-reanchor.sh' && bash -n '$HOME/dsh-fork/dsh-reanchor.sh' && test -x '$HOME/dsh-fork/dsh-reanchor-apply.py'"
 
 # ── T51 编辑期语法闸(cl-072: 编辑动作与校验动作之间无强制绑定) ──
 echo "[T51] 编辑期语法闸(套件自检 + 工具脚本前置 + 编辑后立即校验helper)"
@@ -1386,6 +1386,66 @@ for g in goals:
     counter = g.get("adoptedCount") or 0
     und = (base.get(gid) or {}).get("undecidableAdoptions", max(0, counter - logged))
     assert und == max(0, counter - logged), "%s 不可判定数与差额不符: %s vs %s" % (gid, und, counter - logged)
+'
+
+# ── T53 停机修复工具可离线验证(cl-076 后续: 修复脚本本身要能在临时目录上跑通, 不靠"停机时祈祷") ──
+echo "[T53] 链锚修复工具(临时目录跑通 + 幂等 + 不动真实数据)"
+t "修复工具在临时副本上生效" python3 -c '
+import json, os, shutil, subprocess, tempfile
+base = tempfile.mkdtemp(prefix="reanchor-")
+src = os.path.expanduser("~/.dsh/cognitive-pipeline")
+for name in ("experiences.jsonl", "dormant-goals.jsonl"):
+    shutil.copy(os.path.join(src, name), base)
+# 构造: 一条待修经验 + 一个指向已暂停目标的粘性锚
+exp = os.path.join(base, "experiences.jsonl")
+rows = [json.loads(l) for l in open(exp, encoding="utf8") if l.strip()]
+rows[0]["expId"] = "exp_test"
+rows[0].pop("chainId", None)
+open(exp, "w", encoding="utf8").write(chr(10).join(json.dumps(r, ensure_ascii=False) for r in rows) + chr(10))
+json.dump({"sess-test": "goal-novel-60w"}, open(os.path.join(base, "chain_anchors.json"), "w", encoding="utf8"))
+open(os.path.join(base, "reanchor-pending.jsonl"), "w", encoding="utf8").write(
+    json.dumps({"expId": "exp_test", "chainId": "goal-digital-life-incubation"}) + chr(10))
+tool = os.path.expanduser("~/dsh-fork/dsh-reanchor-apply.py")
+r = subprocess.run(["python3", tool, "--base", base], capture_output=True, text=True)
+assert r.returncode == 0, r.stderr
+after = [json.loads(l) for l in open(exp, encoding="utf8") if l.strip()]
+got = [x.get("chainId") for x in after if x.get("expId") == "exp_test"]
+assert got == ["goal-digital-life-incubation"], got
+anchors = json.load(open(os.path.join(base, "chain_anchors.json"), encoding="utf8"))
+assert anchors == {}, anchors
+r2 = subprocess.run(["python3", tool, "--base", base], capture_output=True, text=True)
+assert r2.returncode == 0 and "应用 0 条" in r2.stdout, r2.stdout
+shutil.rmtree(base)
+'
+t "待修链锚不超期(防'机制在条件已死')" python3 -c '
+import json, os, datetime
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/reanchor-pending.jsonl")
+if not os.path.exists(p):
+    raise SystemExit(0)
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+if not rows:
+    raise SystemExit(0)
+now = datetime.datetime.now(datetime.timezone.utc)
+stale = []
+for r in rows:
+    ts = r.get("ts")
+    if not ts:
+        continue
+    try:
+        at = datetime.datetime.fromisoformat(ts)
+    except ValueError:
+        continue
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=datetime.timezone.utc)
+    if now - at > datetime.timedelta(hours=24):
+        stale.append(r.get("expId"))
+assert not stale, "待修链锚超 24h 未应用(需一次停机窗口): %s" % stale
+'
+t "修复工具不改真实数据" python3 -c '
+import json, os
+src = os.path.expanduser("~/.dsh/cognitive-pipeline")
+rows = [json.loads(l) for l in open(os.path.join(src, "experiences.jsonl"), encoding="utf8") if l.strip()]
+assert not any(r.get("expId") == "exp_test" for r in rows), "测试数据污染了真实库"
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
