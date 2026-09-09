@@ -1196,10 +1196,31 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     return undefined
   }
 
+  // 2026-09-10 02:0x (cl-094): 存量模型可能已到期(灰测 id `expires-on-0910` 今天到期)。
+  // 唤醒若照搬一个已下线的模型 id, 会把"会话复活"变成"每轮请求失败"——与 20:30 那次静默
+  // 停摆同形。这里在注入前对照实时目录: 不在目录里就不注入(交回 Host/默认), 并留一条
+  // model-unavailable 心跳, 让"模型没了"是可见事件而不是静默故障。
+  const modelStillAvailable = async (provider: string, model: string): Promise<boolean> => {
+    const llm = ctx.get('llm') as { listModels?(provider: string): Promise<readonly { id?: string }[]> } | undefined
+    if (llm?.listModels === undefined) return true  // 无法查询 → 不阻断(失败开放)
+    try {
+      const models = await llm.listModels(provider)
+      if (models.length === 0) return true
+      return models.some(entry => entry.id === model)
+    } catch {
+      return true
+    }
+  }
+
   const wakeTargetAgent = async (): Promise<void> => {
     try {
       const { presets, presetId } = await resolveStoredPreset()
-      const storedModel = await resolveStoredModel()
+      let storedModel = await resolveStoredModel()
+      if (storedModel !== undefined && !(await modelStillAvailable(storedModel.provider, storedModel.model))) {
+        ctx.logger.warn('[quiet-driver] 存量模型 %s 已不在目录(可能到期) → 不注入, 交回默认', storedModel.model)
+        beat('model-unavailable', { model: storedModel.model })
+        storedModel = undefined
+      }
       const setup = async (agentCtx: Context): Promise<void> => {
         if (presets !== undefined && presetId !== undefined) await presets.mount(agentCtx, presetId)
         // 与 Host 同构: 装模型选择监听器, 让 system-prompt/assemble 时 variables.model 有值。

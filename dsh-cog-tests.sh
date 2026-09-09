@@ -2087,6 +2087,26 @@ n = len([d for d in glob.glob(os.path.join(root, "*")) if os.path.isdir(d)])
 assert n <= 10, "快照未裁剪: %d" % n
 '
 
+# ── T73 唤醒前校验模型可用性(cl-094: 灰测模型今日到期, 不可照搬已下线的 id 唤醒) ──
+echo "[T73] 模型可用性校验(目录查询/失败开放/心跳可见)"
+t "唤醒前校验模型在目录" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
+assert "modelStillAvailable" in s, "缺可用性校验"
+assert "model-unavailable" in s, "缺心跳打点"
+i = s.index("const wakeTargetAgent")
+seg = s[i:i+1400]
+assert "modelStillAvailable" in seg, "校验不在唤醒路径内"
+'
+t "校验失败开放(查不到不阻断)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
+i = s.index("const modelStillAvailable")
+seg = s[i:i+800]
+assert "return true" in seg, "未失败开放"
+'
+t "产物含可用性校验(已部署)" bash -c "grep -q 'modelStillAvailable' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
