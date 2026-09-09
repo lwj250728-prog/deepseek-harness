@@ -2227,6 +2227,35 @@ for m in re.findall(r"dsh-[a-z-]+\.(?:sh|py)", s):
     assert os.path.exists(os.path.expanduser("~/dsh-fork/" + m)), "runbook 引用了不存在的脚本: %s" % m
 '
 
+# ── T79 跳词选择性门的效果见证(tp-062/cl-098: 表里真的没噪声词) ──
+echo "[T79] 跳词表效果见证(cooccurrence 全部过门 / 噪声词已移除 / 门已部署)"
+t "cooccurrence 跳词全部过选择性门" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/trigger_jumps.json")
+d = json.load(open(p, encoding="utf8"))
+items = d if isinstance(d, list) else d.get("jumps", d)
+rows = {x["jumpWord"]: x for x in items if isinstance(x, dict)} if isinstance(items, list) else items
+bad = []
+for w, v in rows.items():
+    if v.get("source") != "cooccurrence":
+        continue
+    ev = [t.get("evidenceCount", 0) for t in v.get("triggers", [])]
+    tot = sum(ev) or 1
+    if ev and max(ev) / tot < 0.5:
+        bad.append((w, round(max(ev) / tot, 2)))
+assert not bad, "仍有未过门的 cooccurrence 跳词: %s" % bad[:5]
+'
+t "已知噪声词已从跳词表移除" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/trigger_jumps.json")
+d = json.load(open(p, encoding="utf8"))
+items = d if isinstance(d, list) else d.get("jumps", d)
+rows = {x["jumpWord"]: x for x in items if isinstance(x, dict)} if isinstance(items, list) else items
+left = [w for w in ("生成", "没有", "sh", "bash", "需要", "执行") if w in rows]
+assert not left, "噪声词仍在表中: %s" % left
+'
+t "选择性门已部署" bash -c "grep -q 'MIN_JUMP_TOP_SHARE' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
