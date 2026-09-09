@@ -17,6 +17,38 @@ t() { # t <描述> <条件>
   else FAIL=$((FAIL+1)); FAILED_TESTS+=("$desc"); echo "  ✗ $desc"; fi
 }
 
+# ── T0 套件自检 + 工具脚本语法闸前置(cl-072: 脚本自身语法错时无法自保) ──
+# 2026-09-09 13:3x 实测: bash 按行解析执行, 文件后半段语法错时前半段照跑,
+# 于是"套件跑完了"可能掩盖"文件已损坏"。所以先整文件 bash -n, 语法错直接 FATAL,
+# 不产出任何误导性的绿; 再前置工具脚本语法闸(编辑后未校验的脚本不该让套件看起来全绿)。
+if ! bash -n "$0" 2>/tmp/dsh-cog-tests-selfcheck.err; then
+  echo "[FATAL] 套件自身语法错误, 未执行任何测试:"
+  sed 's/^/    /' /tmp/dsh-cog-tests-selfcheck.err
+  python3 - "$DIR/claims-ledger.jsonl" <<'PYINNER'
+import json, sys, datetime
+ledger = sys.argv[1]
+now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat()
+rid = 'cl-test-selfcheck-' + datetime.datetime.now().strftime('%Y%m%d-%H%M')
+try:
+    rows = [json.loads(l) for l in open(ledger, encoding='utf8') if l.strip()]
+except Exception:
+    rows = []
+rows.append({'id': rid, 'ts': now,
+             'claim': '认知测试套件自身语法错误——无法自保, 本轮未执行任何断言',
+             'source': 'dsh-cog-tests.sh T0 自检', 'status': 'open',
+             'reviewBy': now[:10], 'reviewBasis': '修复语法后自动恢复',
+             'note': '修法: bash -n 整文件后再执行; 修复后重跑套件, 该告警由恢复逻辑关闭。'})
+with open(ledger, 'w', encoding='utf8') as f:
+    f.write(chr(10).join(json.dumps(x, ensure_ascii=False) for x in rows) + chr(10))
+PYINNER
+  exit 2
+fi
+if ! bash "$HOME/dsh-fork/dsh-script-lint.sh" >/tmp/dsh-cog-lint.out 2>&1; then
+  echo "[FATAL] 工具脚本语法闸未过, 未执行测试:"
+  tail -20 /tmp/dsh-cog-lint.out | sed 's/^/    /'
+  exit 2
+fi
+
 echo "=== 认知有效性测试 $(date '+%F %T') ==="
 
 # ── T1 机制驱动测试(非存在≠驱动, R8) ──────────────────────────
@@ -415,11 +447,17 @@ assert i < j, "goal 分支必须在 session 分支之前"
 t "会话锚持久化文件" bash -c "grep -q 'chain_anchors.json' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/src/store.ts'"
 # 21d. lib 已部署
 t "lib含链锚(已部署)" bash -c "grep -q 'chain_source' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
-# 21e. 运行时锚文件存在且非空(机制真跑过)
-t "运行时锚文件非空" python3 -c '
+# 21e. 链锚机制真跑过(cl-076: 原判据=锚文件非空, 是状态证据——合法清空陈旧锚后
+#      必然变红(2026-09-09 14:41 实测)。改成效果证据: 至少一条经验真的带了 chainId,
+#      以及锚文件本身可读(机制写得出这个文件)。
+t "链锚机制真跑过" python3 -c '
 import json, os
-d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/chain_anchors.json")))
-assert isinstance(d, dict) and len(d) > 0, "链锚文件为空"
+base = os.path.expanduser("~/.dsh/cognitive-pipeline")
+d = json.load(open(os.path.join(base, "chain_anchors.json")))
+assert isinstance(d, dict), "链锚文件不是对象"
+rows = [json.loads(l) for l in open(os.path.join(base, "experiences.jsonl"), encoding="utf8") if l.strip()]
+anchored = [r for r in rows if isinstance(r.get("chainId"), str) and r.get("chainId")]
+assert anchored, "无任何经验带 chainId——锚定机制没有效果证据"
 '
 # 21f. 最新任务经验带 chainId(自动锚定真生效, 非仅代码存在)
 t "最新经验已锚定目标" python3 -c '
@@ -1282,6 +1320,73 @@ stale = {s: g for s, g in anchors.items() if g in pool and pool[g] != "active"}
 assert not stale, "存在会被守卫清除的陈旧锚: %s" % stale
 '
 t "停机窗口脚本就位" bash -c "test -x '$HOME/dsh-fork/dsh-exp253-reanchor.sh' && bash -n '$HOME/dsh-fork/dsh-exp253-reanchor.sh'"
+
+# ── T51 编辑期语法闸(cl-072: 编辑动作与校验动作之间无强制绑定) ──
+echo "[T51] 编辑期语法闸(套件自检 + 工具脚本前置 + 编辑后立即校验helper)"
+t "套件开头有自检块" bash -c "grep -q '套件自身语法错误' '$HOME/dsh-fork/dsh-cog-tests.sh'"
+t "自检能抓出语法错" python3 -c '
+import subprocess, tempfile, shutil, os
+src = os.path.expanduser("~/dsh-fork/dsh-cog-tests.sh")
+good = subprocess.run(["bash", "-n", src], capture_output=True, text=True)
+assert good.returncode == 0, "原文件本身语法错"
+fd, bad = tempfile.mkstemp(suffix=".sh")
+os.close(fd)
+shutil.copy(src, bad)
+with open(bad, "a", encoding="utf8") as f:
+    f.write(chr(10) + "if then" + chr(10))
+r = subprocess.run(["bash", "-n", bad], capture_output=True, text=True)
+assert r.returncode != 0, "注入语法错后 bash -n 仍通过——自检无效"
+os.unlink(bad)
+'
+t "语法闸已前置到套件开头" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/dsh-cog-tests.sh"), encoding="utf8").read()
+i = s.index("dsh-script-lint.sh")
+j = s.index("=== 认知有效性测试")
+assert i < j, "语法闸不在测试执行之前"
+'
+t "编辑后立即校验helper就位" bash -c "test -x '$HOME/dsh-fork/dsh-edit-check.sh'"
+t "helper能抓出坏文件" python3 -c '
+import subprocess, tempfile, os
+fd, bad = tempfile.mkstemp(suffix=".sh"); os.close(fd)
+open(bad, "w", encoding="utf8").write("if then" + chr(10))
+r = subprocess.run([os.path.expanduser("~/dsh-fork/dsh-edit-check.sh"), bad], capture_output=True, text=True)
+os.unlink(bad)
+assert r.returncode != 0, "坏文件未被抓出"
+'
+t "helper放行好文件" bash -c "'$HOME/dsh-fork/dsh-edit-check.sh' '$HOME/dsh-fork/dsh-cog-tests.sh' | grep -q '全部通过'"
+
+# ── T52 存量采纳基线(cl-078: 无时间戳的采纳不该默默消失, 也不该永久挂"待观察") ──
+echo "[T52] 存量采纳基线(不可判定项单列, 不进推进率分母)"
+t "基线文件存在且结构正确" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/incubation-baseline.json")
+d = json.load(open(p, encoding="utf8"))
+assert d.get("ts") and isinstance(d.get("goals"), dict), "基线结构不对"
+for gid, v in d["goals"].items():
+    assert isinstance(v.get("undecidableAdoptions"), int) and v["undecidableAdoptions"] >= 0, gid
+'
+t "统计脚本支持不可判定列" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/dsh-incubation-stats.py"), encoding="utf8").read()
+for key in ("incubation-baseline.json", "undecidable", "adopted_counter"):
+    assert key in s, "缺 %s" % key
+assert "不可判定" in s, "缺表头/说明"
+'
+t "指标报告含不可判定列" bash -c "grep -q '不可判定' '$DIR/incubation-stats.md'"
+t "不可判定项=计数器与有据采纳的差额" python3 -c '
+import json, os
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+goals = [json.loads(l) for l in open(os.path.join(D, "dormant-goals.jsonl"), encoding="utf8") if l.strip()]
+log = [json.loads(l) for l in open(os.path.join(D, "incubation-log.jsonl"), encoding="utf8") if l.strip()]
+base = json.load(open(os.path.join(D, "incubation-baseline.json"), encoding="utf8")).get("goals", {})
+for g in goals:
+    gid = g["id"]
+    logged = len([a for a in log if a.get("goalId") == gid])
+    counter = g.get("adoptedCount") or 0
+    und = (base.get(gid) or {}).get("undecidableAdoptions", max(0, counter - logged))
+    assert und == max(0, counter - logged), "%s 不可判定数与差额不符: %s vs %s" % (gid, und, counter - logged)
+'
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──

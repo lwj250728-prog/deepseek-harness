@@ -6,8 +6,9 @@
 
   触发 = dormant-goals.jsonl 的 triggerCount（哨兵命中次数）
   采纳 = adoptedCount + incubation-log.jsonl（采纳时刻，插件落盘）
-  推进 = 采纳时刻之后 24h 内，goal-watch 的 changeCount 是否增加（结构性证据：
-         目标的 nextAction/notes 真的变了，而不是"回复里提到了关键词"）
+  推进 = 采纳后 24h 内外部产物锚增长（cl-069；见 advanced()）
+  不可判定 = 基线之前的存量采纳（adoptedCount 已计数但 incubation-log 无时间戳，
+             无法计算 24h 窗口）——单列出来，不混进推进率分母（cl-078）
 
 用法: python3 dsh-incubation-stats.py [--json]
 产物: ~/.dsh/cognitive-pipeline/incubation-stats.md（供世界模型引用）
@@ -77,6 +78,10 @@ with open(os.path.join(D, 'external-anchors.jsonl'), 'a', encoding='utf8') as f:
 
 goals = load_lines('dormant-goals.jsonl')
 adoptions = load_lines('incubation-log.jsonl')
+# cl-078: 存量采纳基线——基线建立前 adoptedCount 已计数但没有 incubation-log 时间戳的采纳,
+# 无法判定其 24h 窗口, 因此明确标为不可判定, 而不是默默从分母里消失或永久挂"待观察"。
+baseline = load_json('incubation-baseline.json')
+baseline_goals = baseline.get('goals', {}) if isinstance(baseline, dict) else {}
 watch = load_json('goal-watch.json')
 history = load_lines('goal-watch-history.jsonl')
 
@@ -151,14 +156,22 @@ for g in goals:
         verdicts.append(advanced(gid, at))
     advanced_n = sum(1 for v in verdicts if v is True)
     pending = sum(1 for v in verdicts if v is None) + (0 if verdicts else max(0, adopted - len(verdicts)))
+    # adopted 已经是"有据采纳"(带 incubation-log 时间戳); 计数器与它的差额=存量不可判定项。
+    # 分母=有据采纳, 不可判定项既不进分子也不进分母(它连时间都没有, 谈不上窗口)。
+    adopted_counter = g.get('adoptedCount') or 0
+    undecidable = int((baseline_goals.get(gid) or {}).get('undecidableAdoptions', 0))
+    if undecidable == 0:
+        undecidable = max(0, adopted_counter - adopted)
     rows.append({
         'goalId': gid,
         'triggers': triggers,
         'adopted': adopted,
+        'adopted_counter': adopted_counter,
+        'undecidable': undecidable,
         'advanced': advanced_n,
         'pending': pending,
         'adopt_rate': round(adopted / triggers * 100, 1) if triggers else 0.0,
-        'advance_rate': round(advanced_n / adopted * 100, 1) if adopted else 0.0,
+        'advance_rate': round(advanced_n / adopted * 100, 1) if adopted else None,
     })
 
 if '--json' in sys.argv:
@@ -169,13 +182,14 @@ else:
         '',
         f'生成时间：{NOW.strftime("%Y-%m-%d %H:%M")}',
         '',
-        '| 目标 | 触发 | 采纳 | 采纳率 | 推进 | 推进率 | 待观察 |',
-        '|---|---|---|---|---|---|---|',
+        '| 目标 | 触发 | 采纳 | 采纳率 | 不可判定 | 推进 | 推进率 | 待观察 |',
+        '|---|---|---|---|---|---|---|---|',
     ]
     for r in rows:
-        lines.append('| %s | %d | %d | %.1f%% | %d | %.1f%% | %d |' % (
+        rate = '—' if r['advance_rate'] is None else '%.1f%%' % r['advance_rate']
+        lines.append('| %s | %d | %d | %.1f%% | %d | %d | %s | %d |' % (
             r['goalId'], r['triggers'], r['adopted'], r['adopt_rate'],
-            r['advanced'], r['advance_rate'], r['pending']))
+            r['undecidable'], r['advanced'], rate, r['pending']))
     lines += [
         '',
         '判据说明：',
@@ -183,6 +197,7 @@ else:
         '- 采纳 = 结构性证据：回合内目标 nextAction/notes 真的变了（incubation-log.jsonl 记 evidence=pool-change；关键词仅在池不可读时兜底）',
         "- 推进 = 采纳后 24h 内**外部产物锚**任一增长（drafts 正文字数 / git 提交数 / 套件通过数）——记账动作改不动这三个值",
         '- 待观察 = 采纳未满 24h 或缺少监视记录',
+        '- 不可判定 = 计数器 adoptedCount 与有据采纳的差额：基线前的存量采纳无时间戳，24h 窗口无从计算；单列，既不进分子也不进分母（incubation-baseline.json 固定该差额）',
     ]
     text = '\n'.join(lines) + '\n'
     open(os.path.join(D, 'incubation-stats.md'), 'w', encoding='utf8').write(text)
