@@ -231,6 +231,15 @@ export function tokenize(text: string): string[] {
  * @param text - the text to segment.
  * @returns the element list (order preserved, duplicates kept for counting).
  */
+/** 虚词字集合(cl-083): 用于丢弃切分残渣与孤立虚字, 只作用于元素抽取, 不影响 tokenize。 */
+const CJK_STOP_CHARS = new Set([
+  '的', '了', '是', '在', '和', '与', '不', '为', '这', '那', '有', '个', '上', '下', '里', '中',
+  '等', '就', '都', '也', '还', '要', '能', '会', '可', '对', '把', '被', '给', '让', '从', '向',
+  '于', '而', '或', '及', '之', '其', '此', '该', '些', '么', '很', '太', '更', '最', '再', '又',
+  '只', '才', '已', '正', '将', '着', '过', '得', '地', '吗', '呢', '吧', '啊', '呀', '哦', '嗯',
+  '我', '你', '他', '她', '它', '们', '并', '且', '但', '却', '则', '所', '以', '如', '若', '因',
+])
+
 export function elements(text: string): string[] {
   const out: string[] = []
   let latin = ''
@@ -242,9 +251,18 @@ export function elements(text: string): string[] {
   }
   let cjkRun = ''
   const flushCjk = (): void => {
-    if (cjkRun.length === 1) out.push(cjkRun)
-    else if (cjkRun.length > 1) {
-      for (let i = 0; i < cjkRun.length - 1; i += 1) out.push(cjkRun.slice(i, i + 2))
+    if (cjkRun.length === 1) {
+      // cl-083: 单字仍保留——BM25 里单字有实打实的召回价值(实测全文单字 76% vs 词级 65%)。
+      // "关键词必须是词级" 的约束放在 deriveWordKeywords 里做, 不在这里砍掉 BM25 的特征。
+      out.push(cjkRun)
+    } else if (cjkRun.length > 1) {
+      for (let i = 0; i < cjkRun.length - 1; i += 1) {
+        const bigram = cjkRun.slice(i, i + 2)
+        // 两字皆为虚词的二元组是切分残渣(实测 '用不'/'不依'), 丢弃;
+        // 只要含一个实词字就保留, 避免误杀 '不在'/'上传' 这类真实词。
+        if (CJK_STOP_CHARS.has(bigram[0] as string) && CJK_STOP_CHARS.has(bigram[1] as string)) continue
+        out.push(bigram)
+      }
     }
     cjkRun = ''
   }

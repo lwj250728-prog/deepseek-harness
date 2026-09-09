@@ -851,6 +851,8 @@ export class CognitivePipelineService extends Service {
     const counts = new Map<string, number>()
     for (const element of elements(action)) {
       if ((documentFrequency.get(element) ?? 0) / documentCount > 0.5) continue
+      // cl-083: 关键词要词级——单字 CJK 是切分残渣(实测混进 '传'/'的'), ASCII 单词任意长度都算词。
+      if (element.length < 2 && !/[a-z0-9]/.test(element)) continue
       counts.set(element, (counts.get(element) ?? 0) + 1)
     }
     return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([element]) => element)
