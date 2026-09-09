@@ -2190,6 +2190,30 @@ s = open(os.path.expanduser("~/dsh-fork/dsh-citation-by-trigger.py"), encoding="
 assert "死亡通道" in s and "MIN_SETTLED" in s, "缺死亡通道判据"
 '
 
+# ── T78 换模 runbook(cl-094 的可执行子步: 阻塞项也要有"一条命令就能做"的路径) ──
+echo "[T78] 换模 runbook(步骤齐全/判据写死/回滚路径)"
+t "runbook 存在且含三步" python3 -c '
+import os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/model-switch-runbook.md")
+s = open(p, encoding="utf8").read()
+for key in ("dsh-freeze-wiki.sh", "dsh-weights-provenance.py", "rebuild_taxonomy"):
+    assert key in s, "缺步骤 %s" % key
+'
+t "判据与回滚写死" python3 -c '
+import os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/model-switch-runbook.md")
+s = open(p, encoding="utf8").read()
+assert "判据" in s and "回滚" in s, "缺判据/回滚"
+assert "不低于基线" in s or "不得下降" in s, "判据未量化"
+'
+t "runbook 引用的脚本都存在" python3 -c '
+import os, re
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/model-switch-runbook.md")
+s = open(p, encoding="utf8").read()
+for m in re.findall(r"dsh-[a-z-]+\.(?:sh|py)", s):
+    assert os.path.exists(os.path.expanduser("~/dsh-fork/" + m)), "runbook 引用了不存在的脚本: %s" % m
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
