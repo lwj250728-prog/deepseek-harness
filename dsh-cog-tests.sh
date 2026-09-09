@@ -2065,6 +2065,28 @@ assert isinstance(last.get("weights"), dict) and "lexical" in last["weights"], "
 assert last.get("ts"), "缺时间戳"
 '
 
+# ── T72 wiki 冻结快照(cl-086: 换模前须冻结知识层, 否则无法跨模型对照) ──
+echo "[T72] wiki 冻结(脚本/快照内容/元信息/已挂cron)"
+t "冻结脚本存在且可运行" bash -c "test -x '$HOME/dsh-fork/dsh-freeze-wiki.sh' && bash '$HOME/dsh-fork/dsh-freeze-wiki.sh' >/dev/null 2>&1"
+t "快照含知识层文件与元信息" python3 -c '
+import json, os, glob
+root = os.path.expanduser("~/.dsh/cognitive-pipeline/snapshots")
+snaps = sorted(glob.glob(os.path.join(root, "*")), key=os.path.getmtime)
+assert snaps, "无快照"
+latest = snaps[-1]
+for f in ("chains.json", "taxonomy.json", "channel_weights.json"):
+    assert os.path.exists(os.path.join(latest, f)), "快照缺 %s" % f
+meta = json.load(open(os.path.join(latest, "meta.json"), encoding="utf8"))
+assert meta.get("ts"), "元信息缺时间戳"
+'
+t "冻结已挂cron" bash -c "crontab -l 2>/dev/null | grep -q dsh-freeze-wiki"
+t "快照数量受裁剪控制(<=10)" python3 -c '
+import os, glob
+root = os.path.expanduser("~/.dsh/cognitive-pipeline/snapshots")
+n = len([d for d in glob.glob(os.path.join(root, "*")) if os.path.isdir(d)])
+assert n <= 10, "快照未裁剪: %d" % n
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
