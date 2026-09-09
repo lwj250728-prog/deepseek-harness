@@ -164,7 +164,20 @@ export function accumulateTriggerJumps(
   derived: ReadonlyMap<string, number>,
 ): void {
   const derivedTokens = new Set(derived.keys())
-  for (const exp of service.store.experiencesSnapshot()) {
+  // cl-098: 高频 token 没有判别力, 却最容易在共现统计里胜出(实测 jump 通道 67 条已结算、
+  // 引用率 0%, 触发的跳词是 '生成'/'没有'/'sh'/'bash' 这类到处都是的词)。先统计语料文档频率,
+  // 超过 MAX_JUMP_DF_RATIO 的 token 直接不作为跳词候选——与"单字噪声"同一条道理, 只是粒度到词。
+  const experiences = service.store.experiencesSnapshot().filter(exp => importanceOf(exp) > 0)
+  const documentFrequency = new Map<string, number>()
+  for (const exp of experiences) {
+    for (const token of new Set(jumpVocabulary(`${exp.sar.situation} ${exp.sar.action}`))) {
+      documentFrequency.set(token, (documentFrequency.get(token) ?? 0) + 1)
+    }
+  }
+  const total = experiences.length || 1
+  const tooCommon = (token: string): boolean =>
+    (documentFrequency.get(token) ?? 0) / total > MAX_JUMP_DF_RATIO
+  for (const exp of experiences) {
     const importance = importanceOf(exp)
     if (importance <= 0) continue
     const text = `${exp.sar.situation} ${exp.sar.action}`
@@ -179,6 +192,7 @@ export function accumulateTriggerJumps(
     for (const trigger of presentTriggers) {
       for (const token of tokens) {
         if (token === trigger || STOP_WORDS.has(token) || STATIC_TRIGGERS.has(token)) continue
+        if (tooCommon(token)) continue
         const byTrigger = accumulator.get(token) ?? new Map<string, JumpAccumulation>()
         const prior = byTrigger.get(trigger) ?? { evidenceCount: 0, importance: 0 }
         byTrigger.set(trigger, { evidenceCount: prior.evidenceCount + 1, importance: prior.importance + importance })
@@ -187,6 +201,9 @@ export function accumulateTriggerJumps(
     }
   }
 }
+
+/** 跳词候选的最大语料文档频率(cl-098): 超过这个比例的 token 到处都是, 共现无判别力。 */
+const MAX_JUMP_DF_RATIO = 0.25
 
 /** Whether one character is CJK. */
 function isCjkChar(char: string): boolean {

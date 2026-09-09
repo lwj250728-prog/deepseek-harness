@@ -2184,6 +2184,13 @@ t "三脚本各自可跑" bash -c "cd '$HOME/dsh-fork' && timeout 300 python3 ds
 echo "[T77] 注入通道引用率诊断(按触发源/死亡通道标记)"
 t "诊断脚本存在且可运行" bash -c "test -x '$HOME/dsh-fork/dsh-citation-by-trigger.py' && timeout 300 python3 '$HOME/dsh-fork/dsh-citation-by-trigger.py' | grep -q '总引用率'"
 t "按触发源拆分" bash -c "timeout 300 python3 '$HOME/dsh-fork/dsh-citation-by-trigger.py' | grep -q 'static' && timeout 300 python3 '$HOME/dsh-fork/dsh-citation-by-trigger.py' | grep -q 'jump'"
+t "跳词候选有语料频率门(cl-098)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/triggers.ts"), encoding="utf8").read()
+assert "MAX_JUMP_DF_RATIO" in s, "缺频率门"
+assert "tooCommon(token)" in s, "频率门未接入候选过滤"
+'
+t "产物含频率门(已部署)" bash -c "grep -q 'tooCommon' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
 t "死亡通道会被标记" python3 -c '
 import os
 s = open(os.path.expanduser("~/dsh-fork/dsh-citation-by-trigger.py"), encoding="utf8").read()
