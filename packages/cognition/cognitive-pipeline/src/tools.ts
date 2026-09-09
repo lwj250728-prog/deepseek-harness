@@ -8,6 +8,9 @@
  * @module @deepseek-ai/dsh-cognitive-pipeline/tools
  */
 
+import { readFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -39,6 +42,35 @@ interface ChainAnchorResolution {
   readonly source: 'explicit' | 'goal' | 'session' | 'none'
 }
 
+/** Dormant goal pool file (quiet-driver/dormant-goal share this path). */
+const GOAL_POOL_PATH = '~/.dsh/cognitive-pipeline/dormant-goals.jsonl'
+
+/** Expand a leading ~ to the home directory. */
+function expandHome(path: string): string {
+  return path.startsWith('~') ? join(homedir(), path.slice(1)) : path
+}
+
+/**
+ * Read one goal's status from the dormant pool (cl-075). Fail-open: an absent
+ * goal or unreadable pool returns undefined, and callers then keep the anchor
+ * unchanged — the guard must never silently drop a legitimate chain.
+ * @param goalId - the goal id to look up.
+ * @returns the goal status, or undefined when unknown.
+ */
+async function poolGoalStatus(goalId: string): Promise<string | undefined> {
+  try {
+    const raw = await readFile(expandHome(GOAL_POOL_PATH), 'utf8')
+    for (const line of raw.split('\n')) {
+      if (line.trim() === '') continue
+      const goal = JSON.parse(line) as { id?: string; status?: string }
+      if (goal.id === goalId) return goal.status
+    }
+  } catch {
+    return undefined
+  }
+  return undefined
+}
+
 /**
  * Resolve the chain anchor for one experience write (cl-031). The offline
  * replay experiment (experiment-replay-offline-20260908.md) found semantic
@@ -56,9 +88,9 @@ interface ChainAnchorResolution {
  * @param explicit - the caller-supplied chain_id, if any.
  * @returns the chain id to tag plus which rule produced it.
  */
-function resolveChainAnchor(
+async function resolveChainAnchor(
   ctx: Context, service: CognitivePipelineService, exec: ToolRunContext, explicit: string | undefined,
-): ChainAnchorResolution {
+): Promise<ChainAnchorResolution> {
   const sessionId = exec.agent === undefined ? undefined : exec.agent.session.id
   if (explicit !== undefined) {
     const trimmed = explicit.trim()
@@ -72,7 +104,16 @@ function resolveChainAnchor(
   const goalId = view === undefined || view.goal.phase === 'complete' ? undefined : view.goal.id
   if (goalId !== undefined && goalId !== '') return { chainId: goalId, source: 'goal' }
   const anchored = sessionId === undefined ? undefined : service.store.getChainAnchor(sessionId)
-  return anchored === undefined ? { chainId: undefined, source: 'none' } : { chainId: anchored, source: 'session' }
+  if (anchored === undefined) return { chainId: undefined, source: 'none' }
+  // cl-075: 粘性锚指向的目标若已暂停/休眠, 就不能再吸收新经验——否则暂停期间写的
+  // 经验仍被塞进那条链(实测 exp_253 被锚到已 paused 的 goal-novel-60w)。失效即清除,
+  // 让下一次显式声明或活目标接管。
+  const status = await poolGoalStatus(anchored)
+  if (status !== undefined && status !== 'active') {
+    if (sessionId !== undefined) service.store.setChainAnchor(sessionId, null)
+    return { chainId: undefined, source: 'none' }
+  }
+  return { chainId: anchored, source: 'session' }
 }
 
 /** Register the fifteen pipeline tools.
@@ -129,7 +170,7 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
       render: renderJson,
     },
     async execute(args, exec) {
-      const anchor = resolveChainAnchor(ctx, service, exec, args.chain_id)
+      const anchor = await resolveChainAnchor(ctx, service, exec, args.chain_id)
       const { expId, sar } = await service.remember({
         rawText: args.raw_text,
         ...anchor.chainId === undefined ? {} : { chainId: anchor.chainId },
@@ -1104,7 +1145,7 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
       // cl-074: 偏离元经验也带目标链锚——此前无锚, 既成链上孤儿, 又让
       // "最近任务经验已锚定目标" 判据在每次自审后变红。显式 chain_id 不传,
       // 仅复用 活目标 > 会话粘性锚 的解析结果(不改写锚)。
-      const claimAnchor = resolveChainAnchor(ctx, service, exec, undefined)
+      const claimAnchor = await resolveChainAnchor(ctx, service, exec, undefined)
       const audit = await service.auditClaim({
         claim: args.claim,
         situation: args.situation,

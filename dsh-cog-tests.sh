@@ -1248,6 +1248,41 @@ picked = [g["id"] for g in rows if actionable(g)]
 assert "goal-novel-60w" not in picked, "暂停的小说目标仍会被行动帧选中"
 '
 
+# ── T50 陈旧链锚守卫(2026-09-09 14:4x 固化——cl-075: 暂停目标仍吸收新经验, exp_253 被锚到已 paused 的目标) ──
+echo "[T50] 陈旧链锚守卫(粘性锚指向非 active 目标 → 清除, 失败开放)"
+t "resolveChainAnchor含池状态校验" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/tools.ts")).read()
+assert "poolGoalStatus" in s, "缺池状态读取"
+assert "setChainAnchor(sessionId, null)" in s, "缺清除动作"
+i = s.index("const status = await poolGoalStatus(anchored)")
+seg = s[i:i+400]
+assert "!== " in seg and "active" in seg, "守卫判据未比对 active"
+'
+t "链锚解析已改异步(调用点带await)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/tools.ts")).read()
+assert s.count("await resolveChainAnchor(") == 2, "调用点未全部 await: %d" % s.count("await resolveChainAnchor(")
+'
+t "产物含池状态守卫(已部署)" bash -c "grep -q poolGoalStatus '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
+t "守卫规则对真实数据生效" python3 -c '
+import json, os
+base = os.path.expanduser("~/.dsh/cognitive-pipeline")
+pool = {}
+for l in open(os.path.join(base, "dormant-goals.jsonl"), encoding="utf8"):
+    if l.strip():
+        g = json.loads(l)
+        if g.get("id"): pool[g["id"]] = g.get("status")
+try:
+    anchors = json.load(open(os.path.join(base, "chain_anchors.json"), encoding="utf8"))
+except Exception:
+    anchors = {}
+# 复刻守卫逻辑: 锚指向的目标存在且非 active → 应被清除
+stale = {s: g for s, g in anchors.items() if g in pool and pool[g] != "active"}
+assert not stale, "存在会被守卫清除的陈旧锚: %s" % stale
+'
+t "停机窗口脚本就位" bash -c "test -x '$HOME/dsh-fork/dsh-exp253-reanchor.sh' && bash -n '$HOME/dsh-fork/dsh-exp253-reanchor.sh'"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
