@@ -1054,6 +1054,24 @@ p = os.path.expanduser("~/.dsh/cognitive-pipeline/goal-watch-history.jsonl")
 assert os.path.exists(p) and os.path.getsize(p) > 0, "goal-watch 变更历史为空(推进率无从判定)"
 '
 
+# ── T43 孵化指标有效性(2026-09-09 12:1x 固化——cl-063: 注入块自激 + 关键词采纳必中) ──
+echo "[T43] 孵化指标有效性(自激抑制 + 结构性采纳证据)"
+t "src抑制自激" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/src/index.ts")).read()
+assert "source?.plugin !== name" in s, "未排除本插件注入块(自激)"
+'
+t "lib含结构性采纳(已部署)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/lib/index.js")).read()
+assert "pool-change" in s and "poolSnapshot" in s, "lib 未部署结构性采纳"
+'
+t "采纳须结构性证据" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/src/index.ts")).read()
+assert "structural" in s and "keywordFallback" in s, "采纳判据未改为结构性+兜底"
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。

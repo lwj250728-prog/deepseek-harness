@@ -82,6 +82,8 @@ interface PoolGoal {
   title?: string
   kernel?: string
   focus?: string
+  nextAction?: string
+  notes?: string[]
   repVector?: number[]
   kernelVector?: number[]
   focusVector?: number[]
@@ -138,8 +140,24 @@ function textOf(message: UserMessage): string {
   return ''
 }
 
+/** 池状态快照: 采纳判据的结构性证据(nextAction + notes 条数)。 */
+function poolSnapshot(goal: PoolGoal): string {
+  return `${goal.nextAction ?? ''}\u0000${(goal.notes ?? []).length}`
+}
+
 function situationText(messages: readonly UserMessage[]): string {
-  return messages.map(textOf).filter(Boolean).slice(-4).join(' ')
+  // 2026-09-09 12:0x 自激抑制(cl-063): 本插件注入的【目标孵化提醒】块会被下一轮 pre-step
+  // 的 situationText 读到, 抬高与 repVector 的余弦 → 哨兵自己触发自己(实测讨论哨兵时
+  // trigger 3→6)。排除 source.plugin === 本插件名的消息。
+  return messages
+    .filter((message) => {
+      const source = (message as unknown as { source?: { plugin?: string } }).source
+      return source?.plugin !== name
+    })
+    .map(textOf)
+    .filter(Boolean)
+    .slice(-4)
+    .join(' ')
 }
 
 /**
@@ -154,7 +172,9 @@ export function apply(ctx: Context, config: Config): void {
   let poolError: string | undefined
   const lastTrigger = new Map<string, number>()
   /** Goals triggered during the current turn per session (adoption candidates). */
-  const pending = new Map<string, Set<string>>()
+  // goalId → 触发时的池状态快照(nextAction + notes 条数)。采纳判据用它做**结构性**判定:
+// 采纳 = 本轮之后目标的 nextAction/notes 真的变了, 而非"回复里出现了关键词"(cl-063)。
+  const pending = new Map<string, Map<string, string>>()
   const failPath = join(dirname(poolPath), 'failure-domains.jsonl')
   const failSink = config.failSink
   const failThreshold = config.failThreshold
@@ -302,8 +322,8 @@ export function apply(ctx: Context, config: Config): void {
       source: { kind: 'plugin', plugin: name, form: 'notice', summary },
     })
     // Register triggered goals for this turn's adoption check; count triggers.
-    const set = pending.get(agent.session.id) ?? new Set<string>()
-    for (const h of hits) set.add(h.goal.id)
+    const set = pending.get(agent.session.id) ?? new Map<string, string>()
+    for (const h of hits) set.set(h.goal.id, poolSnapshot(h.goal))
     pending.set(agent.session.id, set)
     for (const h of hits) bump(h.goal.id, false)
     return { kind: 'enter', messages: [...decision.messages, block] }
@@ -360,18 +380,31 @@ export function apply(ctx: Context, config: Config): void {
     const keywords = config.adoptKeywords ?? {}
     // 2026-09-09 12:0x 行动帧: 采纳时刻落盘(incubation-log.jsonl)——推进率统计需要
     // "采纳发生的时间", 光有 adoptedCount 无法与 goal-watch 的变更时间对齐。
+    // cl-063: 采纳判据从"回复含关键词"(注入块自带目标标题 → 必然命中)改为**结构性证据**
+    // (目标 nextAction/notes 真的变了); 关键词仅在池不可读时兜底。
     const incubationLog = join(dirname(poolPath), 'incubation-log.jsonl')
-    for (const goalId of triggered) {
-      const words = keywords[goalId] ?? []
-      const adopted = words.length > 0 && words.some(w => assistantText.includes(w))
-      if (!adopted) continue
-      bump(goalId, true)
-      void appendFile(incubationLog, JSON.stringify({
-        ts: new Date().toISOString(),
-        goalId,
-        sessionId: session.id,
-        matchedKeyword: words.find(w => assistantText.includes(w)) ?? null,
-      }) + '\n').catch(() => undefined)
-    }
+    void (async () => {
+      await reload()
+      const byId = new Map(pool.map(g => [g.id, g]))
+      for (const [goalId, before] of triggered) {
+        const now = byId.get(goalId)
+        const after = now === undefined ? undefined : poolSnapshot(now)
+        const words = keywords[goalId] ?? []
+        const keywordFallback = after === undefined
+          && words.length > 0
+          && words.some(w => assistantText.includes(w))
+        const structural = after !== undefined && after !== before
+        if (!structural && !keywordFallback) continue
+        bump(goalId, true)
+        void appendFile(incubationLog, JSON.stringify({
+          ts: new Date().toISOString(),
+          goalId,
+          sessionId: session.id,
+          evidence: structural ? 'pool-change' : 'keyword-fallback',
+          before,
+          after: after ?? null,
+        }) + '\n').catch(() => undefined)
+      }
+    })().catch(() => undefined)
   }, 'dormant-goal adoption')
 }
