@@ -1125,6 +1125,34 @@ s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/li
 assert "refineRelativeGap" in s, "lib 未部署"
 '
 
+# ── T46 推进判据用外部产物锚(2026-09-09 13:2x 固化——cl-069: 记账动作曾被计成推进) ──
+echo "[T46] 推进判据=外部产物锚(小说字数/git 提交数/套件通过数; 记账动作改不动)"
+t "外部锚采集在脚本里" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/dsh-incubation-stats.py")).read()
+for key in ("draftsChars", "gitCommits", "suitePasses"):
+    assert key in s, "缺外部锚 %s" % key
+'
+t "外部锚账本在积累" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/external-anchors.jsonl")
+rows = [json.loads(l) for l in open(p) if l.strip()]
+assert rows, "外部锚账本为空"
+last = rows[-1]
+for key in ("draftsChars", "gitCommits", "suitePasses"):
+    assert key in last, "快照缺 %s" % key
+assert last["draftsChars"] > 0, "小说字数为 0, 锚不可用"
+'
+# 判据: advanced() 的**代码**不得再读 changeCount(注释里提及历史不算)
+t "推进判据不再读changeCount" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/dsh-incubation-stats.py")).read()
+seg = s[s.index("def advanced("):s.index("rows = []")]
+# 旧实现读 watch[...].get("changeCount", 0); 新实现只读外部锚
+assert "changeCount\", 0" not in seg.replace(chr(39), chr(34)), "推进判据仍读 changeCount"
+assert "draftsChars" in seg and "gitCommits" in seg and "suitePasses" in seg, "推进判据未用外部锚"
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。

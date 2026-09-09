@@ -45,6 +45,36 @@ def load_json(name):
         return {}
 
 
+def external_anchors():
+    """外部产物锚(cl-069): 这三个值只会因为真实产出而增长——记账动作改不动它们。"""
+    import glob, re, subprocess
+    # 1) 小说正文字数
+    drafts = 0
+    for path in sorted(glob.glob(os.path.expanduser('~/dsh-workshop/novels/qizhongjiyi/drafts/00*.md'))):
+        text = re.sub(r'^# .*', '', open(path, encoding='utf8').read(), flags=re.M)
+        drafts += len(re.sub(r'\s', '', text))
+    # 2) ~/.dsh 提交数
+    try:
+        commits = int(subprocess.run(['git', '-C', os.path.expanduser('~/.dsh'), 'rev-list', '--count', 'HEAD'],
+                                     capture_output=True, text=True, timeout=30).stdout.strip() or 0)
+    except Exception:
+        commits = 0
+    # 3) 最近一次套件通过数(读 cron 日志; 手动运行不写日志 → 可能滞后)
+    passes = 0
+    log = os.path.join(D, '.cog-tests.log')
+    if os.path.exists(log):
+        for line in reversed(open(log, encoding='utf8', errors='ignore').read().splitlines()):
+            m = re.search(r'结果: (\d+) 通过', line)
+            if m:
+                passes = int(m.group(1)); break
+    return {'draftsChars': drafts, 'gitCommits': commits, 'suitePasses': passes}
+
+
+anchors = external_anchors()
+anchor_history = load_lines('external-anchors.jsonl')
+with open(os.path.join(D, 'external-anchors.jsonl'), 'a', encoding='utf8') as f:
+    f.write(json.dumps({'ts': NOW.isoformat(), **anchors}, ensure_ascii=False) + '\n')
+
 goals = load_lines('dormant-goals.jsonl')
 adoptions = load_lines('incubation-log.jsonl')
 watch = load_json('goal-watch.json')
@@ -75,39 +105,35 @@ def parse(ts):
 
 
 def advanced(goal_id, adopted_at):
-    """采纳后 24h 内 changeCount 是否**增加**（比较数值, 不是"之后有快照就算"）。
+    """采纳后 24h 内**外部产物**是否增长(cl-069)。
 
-    2026-09-09 12:2x 修正: 首版只要采纳后存在快照就判 True——那是"有记录"不是"有推进",
-    与今天修过的 cl-063 同族(判据比证据宽松)。
+    判据从 goal-watch.changeCount 换成三个外部锚: 小说正文字数 / git 提交数 / 套件通过数。
+    理由: changeCount 会把"改写 nextAction 的记账动作"计成推进(实测首次'推进'即此类),
+    而这三个值只会因真实产出增长。
     """
-    w = watch.get(goal_id)
-    if w is None:
-        return None  # 无监视记录 → 无法判定
-    now_count = w.get('changeCount', 0)
-    # 采纳前的最近一次快照(或目标创建时的 0)
-    before_count = None
-    for h in history:
-        if h.get('goalId') != goal_id:
-            continue
-        hts = parse(h.get('ts'))
-        if hts is not None and hts <= adopted_at:
-            before_count = h.get('changeCount', 0)
-    if before_count is None:
-        before_count = 0
-    # 采纳后 24h 内是否观测到增量
-    for h in history:
-        if h.get('goalId') != goal_id:
-            continue
-        hts = parse(h.get('ts'))
-        if hts is None or hts <= adopted_at:
-            continue
-        if hts - adopted_at > datetime.timedelta(hours=24):
-            continue
-        if h.get('changeCount', 0) > before_count:
+    def value_at(field):
+        before = None
+        for h in anchor_history:
+            hts = parse(h.get('ts'))
+            if hts is not None and hts <= adopted_at:
+                before = h.get(field, 0)
+        if before is None:
+            before = 0
+        best = before
+        for h in anchor_history:
+            hts = parse(h.get('ts'))
+            if hts is None or hts <= adopted_at:
+                continue
+            if hts - adopted_at > datetime.timedelta(hours=24):
+                continue
+            best = max(best, h.get(field, 0))
+        # 当前值也算一次观测(脚本刚写下的快照就在 anchor_history 里)
+        best = max(best, anchors.get(field, 0) if field in anchors else best)
+        return before, best
+    for field in ('draftsChars', 'gitCommits', 'suitePasses'):
+        before, after = value_at(field)
+        if after > before:
             return True
-    last = parse(w.get('lastChanged'))
-    if last is not None and last > adopted_at and now_count > before_count:
-        return (last - adopted_at) <= datetime.timedelta(hours=24)
     return False
 
 
@@ -155,7 +181,7 @@ else:
         '判据说明：',
         '- 触发 = 哨兵 pre-step 命中（dormant-goals.jsonl.triggerCount）',
         '- 采纳 = 结构性证据：回合内目标 nextAction/notes 真的变了（incubation-log.jsonl 记 evidence=pool-change；关键词仅在池不可读时兜底）',
-        '- 推进 = 采纳后 24h 内 goal-watch.changeCount **数值增加**（非'之后有快照'）',
+        "- 推进 = 采纳后 24h 内**外部产物锚**任一增长（drafts 正文字数 / git 提交数 / 套件通过数）——记账动作改不动这三个值",
         '- 待观察 = 采纳未满 24h 或缺少监视记录',
     ]
     text = '\n'.join(lines) + '\n'
