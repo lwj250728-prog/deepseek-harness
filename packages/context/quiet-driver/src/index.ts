@@ -1169,9 +1169,14 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
   // (output 恒为陈旧文本)的全部根因。这里补齐同一契约: 从会话日志的最后一个 request/header
   // 取 provider/model, 既作为 agentOptions 种子, 也作为选择监听器的回退值。
   const resolveStoredModel = async (): Promise<{ provider: string; model: string } | undefined> => {
+    // request/header 事件的形状是 data.header.config(实测), 不是 data.config——
+    // 首版取错路径导致 resolveStoredModel 恒返回 undefined(心跳 model=None)。
     const persistence = ctx.get('sessionPersistence') as {
       inspect(id: SessionId): Promise<{
-        events: readonly { type?: string; data?: { config?: { provider?: string; model?: string } } }[]
+        events: readonly {
+          type?: string
+          data?: { config?: { provider?: string; model?: string }; header?: { config?: { provider?: string; model?: string } } }
+        }[]
       }>
     } | undefined
     if (persistence === undefined) return undefined
@@ -1180,7 +1185,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       for (let index = inspected.events.length - 1; index >= 0; index -= 1) {
         const event = inspected.events[index]
         if (event?.type !== 'request/header') continue
-        const config = event.data?.config
+        const config = event.data?.header?.config ?? event.data?.config
         if (typeof config?.provider === 'string' && typeof config?.model === 'string') {
           return { provider: config.provider, model: config.model }
         }

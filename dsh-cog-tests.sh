@@ -1999,6 +1999,20 @@ s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.
 assert "resolveStoredModel" in s, "缺模型解析"
 assert "agentOptions: storedModel" in s, "未把模型作为 agentOptions 种子"
 assert "request/header" in s, "未从会话日志取 request/header"
+assert "event.data?.header?.config" in s, "取错了事件路径(data.header.config, 实测首版取 data.config 恒 undefined)"
+'
+t "条件性见证: 唤醒心跳带 model(强制)" python3 -c '
+import json, os
+hb = os.path.expanduser("~/.dsh/cognitive-pipeline/quiet-driver-heartbeat.jsonl")
+lib = os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/lib/index.js")
+if not os.path.exists(hb):
+    raise SystemExit(0)
+rows = [json.loads(l) for l in open(hb, encoding="utf8") if l.strip()]
+cut = os.path.getmtime(lib) * 1000
+recent = [r for r in rows if (r.get("ts") or 0) > cut and r.get("reason") == "agent-resumed"]
+if not recent:
+    raise SystemExit(0)  # 尚未发生唤醒
+assert any(r.get("model") for r in recent), "唤醒心跳 model 为空(resolveStoredModel 未取到模型)"
 '
 t "唤醒装模型选择监听器" python3 -c '
 import os
