@@ -459,13 +459,21 @@ rows = [json.loads(l) for l in open(os.path.join(base, "experiences.jsonl"), enc
 anchored = [r for r in rows if isinstance(r.get("chainId"), str) and r.get("chainId")]
 assert anchored, "无任何经验带 chainId——锚定机制没有效果证据"
 '
-# 21f. 最新任务经验带 chainId(自动锚定真生效, 非仅代码存在)
-t "最新经验已锚定目标" python3 -c '
+# 21f. 锚定证据=每个已声明锚都有经验继承(tp-057/cl-085: 原判据"最新一条必须有锚"会因
+#      旁路会话合法无锚而长期变红, 掩盖真正的新失败; 且它测的是"最新"这个偶然位置, 不是机制)
+t "已声明锚均有经验继承" python3 -c '
 import json, os
-rows = [json.loads(l) for l in open(os.path.expanduser("~/.dsh/cognitive-pipeline/experiences.jsonl")) if l.strip()]
-newest = max(rows, key=lambda r: r.get("timestamp") or 0)
-cid = newest.get("chainId")
-assert isinstance(cid, str) and cid != "", "最新经验未锚定: %s" % newest.get("expId")
+base = os.path.expanduser("~/.dsh/cognitive-pipeline")
+try:
+    anchors = json.load(open(os.path.join(base, "chain_anchors.json"), encoding="utf8"))
+except Exception:
+    anchors = {}
+if not isinstance(anchors, dict) or not anchors:
+    raise SystemExit(0)  # 无声明锚时不适用
+rows = [json.loads(l) for l in open(os.path.join(base, "experiences.jsonl"), encoding="utf8") if l.strip()]
+have = {r.get("chainId") for r in rows if r.get("chainId")}
+missing = [gid for gid in set(anchors.values()) if gid not in have]
+assert not missing, "已声明锚无任何经验继承(锚定写入可能失效): %s" % missing
 '
 # 21g. 帧经验不参与锚定(帧层保持无 chainId, 防污染链)
 t "帧经验不带链锚" python3 -c '
@@ -1850,6 +1858,38 @@ new = [r for r in rows if (r.get("timestamp") or 0) > cut]
 bad = [r["predictionId"] for r in new
        if r.get("promotedExpId") and r.get("promotedExpId") == r.get("originalTopExpId")]
 assert not bad, "cl-087 未生效: 构建后仍有 noop 提升 %s" % bad[:3]
+'
+
+# ── T65 中文分词质量(tp-056/cl-083 残留: 停用字二元组过滤 + 关键词层限词级) ──
+echo "[T65] 中文分词质量(元素层停用字二元组 / 关键词层单字 / 部署)"
+t "elements 丢弃两字皆虚词的二元组" bash -c "node -e \"
+const m = require('/home/ubuntu/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js');
+const out = m.elements('的进了在不');
+const bad = out.filter(x => x.length === 2 && [...x].every(c => '的了是在不' .includes(c)));
+if (bad.length) { console.error('仍有停用字二元组', bad); process.exit(1); }
+\""
+# 只看构建之后写入的经验(效果证据): 修复前的历史行保留单字是已知事实, 不该让断言长期红。
+t "构建后新经验不落单字CJK关键词" python3 -c '
+import json, os
+lib = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")
+cut = os.path.getmtime(lib) * 1000
+rows = [json.loads(l) for l in open(os.path.expanduser("~/.dsh/cognitive-pipeline/experiences.jsonl"), encoding="utf8") if l.strip()]
+new = [r for r in rows if (r.get("timestamp") or 0) > cut]
+bad = []
+for r in new:
+    kw = (r.get("sar") or {}).get("actionKeywords") or []
+    if any(len(k) == 1 and not k.isascii() for k in kw):
+        bad.append(r.get("expId"))
+assert not bad, "构建后仍有单字 CJK 关键词: %s" % bad[:3]
+'
+t "分词修法已部署(行为见证)" bash -c "node -e \"
+const m = require('/home/ubuntu/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js');
+if (m.elements('在不').length !== 0) { console.error('两字皆虚词未被过滤'); process.exit(1); }
+\""
+t "关键词层过滤在源码中" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts"), encoding="utf8").read()
+assert "cl-083" in s and "element.length < 2" in s, "关键词层未限词级"
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
