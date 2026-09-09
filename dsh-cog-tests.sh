@@ -2165,6 +2165,21 @@ s = open(os.path.expanduser("~/dsh-fork/dsh-capacity-scan.py"), encoding="utf8")
 assert "loss > 5" in s and "需重标定" in s, "判读阈值未写死"
 '
 
+# ── T76 实验脚本定期重跑(tp-061: 挂了 cron 却没断言 → 路径写错/改名即静默失效) ──
+echo "[T76] 检索实验定期重跑(条目/路径/脚本存在)"
+t "cron 含三项实验重跑条目" bash -c "crontab -l 2>/dev/null | grep -q 'retrieval-scans.log' && crontab -l 2>/dev/null | grep -q dsh-injection-bound.py"
+t "条目覆盖三脚本且路径有效" python3 -c '
+import os, subprocess
+out = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
+line = [l for l in out.splitlines() if "retrieval-scans.log" in l]
+assert line, "无重跑条目"
+l = line[0]
+for s in ("dsh-injection-bound.py", "dsh-learned-sparse.py", "dsh-capacity-scan.py"):
+    assert s in l, "条目缺 %s" % s
+    assert os.path.exists(os.path.expanduser("~/dsh-fork/" + s)), "脚本不存在: %s" % s
+'
+t "三脚本各自可跑" bash -c "cd '$HOME/dsh-fork' && timeout 300 python3 dsh-injection-bound.py >/dev/null && timeout 300 python3 dsh-learned-sparse.py >/dev/null && timeout 300 python3 dsh-capacity-scan.py >/dev/null"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
