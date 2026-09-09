@@ -2155,6 +2155,16 @@ else:
     assert "值得进下一步" in out, "有增益却未判可进"
 '
 
+# ── T75 容量敏感性扫描(cl-097: 参数是小库上标的, 库长大还成立吗) ──
+echo "[T75] 容量敏感性扫描(固定目标集口径/只增干扰/判读写死)"
+t "扫描脚本存在且可运行" bash -c "test -x '$HOME/dsh-fork/dsh-capacity-scan.py' && timeout 600 python3 '$HOME/dsh-fork/dsh-capacity-scan.py' | grep -q '固定目标集口径'"
+t "只增干扰(隔离库规模效应)" bash -c "timeout 600 python3 '$HOME/dsh-fork/dsh-capacity-scan.py' | grep -q '只增干扰'"
+t "判读阈值写死(>5pp 即需重标定)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/dsh-capacity-scan.py"), encoding="utf8").read()
+assert "loss > 5" in s and "需重标定" in s, "判读阈值未写死"
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
