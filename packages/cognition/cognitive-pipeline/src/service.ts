@@ -89,6 +89,7 @@ import {
   childChainIdsOf,
 } from './cognition-objects.ts'
 import { isTaskRestatement } from './task-restatement.ts'
+import { isSelfFrameExperience } from './self-frame.ts'
 import type { CognitionObjectKind } from './cognition-objects.ts'
 
 /** Meta-experience deduplication: skip recording a routing-failure when an
@@ -1141,6 +1142,10 @@ export class CognitivePipelineService extends Service {
     const ctx = result.taxonomyContext
     if (result.isNovel || ctx.coverage !== 'covered' || ctx.cluster === null) return
     if (ctx.margin >= this.resolved.hot.retrievalFailureMargin) return
+    // cl-102: 帧回合的查询本身不是可复用教训——把帧文本当 situation 存成元经验,
+    // 等于把"自主回合自述"灌回经验库, 再由检索注入回后续帧(自我回声)。实测 19 条
+    // 帧生经验全部由此路径产生(exp_289/290/291/293/295/296 …)。
+    if (isSelfFrameExperience({ sar: { situation: input.situation } })) return
     const queryVector = actionVector(input.action, [])
     const alreadyRecorded = this.store.experiencesSnapshot().some(exp =>
       exp.meta === true && cosine(queryVector, exp.actionVector) >= META_DEDUP_COSINE)
@@ -1212,6 +1217,9 @@ export class CognitivePipelineService extends Service {
     // later injection for the same task (the exp_155/168/173 lesson). The
     // prompt rule is advisory; this check is the enforcement.
     if (isTaskRestatement({ sar: decision.sar })) return null
+    // cl-102 纵深防御: 帧生记录(自主回合自述/检索路由歧义)不得入累计门——
+    // cl-100 已让帧回合不累计, 这里挡住"真实用户回合引用了帧文本"的漏网。
+    if (isSelfFrameExperience({ sar: decision.sar })) return null
     const expId = this.store.nextExpId()
     const sar: SarTriplet = {
       situation: decision.sar.situation,

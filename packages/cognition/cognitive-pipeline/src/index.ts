@@ -51,6 +51,9 @@ export type { ReviewableExperience, ReviewableStrategy, ReviewScheduleOptions } 
 /** Task-restatement detection, shared by the accumulation gate (reject new
  * records) and the injection retrieval (skip existing ones). */
 export { isTaskRestatement } from './task-restatement.ts'
+/** Self-frame detection (cl-102): frame-born records never re-enter a frame's
+ * context — the same two-sided wiring as the task-restatement gate. */
+export { isSelfFrameExperience } from './self-frame.ts'
 /** Template-7 retrieval refinement, reused by consumers (cognitive-inject)
  * as the pre-injection veto gate. */
 export { refineRetrieval, refineRetrievalFallback } from './llm.ts'

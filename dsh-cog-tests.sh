@@ -2421,6 +2421,29 @@ if s is None:
 assert s >= 1.0, "有证据的 LLM 变体存活率 %.0f%% <100%%: 重建把已证明有用的关联换掉了" % (s * 100)
 '
 
+# ── T84 帧生经验回流抑制(cl-102: 源头断流 + 注入侧断回注) ──
+echo "[T84] 帧生经验回流抑制(双侧接线 / 源头断流 / 注入侧断回注)"
+t "cl-102 双侧接线已部署(累计门 + 歧义元经验 + 检索过滤)" bash -c "
+grep -q 'isSelfFrameExperience' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js' &&
+grep -q 'isSelfFrameExperience' '$HOME/dsh-fork/packages/context/cognitive-inject/lib/index.js' &&
+test \$(grep -c 'isSelfFrameExperience({ sar' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js') -ge 2
+"
+t "源头断流: 构建后新增帧生经验 = 0" python3 -c '
+import json, os
+m = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/injection-noise.json"), encoding="utf8"))
+n = m.get("frameBornExperiencesSinceBuild")
+assert isinstance(n, int), "指标缺 frameBornExperiencesSinceBuild"
+assert n == 0, "构建后仍新增 %d 条帧生经验(前 5: %s)" % (n, m.get("frameBornExperiencesSinceBuildIds"))
+'
+t "注入侧断回注: 构建后注入含帧生经验 = 0" python3 -c '
+import json, os
+m = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/injection-noise.json"), encoding="utf8"))
+n = m.get("frameBornSinceBuild", 0)
+if m.get("injectionsSinceBuild", 0) == 0:
+    print("构建后尚无新注入, 空过"); raise SystemExit(0)
+assert n == 0, "构建后 %d 条注入仍含帧生经验" % n
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──

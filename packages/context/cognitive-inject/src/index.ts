@@ -21,6 +21,7 @@ import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import {
   actionVector,
   cosine,
+  isSelfFrameExperience,
   isTaskRestatement,
   outcomePolarity,
   refineRetrieval,
@@ -356,6 +357,10 @@ async function retrieve(
   const queryEmbedding = embedder === null ? null : await embedder.embed(situation)
   const hits = service.store.experiencesSnapshot()
     .filter(exp => !isTaskRestatement(exp))
+    // cl-102: 帧生记录不回注帧——自我回声(帧→关于帧的经验→再注入帧)是实测
+    // 注入集最大的噪声源(最近 200 条注入 21.5% 含帧生经验, 历史 13 条被引用
+    // 的注入里 0 条含)。记录仍留在库里作为历史, 只是不再进入上下文。
+    .filter(exp => !isSelfFrameExperience(exp))
     .map((exp): RankedHit => {
       const text = `${exp.sar.situation}。${exp.sar.action}。${exp.sar.outcome}`
       const semantic = queryEmbedding !== null && exp.embedding !== undefined

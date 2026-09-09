@@ -69,6 +69,9 @@ def main() -> int:
     parser.add_argument('--root', default=os.path.expanduser('~/.dsh/cognitive-pipeline'))
     parser.add_argument('--window', type=int, default=200)
     parser.add_argument('--quiet', action='store_true')
+    parser.add_argument('--lib', default=os.path.expanduser(
+        '~/dsh-fork/packages/context/cognitive-inject/lib/index.js'),
+        help='用于取"构建时刻"的产物路径(cl-102 效果见证的截止线)')
     args = parser.parse_args()
 
     experiences = load_last_wins(os.path.join(args.root, 'experiences.jsonl'), 'expId')
@@ -184,6 +187,23 @@ def main() -> int:
         json.dump({'generatedAt': now_ms, 'llm': sorted(current_llm),
                    'proven': sorted(current_proven)}, fh, ensure_ascii=False)
 
+    # cl-102 效果见证: 构建时刻之后创建的注入里还有没有帧生经验。用产物 mtime
+    # 作截止线, 避免"最近 200 条"窗口里长期混着修复前的旧注入而看不出效果。
+    build_ms = int(os.path.getmtime(args.lib) * 1000) if os.path.exists(args.lib) else None
+    since_build = [r for r in injections.values()
+                   if build_ms is not None and (r.get('createdAt') or 0) > build_ms]
+    since_build_with_frame = [r for r in since_build
+                              if any(frame_born(x) for x in (r.get('expIds') or []))]
+
+    # cl-102 源头见证: 最近 24h 新写入的经验里还有没有帧生的(cl-100 让帧回合不
+    # 累计, cl-102 再在累计门挡一层; 这条是"源头是否真的断了"的效果证据)。
+    recent_frame_experiences = [e['expId'] for e in experiences.values()
+                                if is_frame_born(e)
+                                and now_ms - (e.get('timestamp') or 0) < 24 * 3600 * 1000]
+    since_build_frame_experiences = [e['expId'] for e in experiences.values()
+                                     if is_frame_born(e) and build_ms is not None
+                                     and (e.get('timestamp') or 0) > build_ms]
+
     cited_true = [r for r in injections.values() if r.get('cited') is True]
     cited_with_frame = sum(1 for r in cited_true if any(frame_born(x) for x in (r.get('expIds') or [])))
 
@@ -198,6 +218,13 @@ def main() -> int:
         'frameBornInjectionShare': round(with_frame / n, 4) if n else 0.0,
         'frameBornExpIdShare': round(frame_ids / total_ids, 4) if total_ids else 0.0,
         'staticTriggerShare': round(static / n, 4) if n else 0.0,
+        'frameBornExperiencesLast24h': len(recent_frame_experiences),
+        'frameBornExperiencesSinceBuild': len(since_build_frame_experiences),
+        'frameBornExperiencesSinceBuildIds': since_build_frame_experiences[:10],
+        'frameBornExperiencesLast24hIds': recent_frame_experiences[:10],
+        'buildCutoffMs': build_ms,
+        'injectionsSinceBuild': len(since_build),
+        'frameBornSinceBuild': len(since_build_with_frame),
         'citedTrueCount': len(cited_true),
         'citedTrueWithFrameBorn': cited_with_frame,
         'channels': channels,
@@ -251,6 +278,8 @@ def main() -> int:
               'cited=true %d 条中帧生 %d 条' % (
                   n, metrics['frameBornInjectionShare'] * 100, metrics['staticTriggerShare'] * 100,
                   len(cited_true), cited_with_frame))
+        print('构建后注入 %d 条(含帧生 %d), 构建后新增帧生经验 %d 条(cl-102 效果见证)'
+              % (len(since_build), len(since_build_with_frame), len(since_build_frame_experiences)))
         print('通道引用率: ' + '｜'.join(
             '%s %s(%d/%d)' % (k, ('%.1f%%' % (v['rate'] * 100)) if v['rate'] is not None else 'n/a',
                               int(v['cited']), int(v['cited']) + int(v['uncited']))
