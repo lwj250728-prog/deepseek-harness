@@ -1220,6 +1220,12 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     }
   }
 
+  /** cl-107: 本地日历日(YYYY-MM-DD); 可加天数偏移。toISOString 是 UTC, 会造成跨日错位。 */
+  const localDay = (plusDays = 0): string => {
+    const shifted = new Date(Date.now() + plusDays * 24 * 60 * 60 * 1000)
+    return new Date(shifted.getTime() - shifted.getTimezoneOffset() * 60000).toISOString().slice(0, 10)
+  }
+
   // cl-106: 巡检的"真相源"是插件硬编码清单(llm.listModels 返回 DEFAULT_MODELS),
   // 结构上发现不了到期。这里旁读实时目录检查结果(由 dsh-model-catalog-check.py
   // 落盘, cron 每 30 分钟刷新): 目录说"不在"就算不在——只影响告警, 不影响唤醒
@@ -1334,12 +1340,16 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       source: availability === 'missing' ? 'plugin-catalog' : 'live-catalog',
     })
     if (modelAlertId !== null) return
-    modelAlertId = `cl-model-expired-${new Date().toISOString().slice(0, 10)}`
+    // cl-107: 日期一律用**本地日历日**——toISOString() 是 UTC, 本地 07:40 会写成前一天的
+    // reviewBy, 于是告警一落地就"已过期"(套件 T33 当场红)。reviewBy 给 3 天决策窗口:
+    // 用户未拍板时告警持续可见, 但不会当天就把套件打红。
+    modelAlertId = `cl-model-expired-${localDay()}`
     void appendFile(join(dirname(config.thinkLogPath), 'claims-ledger.jsonl'), JSON.stringify({
       id: modelAlertId, ts: new Date().toISOString(),
       claim: `载体模型 ${selection.model} 已不在可用目录(可能到期)——帧/回合将整体失败, 需换模`,
       source: 'quiet-driver 模型可用性巡检', status: 'open',
-      reviewBy: new Date().toISOString().slice(0, 10), reviewBasis: '换模后自动关闭',
+      reviewBy: localDay(3), reviewBasis: '换模后自动关闭(或到期宽限结束)',
+      priority: 'P0',
       note: '换模前先冻结知识层(dsh-freeze-wiki.sh)并给权重打来源模型标签; 换模后重跑技能层门控。',
     }) + '\n').catch(() => undefined)
   }
