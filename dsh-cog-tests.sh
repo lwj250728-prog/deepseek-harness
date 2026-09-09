@@ -986,14 +986,15 @@ assert m and k and f, "阈值未找到"
 for name, val in (("rep", float(m.group(1))), ("kernel", float(k.group(1))), ("focus", float(f.group(1)))):
     assert val <= 0.55, "%s 阈值 %.2f 超出哈希袋可达区间(实测最高 0.561)" % (name, val)
 '
-t "哨兵触发计数在动(或未达窗口)" python3 -c '
+# 2026-09-09 11:3x 加固: 原断言只要字段存在(死机制也能过) → 改为要求真实触发>0 且采纳字段可观测
+t "哨兵真实触发且采纳可观测" python3 -c '
 import json, os
 p = os.path.expanduser("~/.dsh/cognitive-pipeline/dormant-goals.jsonl")
 goals = [json.loads(l) for l in open(p) if l.strip()]
+assert all("triggerCount" in g and "adoptedCount" in g for g in goals), "trigger/adopted 字段缺失"
 total = sum(g.get("triggerCount") or 0 for g in goals)
-# 首次修复后需要真实情境命中; 不强制>0, 但要求字段存在且机制可观测
-assert all("triggerCount" in g for g in goals), "triggerCount 字段缺失"
-print("累计触发:", total)
+assert total > 0, "哨兵累计触发为 0——机制可能又死了(cl-060 复发)"
+print("累计触发 %d | 累计采纳 %d" % (total, sum(g.get("adoptedCount") or 0 for g in goals)))
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
