@@ -1910,6 +1910,24 @@ assert "语料自身当词典" in s or "documentFrequency.get(element) ?? 0) < 2
 '
 t "产物含语料词典过滤(已部署)" bash -c "grep -q 'documentFrequency.get(element)' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
 
+# ── T67 精排提升须有链证据(cl-089: 0 条链内重排, 跨链改道误差 0.400/0.434 vs 未开火 0.102) ──
+echo "[T67] 精排提升策略(off/same-chain/always, 默认 same-chain)"
+t "配置项 refinePromotion 已定义" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts"), encoding="utf8").read()
+assert "refinePromotion" in s, "缺配置项"
+assert "default(" + chr(39) + "same-chain" + chr(39) + ")" in s, "默认值不是 same-chain"
+'
+t "提升按链证据门控" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/hot-engine.ts"), encoding="utf8").read()
+i = s.index("const mode = this.config.refinePromotion")
+seg = s[i:i+700]
+assert "chainId" in seg and "ct === cc" in seg, "未按链比较"
+assert "allowed = mode === " in s, "缺 off/always 分支"
+'
+t "产物含提升门控(已部署)" bash -c "grep -q 'refinePromotion' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。

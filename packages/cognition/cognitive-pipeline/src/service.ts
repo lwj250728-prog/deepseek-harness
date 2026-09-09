@@ -186,6 +186,10 @@ export interface CognitivePipelineConfig {
   refineMaxDrops?: number
   /** cl-070: 融合分 top1/top2 相对差低于此值即触发精排。 */
   refineRelativeGap?: number
+  /** cl-089: 精排**提升**的去留策略。实测 13 条提升中 0 条链内重排, 跨链改道误差 0.400/0.434
+   * 远差于门控未开火 0.102 → 默认只允许有链证据的重排:
+   * 'off'=从不提升(只保留剔除) / 'same-chain'=仅当候选与原首位同链才提升 / 'always'=旧行为。 */
+  refinePromotion?: 'off' | 'same-chain' | 'always'
   /** Cold-loop time-decay lambda per day (default 0.01). */
   decayLambda?: number
   /** Cold-loop minimum decay weight (default 0.1). */
@@ -393,6 +397,7 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   refineMaxDrops: z.number().step(1).min(0).max(5).default(2),
   /** cl-070: 融合分 top1 与 top2 的相对差低于此值时触发精排(不依赖分类体系)。 */
   refineRelativeGap: z.number().min(0).max(1).default(0.15),
+  refinePromotion: z.union([z.const('off'), z.const('same-chain'), z.const('always')]).default('same-chain'),
   decayLambda: z.number().min(0).default(0.01),
   minDecayWeight: z.number().min(0).max(1).default(0.1),
   predictionErrorThreshold: z.number().min(0).max(1).default(0.3),
@@ -461,6 +466,7 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
       channelErrorThreshold: config.channelErrorThreshold ?? 0.3,
       refineMaxDrops: config.refineMaxDrops ?? 2,
       refineRelativeGap: config.refineRelativeGap ?? 0.15,
+      refinePromotion: config.refinePromotion ?? 'same-chain',
       exploreDailyBudget: config.exploreDailyBudget ?? 3,
       exploreRiskWords: Object.freeze(config.exploreRiskWords ?? ['删除', '清空', '覆盖', '发布', '推送', 'rm', '移除', '迁移', '重置', '格式化']),
       exploreAutoDispatch: config.exploreAutoDispatch ?? false,

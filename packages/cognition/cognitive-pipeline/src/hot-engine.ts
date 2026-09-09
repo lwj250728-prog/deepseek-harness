@@ -83,6 +83,8 @@ export interface HotEngineConfig {
   readonly refineMaxDrops: number
   /** Relative fused-score gap below which the rerank fires (cl-070). */
   readonly refineRelativeGap: number
+  /** cl-089: 提升策略(off/same-chain/always), 见 CognitivePipelineConfig.refinePromotion。 */
+  readonly refinePromotion: 'off' | 'same-chain' | 'always'
   /** Active-exploration daily budget (scheme 2, default 3). */
   readonly exploreDailyBudget: number
   /** Irreversible-action markers that exclude a novel attempt from the
@@ -519,11 +521,20 @@ export class HotEngine {
         text: `${hit.exp.sar.situation}。${hit.exp.sar.action}。${hit.exp.sar.outcome}`,
         similarity: hit.similarity,
       })), { sessionId, signal })
-      // cl-087: 只有**真的换人**才算提升。实测 13 条"提升"里 5 条是 bestExpId == 原首位
-      // (身份提升/noop)——它们被记成 promotedExpId 后污染 A 组, 让"精排有没有用"的判读
-      // 混入"精排只是确认了原有顺序"。noop 不再计入 promotedExpId。
+      // cl-087: 只有**真的换人**才算提升(noop 不再计入 promotedExpId)。
+      // cl-089: 且默认只允许**有链证据**的重排——实测 0 条链内重排、跨链改道误差 0.400/0.434
+      // 远差于门控未开火 0.102, 说明精排每次真提升都在改道而非纠错。
       if (decision.bestExpId !== null && decision.bestExpId !== originalTopExpId) {
-        promoted = decision.bestExpId
+        const mode = this.config.refinePromotion
+        let allowed = mode === 'always'
+        if (mode === 'same-chain') {
+          const target = ranked.find(hit => hit.exp.expId === decision.bestExpId)?.exp
+          const current = ranked.find(hit => hit.exp.expId === originalTopExpId)?.exp
+          const ct = target?.chainId ?? null
+          const cc = current?.chainId ?? null
+          allowed = ct !== null && cc !== null && ct === cc
+        }
+        if (allowed) promoted = decision.bestExpId
       }
       if (decision.shouldKeep || decision.rejectedExpId === null) break
       if (!remaining.has(decision.rejectedExpId)) break
