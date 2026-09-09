@@ -1017,6 +1017,21 @@ for l in open(p, encoding="utf8"):
 assert not bad, "维度错配(源码 %d): %s" % (dim, bad[:3])
 '
 
+# ── T41 预测环未停摆(2026-09-09 11:4x 固化——cl-062: 预测只在用户活跃窗产, 用户离场期校准冻结) ──
+echo "[T41] 预测环存活(24h 内须有新预测——预测是校准/通道权重的唯一反馈源)"
+t "24h内有新预测" python3 -c '
+import json, os, time, datetime
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/predictions.jsonl")
+rows = [json.loads(l) for l in open(p) if l.strip()]
+def ts(r):
+    v = float(r.get("timestamp") or r.get("createdAt") or 0)
+    return v/1000 if v > 1e11 else v
+newest = max((ts(r) for r in rows), default=0)
+age = (time.time() - newest) / 3600
+assert age < 24, "最新预测距今 %.1f 小时——预测环可能停摆(校准与通道权重将冻结)" % age
+print("最新预测距今 %.1f 小时" % age)
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
