@@ -1200,15 +1200,21 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
   // 唤醒若照搬一个已下线的模型 id, 会把"会话复活"变成"每轮请求失败"——与 20:30 那次静默
   // 停摆同形。这里在注入前对照实时目录: 不在目录里就不注入(交回 Host/默认), 并留一条
   // model-unavailable 心跳, 让"模型没了"是可见事件而不是静默故障。
-  const modelStillAvailable = async (provider: string, model: string): Promise<boolean> => {
+  // cl-103: 三态返回——"在" / "不在" / "查不到"必须可区分。旧的布尔版在
+  // listModels 缺失或抛错时返回 true(失败开放), 且成功路径不写任何心跳, 于是
+  // "没有告警"既可能是模型在、也可能是巡检根本没查成, 信号不可证伪。
+  const modelStillAvailable = async (
+    provider: string,
+    model: string,
+  ): Promise<'available' | 'missing' | 'unknown'> => {
     const llm = ctx.get('llm') as { listModels?(provider: string): Promise<readonly { id?: string }[]> } | undefined
-    if (llm?.listModels === undefined) return true  // 无法查询 → 不阻断(失败开放)
+    if (llm?.listModels === undefined) return 'unknown'  // 无法查询 → 不阻断, 但如实标注
     try {
       const models = await llm.listModels(provider)
-      if (models.length === 0) return true
-      return models.some(entry => entry.id === model)
+      if (models.length === 0) return 'unknown'
+      return models.some(entry => entry.id === model) ? 'available' : 'missing'
     } catch {
-      return true
+      return 'unknown'
     }
   }
 
@@ -1216,7 +1222,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     try {
       const { presets, presetId } = await resolveStoredPreset()
       let storedModel = await resolveStoredModel()
-      if (storedModel !== undefined && !(await modelStillAvailable(storedModel.provider, storedModel.model))) {
+      if (storedModel !== undefined && (await modelStillAvailable(storedModel.provider, storedModel.model)) === 'missing') {
         ctx.logger.warn('[quiet-driver] 存量模型 %s 已不在目录(可能到期) → 不注入, 交回默认', storedModel.model)
         beat('model-unavailable', { model: storedModel.model })
         storedModel = undefined
@@ -1279,10 +1285,17 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     lastModelCheckAt = now
     const selection = sessionModel() ?? resolveModel()
     if (selection === undefined) return
-    if (await modelStillAvailable(selection.provider, selection.model)) {
+    const availability = await modelStillAvailable(selection.provider, selection.model)
+    // cl-103: 成功/未知路径都留痕——"查过且模型在"与"查不到"必须可证,
+    // 否则"没有告警"就是不可证伪的信号(cl-105 的巡检正是靠这个盲区静默失效)。
+    if (availability !== 'missing') {
+      beat(availability === 'available' ? 'model-ok' : 'model-check-unknown', { model: selection.model })
       if (modelAlertId !== null) {
         void appendFile(join(dirname(config.thinkLogPath), 'claims-ledger.jsonl'), JSON.stringify({
           id: modelAlertId, status: 'done', closedAt: new Date().toISOString(),
+          // cl-104: 关闭记录也必须带 claim 字段——套件 10c 断言"账本每行都有 id 和 claim",
+          // 旧版关闭记录缺 claim, 首次关闭就会把套件打红(伪红)。
+          claim: `载体模型 ${selection.model} 恢复可用, 到期告警自动关闭`,
           doneNote: '模型已恢复可用, 到期告警自动关闭',
         }) + '\n').catch(() => undefined)
         modelAlertId = null

@@ -2136,8 +2136,12 @@ D = os.path.expanduser("~/.dsh/cognitive-pipeline")
 hb = os.path.join(D, "quiet-driver-heartbeat.jsonl")
 rows = [json.loads(l) for l in open(hb, encoding="utf8") if l.strip()] if os.path.exists(hb) else []
 beats = [r for r in rows if r.get("reason") == "model-unavailable"]
-led = [json.loads(l) for l in open(os.path.join(D, "claims-ledger.jsonl"), encoding="utf8") if l.strip()]
-open_alerts = [r for r in led if str(r.get("id", "")).startswith("cl-model-expired") and r.get("status") in ("open", "in-progress")]
+by_id = {}
+for l in open(os.path.join(D, "claims-ledger.jsonl"), encoding="utf8"):
+    if not l.strip(): continue
+    r = json.loads(l)
+    if r.get("id"): by_id[r["id"]] = r   # cl-041: 追加式账本必须 last-wins
+open_alerts = [r for r in by_id.values() if str(r.get("id", "")).startswith("cl-model-expired") and r.get("status") in ("open", "in-progress")]
 if beats:
     assert open_alerts, "心跳报了 model-unavailable 但账本无未关闭的 cl-model-expired-* 告警(巡检漏入账)"
 if open_alerts:
@@ -2443,6 +2447,30 @@ if m.get("injectionsSinceBuild", 0) == 0:
     print("构建后尚无新注入, 空过"); raise SystemExit(0)
 assert n == 0, "构建后 %d 条注入仍含帧生经验" % n
 '
+
+# ── T85 模型巡检的可证伪性(cl-103 正向痕迹 / cl-104 关闭记录契约与去重) ──
+echo "[T85] 模型巡检可证伪(正向痕迹 / 关闭记录带 claim / T73 读账本去重)"
+t "巡检正向痕迹: 最近 1h 内存在 model-ok 或 model-check-unknown 心跳" python3 -c '
+import json, os, time
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/quiet-driver-heartbeat.jsonl")
+assert os.path.exists(p), "心跳文件缺失"
+cut = time.time() * 1000 - 3600 * 1000
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+hit = [r for r in rows if (r.get("ts") or 0) > cut
+       and r.get("reason") in ("model-ok", "model-check-unknown")]
+# cl-103: 只有失败路径留痕 => "没有告警"不可证伪(既可能模型在, 也可能根本没查成)。
+assert hit, "最近 1h 无 model-ok/model-check-unknown 心跳: 巡检结果不可证伪"
+'
+t "告警关闭记录必须带 claim 字段(套件 10c 断言每行有 id 和 claim)" bash -c '
+python3 - <<PY
+import re, os
+src = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
+block = re.search(r"status: .done..*?\}", src, re.S)
+assert block, "未找到关闭记录写入块"
+assert "claim:" in block.group(0), "关闭记录缺 claim 字段——首次自动关闭会把套件 10c 打红(伪红)"
+PY
+'
+t "T73 读账本已 last-wins 去重" bash -c "grep -q 'cl-041: 追加式账本必须 last-wins' '$HOME/dsh-fork/dsh-cog-tests.sh'"
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
