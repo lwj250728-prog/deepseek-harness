@@ -110,6 +110,14 @@ rm -f "$TMPP" "$TMPB1" "$TMPB2"
 echo "[T7] 数据链路(oq010-probe 解锁: 数据入→nextAction 去'待'前缀→行动帧可推)"
 GOALS7="$DIR/dormant-goals.jsonl"
 BAK7=$(mktemp); cp "$GOALS7" "$BAK7"
+# 原始 nextAction(还原保真的比对基准)——2026-09-09 08:5x 修正: 原断言写死"以'待'开头",
+# 而该目标 nextAction 已按 cl-059 改写为可执行子步, 故改为"还原后与原始一致"。
+NA7_ORIG=$(python3 -c "
+import json
+for l in open('$GOALS7'):
+    d=json.loads(l)
+    if d.get('id')=='goal-digital-life-incubation': print(d.get('nextAction',''))
+")
 # 7a. 解锁段执行: 模拟 probe 检测到数据的分支逻辑(与 dsh-oq010-probe.sh 相同)
 UNLOCK7=$(python3 - "$GOALS7" << 'PYEOF'
 import json, sys
@@ -148,7 +156,7 @@ for l in open('$GOALS7'):
     d=json.loads(l)
     if d.get('id')=='goal-digital-life-incubation': print(d.get('nextAction',''))
 ")
-t "还原后回到'待事件'待命态" bash -c "[[ '$NA7B' == 待* ]]"
+t "还原后与原始nextAction一致" bash -c "[[ '$NA7B' == '$NA7_ORIG' ]]"
 rm -f "$BAK7"
 
 # ── T8 probe 404 误判防复发(2026-09-08 08:3x 固化——tp-011) ──
