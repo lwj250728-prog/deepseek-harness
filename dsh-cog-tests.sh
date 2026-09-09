@@ -38,11 +38,14 @@ t "资产含可行规则" bash -c "grep -q 'R1 ' '$DIR/world-model-assets.md'"
 # ── T3 校准有效性(帧质量, 呼应今日措辞校准) ──────────────────
 echo "[T3] 校准有效性(帧实质产出, 非确认态)"
 # 3a. 最近帧有实质内容(平均>200字; 窗口样本<3则跳过=待积累, 防重启后误报)
-t "近帧平均长度>200字(样本≥3)" bash -c "
+# 2026-09-09 09:5x 修正: 原判据用正则匹配三位数(帧平均 200-999 时代), 帧变长到四位数即误红
+# ——同 T7/T15 家族(断言写死旧状态的范围)。改为数值比较。
+t "近帧平均长度≥200字(样本≥3)" bash -c "
 out=\$('$HOME/dsh-fork/dsh-verify-frames.sh' --minutes 30 2>/dev/null)
 n=\$(echo \"\$out\" | grep -oP '窗口帧数: \K[0-9]+')
 if [ \"\${n:-0}\" -lt 3 ]; then echo '样本不足跳过'; exit 0; fi
-echo \"\$out\" | grep -q '平均长度: [2-9][0-9][0-9]'
+avg=\$(echo \"\$out\" | grep -oP '平均长度: \K[0-9]+')
+[ \"\${avg:-0}\" -ge 200 ]
 "
 
 # ── T4 存续保护(数据不会丢) ───────────────────────────────────
@@ -261,6 +264,19 @@ t "src含灰测模型" bash -c "grep -q 'deepseek-v4.1-flash-expires-on-0910' '$
 t "lib含灰测模型(已部署)" bash -c "grep -q 'deepseek-v4.1-flash-expires-on-0910' '$HOME/dsh-fork/packages/llm/llm-deepseek/lib/index.js'"
 # 15c. 到期标注存在(清理锚点)
 t "到期标注(expires-on-0910)" bash -c "grep -q 'expires-on-0910' '$HOME/dsh-fork/packages/llm/llm-deepseek/src/index.ts'"
+# 15d. 时间闸(2026-09-09 09:5x 固化——三问帧 Q3: 到期日写进注释不构成约束, 状态变了断言仍停在旧状态)
+#      到期前: 模型必须在目录; 到期后: 模型必须已移除(否则本组转红, 强制清理)。
+t "灰测模型到期闸" python3 -c '
+import os, re, datetime
+expiry = datetime.date(2026, 9, 10)
+today = datetime.date.today()
+src = open(os.path.expanduser("~/dsh-fork/packages/llm/llm-deepseek/src/index.ts")).read()
+present = "deepseek-v4.1-flash-expires-on-0910" in src
+if today <= expiry:
+    assert present, "到期前模型应仍在目录"
+else:
+    assert not present, "灰测模型已于 %s 到期, 必须从目录移除并更新 T15 组" % expiry
+'  
 
 # ── T16 经验写入字段名一致性(2026-09-08 18:0x 固化——tp-020: 驼峰字段防 80 条效用丢失) ──
 echo "[T16] 经验写入字段名(quiet-driver utility 须驼峰——下划线曾致 80 条效用读不到)"
@@ -983,6 +999,10 @@ entry = {
     'claim': f'认知测试套件连续失败({fail_count}项): {failed[:200]}',
     'source': 'dsh-cog-tests.sh 自动汇报(design-spec-wire-up-verification P0)',
     'status': 'open',
+    # 2026-09-09 09:5x 修复自锁死循环: 告警条目自身缺 reviewBy → T33(open 项须有 reviewBy)转红
+    # → 套件继续失败 → 告警无法自动关闭。给告警自身一个到期日(+1天)。
+    'reviewBy': (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))) + datetime.timedelta(days=1)).strftime('%Y-%m-%d'),
+    'reviewBasis': '自动告警: 测试恢复全过时自动关闭; 到期未关闭则人工查证',
     'note': '自动入账: 测试失败连续≥2次。需查证是真失败还是时序噪声(如重启后lib未生效), 修复后本条目应关闭。'
 }
 with open(ledger, 'a', encoding='utf8') as f:
