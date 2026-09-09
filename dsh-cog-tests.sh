@@ -2107,6 +2107,24 @@ assert "return true" in seg, "未失败开放"
 '
 t "产物含可用性校验(已部署)" bash -c "grep -q 'modelStillAvailable' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
 
+# ── T74 学习式稀疏权重实验(cl-095: 离线无增益则不上线) ──
+echo "[T74] 学习式稀疏权重实验(可运行/两方案对照/判读诚实)"
+t "实验脚本存在且可运行" bash -c "test -x '$HOME/dsh-fork/dsh-learned-sparse.py' && timeout 600 python3 '$HOME/dsh-fork/dsh-learned-sparse.py' | grep -q 'recall@5'"
+t "含两种信号对照(引用/同链集中度)" bash -c "timeout 600 python3 '$HOME/dsh-fork/dsh-learned-sparse.py' | grep -q '引用反馈加权' && timeout 600 python3 '$HOME/dsh-fork/dsh-learned-sparse.py' | grep -q '同链集中度加权'"
+t "无增益即明确判读不上线" python3 -c '
+import subprocess, os, re
+out = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-learned-sparse.py")],
+                     capture_output=True, text=True, timeout=600).stdout
+m = re.search(r"均匀 IDF\(现状\)\s+([0-9.]+)%", out)
+w = re.search(r"同链集中度加权\s+([0-9.]+)%", out)
+assert m and w, "缺读数: %s" % out[:200]
+gain = float(w.group(1)) - float(m.group(1))
+if gain <= 0:
+    assert "不上线" in out, "无增益却未判不上线"
+else:
+    assert "值得进下一步" in out, "有增益却未判可进"
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
