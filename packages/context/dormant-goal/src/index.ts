@@ -83,6 +83,7 @@ interface PoolGoal {
   kernel?: string
   focus?: string
   nextAction?: string
+  status?: string
   notes?: string[]
   repVector?: number[]
   kernelVector?: number[]
@@ -281,6 +282,10 @@ export function apply(ctx: Context, config: Config): void {
     const now = Date.now()
     const hits: Array<{ goal: PoolGoal; layer: string; similarity: number }> = []
     for (const goal of pool) {
+      // 2026-09-09 13:4x(cl-073): 用户显式暂停的目标不应被唤醒——此前只按相似度触发,
+      // 池里任何目标(含 paused)都会在命中阈值时被唤醒, 于是"暂停"只在 quiet-driver
+      // 的行动帧侧生效, 孵化提醒侧照样打扰。status 缺省视为 active 以兼容旧记录。
+      if (goal.status !== undefined && goal.status !== 'active') continue
       if (goal.repVector === undefined) continue
       const last = lastTrigger.get(goal.id) ?? 0
       if (now - last < config.cooldownMs) continue

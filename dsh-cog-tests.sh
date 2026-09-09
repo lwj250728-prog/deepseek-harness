@@ -1185,25 +1185,67 @@ assert s.count("this.store.addPrediction(") == 2, "addPrediction 调用点数变
 '
 t "编译产物含审计字段" bash -c "grep -q retrievalNote '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js' && grep -q promotedExpId '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
 t "运行时账本已出现审计键" python3 -c '
-import json, os
+import json, os, subprocess
 base = os.path.expanduser("~/.dsh/cognitive-pipeline")
 lib = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")
 build_ms = os.path.getmtime(lib) * 1000
+svc = os.popen("systemctl --user show dsh-web.service -p ActiveEnterTimestamp --value").read().strip()
+ep = subprocess.run(["date", "-d", svc, "+%s"], capture_output=True, text=True).stdout.strip()
+assert ep.isdigit(), "无法解析服务启动时间: %r" % svc
+svc_ms = int(ep) * 1000
+# 判据锚点=当前进程开始运行的时刻(而非构建时刻): 构建后、重启前由旧进程写下的预测
+# 天然缺字段, 拿它判红会把"进程未更新"和"代码未落盘"两件事混在一起。
+cutoff = max(build_ms, svc_ms)
 keys = ("retrievalNote", "promotedExpId", "originalTopExpId")
 rows = [json.loads(l) for l in open(os.path.join(base, "predictions.jsonl")) if l.strip()]
 assert rows, "预测账本为空"
-newer = [r for r in rows if r.get("timestamp", 0) > build_ms]
+newer = [r for r in rows if r.get("timestamp", 0) > cutoff]
 if newer:
     bad = [r for r in newer if not all(k in r for k in keys)]
-    assert not bad, "构建后有 %d 条预测缺审计键(运行时代码未更新)" % len(bad)
+    assert not bad, "当前进程写出的 %d 条预测缺审计键" % len(bad)
 else:
-    # 无新预测(预测只在用户活跃窗创建, cl-062) → 退化为运行时代码新鲜度锚:
-    # 进程启动必须晚于本次构建, 否则新字段根本没加载。
-    svc = os.popen("systemctl --user show dsh-web.service -p ActiveEnterTimestamp --value").read().strip()
-    import subprocess
-    ep = subprocess.run(["date", "-d", svc, "+%s"], capture_output=True, text=True).stdout.strip()
-    assert ep.isdigit(), "无法解析服务启动时间: %r" % svc
-    assert int(ep) * 1000 > build_ms, "服务启动早于构建(未加载新字段)"
+    # 无新预测(预测只在用户活跃窗创建, cl-062) → 退化为进程新鲜度锚。
+    assert svc_ms > build_ms, "服务启动早于构建(未加载新字段)"
+'
+
+# ── T49 暂停目标两侧同时停(2026-09-09 13:4x 固化——cl-073: 用户暂停写作后孵化提醒照样打扰) ──
+# 根因: quiet-driver 的 findAllActionableGoals 只选 status==='active', 但 dormant-goal 的
+#       唤醒循环只按相似度触发, 不读 status → "暂停"只停了一半(行动帧停、孵化提醒不停)。
+echo "[T49] 暂停目标两侧同时停(status 门: 行动帧 + 孵化提醒)"
+t "dormant-goal含status门" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/src/index.ts")).read()
+assert "goal.status !== " in s and chr(39) + "active" + chr(39) in s, "唤醒循环未读 status"
+i = s.index("for (const goal of pool)")
+seg = s[i:i+600]
+assert "status" in seg, "status 门不在唤醒循环内"
+'
+t "dormant-goal产物含status门(已部署)" bash -c "grep -q 'goal.status' '$HOME/dsh-fork/packages/context/dormant-goal/lib/index.js'"
+t "行动帧侧只选active" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts")).read()
+i = s.index("findAllActionableGoals")
+seg = s[i:i+900]
+assert "status === " in seg and chr(39) + "active" + chr(39) in seg, "行动帧选择器未限定 active"
+'
+t "小说目标处于paused" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/dormant-goals.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+g = [x for x in rows if x.get("id") == "goal-novel-60w"]
+assert g, "小说目标不在池里"
+assert g[0].get("status") == "paused", "状态未暂停: %r" % g[0].get("status")
+assert g[0].get("pauseReason") and g[0].get("resumeCondition"), "缺暂停理由/恢复条件"
+'
+t "paused目标无行动帧可选中" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/dormant-goals.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+def actionable(g):
+    na = (g.get("nextAction") or "").strip()
+    return g.get("title") and g.get("status") == "active" and na and na not in ("无", "none")
+picked = [g["id"] for g in rows if actionable(g)]
+assert "goal-novel-60w" not in picked, "暂停的小说目标仍会被行动帧选中"
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"

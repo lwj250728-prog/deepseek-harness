@@ -1035,6 +1035,9 @@ export class CognitivePipelineService extends Service {
     kind?: 'task' | 'frame'
     /** Explicit meta subtype marker for readers that need a specific kind. */
     metaKind?: string
+    /** Goal trace id to anchor the meta experience to (cl-074: 偏离经验此前无锚,
+     * 成为链上孤儿——最近任务经验锚定判据因此被判红)。 */
+    chainId?: string
   }): string {
     // cl-058 补: 帧/元经验同样要词级关键词——此前 rememberMeta 直接用 tokenize(单字),
     // 而 load 时的 repairCharKeywords 只在启动跑一次, 新写入的帧照样是字符级(exp_245 实测)。
@@ -1066,6 +1069,7 @@ export class CognitivePipelineService extends Service {
       meta: true,
       kind: input.kind ?? 'task',
       ...input.metaKind === undefined ? {} : { metaKind: input.metaKind },
+      ...input.chainId === undefined || input.chainId === '' ? {} : { chainId: input.chainId },
     })
     return expId
   }
@@ -1730,6 +1734,8 @@ export class CognitivePipelineService extends Service {
     evidence?: string
     predictionId?: string
     anchor?: ClaimAnchor | null
+    /** cl-074: 调用方解析出的目标链锚, 透传给偏离元经验。 */
+    chainId?: string
   }): Promise<ClaimAudit> {
     const claim = input.claim.trim()
     const situation = input.situation.trim()
@@ -1802,6 +1808,7 @@ export class CognitivePipelineService extends Service {
         outcome: `未验证声明与预测误差同尺累计：${names} 累计误差 ${worst.cumulativeError.toFixed(3)}（${worst.errorFoldCount} 次回流）`,
         utility: { materialGain: 2, emotionalValence: 4, energyCost: 6 },
         metaKind: 'acceptance-deviation',
+        ...input.chainId === undefined ? {} : { chainId: input.chainId },
       })
     }
     const audit: ClaimAudit = {

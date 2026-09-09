@@ -1101,9 +1101,14 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           matched: result.matched,
         }
       }
+      // cl-074: 偏离元经验也带目标链锚——此前无锚, 既成链上孤儿, 又让
+      // "最近任务经验已锚定目标" 判据在每次自审后变红。显式 chain_id 不传,
+      // 仅复用 活目标 > 会话粘性锚 的解析结果(不改写锚)。
+      const claimAnchor = resolveChainAnchor(ctx, service, exec, undefined)
       const audit = await service.auditClaim({
         claim: args.claim,
         situation: args.situation,
+        ...claimAnchor.chainId === undefined ? {} : { chainId: claimAnchor.chainId },
         ...args.evidence === undefined || args.evidence.length === 0 ? {} : { evidence: args.evidence },
         ...args.prediction_id === undefined || args.prediction_id.length === 0 ? {} : { predictionId: args.prediction_id },
         ...anchor === null ? {} : { anchor },
