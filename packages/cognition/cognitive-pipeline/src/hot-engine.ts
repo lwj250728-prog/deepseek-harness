@@ -21,7 +21,7 @@ import {
   outcomePolarity,
   signatureHash,
   situationVector,
-  symptomOverlap,
+  symptomOverlap, elements,
 } from './vectorizer.ts'
 
 /**
@@ -244,6 +244,72 @@ export class HotEngine {
    * @param queryEmbedding - the real-embedding vector of the query action, or null.
    * @returns the four raw channel scores.
    */
+
+  /** Cached BM25 corpus statistics for the lexical channel (cl-052). */
+  private lexicalIndex: { size: number; df: Map<string, number>; avgdl: number; tf: Map<string, Map<string, number>> } | null = null
+
+  /**
+   * Word-element lexical similarity (BM25) between the query text and one
+   * experience's full text. The semantic channel only sees the action text;
+   * this channel sees situation+action+outcome, which is where the offline
+   * experiment located the retrieval gain (76% vs 65% top-1 same-chain).
+   * The raw BM25 score is unbounded, so it is squashed into [0,1) with
+   * `raw / (raw + 3)` to share the other channels' scale.
+   * @param queryText - action + situation of the query.
+   * @param exp - the candidate experience.
+   * @returns the squashed lexical similarity.
+   */
+  private lexicalScore(queryText: string, exp: Experience): number {
+    const index = this.lexicalCorpus()
+    const tf = index.tf.get(exp.expId)
+    if (tf === undefined) return 0
+    const n = index.size || 1
+    let dl = 0
+    for (const count of tf.values()) dl += count
+    if (dl === 0 || index.avgdl === 0) return 0
+    const k1 = 1.5
+    const b = 0.75
+    let raw = 0
+    for (const term of new Set(elements(queryText))) {
+      const f = tf.get(term)
+      if (f === undefined) continue
+      const df = index.df.get(term) ?? 0
+      const idf = Math.log(1 + (n - df + 0.5) / (df + 0.5))
+      raw += idf * f * (k1 + 1) / (f + k1 * (1 - b + b * dl / index.avgdl))
+    }
+    return raw <= 0 ? 0 : raw / (raw + 3)
+  }
+
+  /**
+   * Build (or reuse) the BM25 corpus statistics. Rebuilt when the store's
+   * experience count changes — cheap at the current scale and correct enough
+   * (an edit that keeps the count reuses slightly stale statistics, which only
+   * affects ranking, never correctness).
+   * @returns the cached index.
+   */
+  private lexicalCorpus(): { size: number; df: Map<string, number>; avgdl: number; tf: Map<string, Map<string, number>> } {
+    const experiences = this.store.experiencesSnapshot()
+    if (this.lexicalIndex !== null && this.lexicalIndex.size === experiences.length) return this.lexicalIndex
+    const df = new Map<string, number>()
+    const tf = new Map<string, Map<string, number>>()
+    let totalLength = 0
+    for (const exp of experiences) {
+      const tokens = elements(`${exp.sar.situation} ${exp.sar.action} ${exp.sar.outcome}`)
+      totalLength += tokens.length
+      const counts = new Map<string, number>()
+      for (const token of tokens) counts.set(token, (counts.get(token) ?? 0) + 1)
+      tf.set(exp.expId, counts)
+      for (const token of counts.keys()) df.set(token, (df.get(token) ?? 0) + 1)
+    }
+    this.lexicalIndex = {
+      size: experiences.length,
+      df,
+      avgdl: experiences.length === 0 ? 0 : totalLength / experiences.length,
+      tf,
+    }
+    return this.lexicalIndex
+  }
+
   private channelScores(
     exp: Experience,
     queryAction: string,
@@ -259,7 +325,8 @@ export class HotEngine {
       : cosine(situationVec, situationVector(exp.sar.situation))
     const symptom = symptomOverlap(queryText, `${exp.sar.situation}。${exp.sar.action}。${exp.sar.outcome}`)
     const outcome = this.queryHasFailureMarker(queryText) && outcomePolarity(exp.sar.outcomeUtility) === 'negative' ? 1 : 0
-    return [semantic, situational, symptom, outcome]
+    const lexical = this.lexicalScore(queryText, exp)
+    return [semantic, situational, symptom, outcome, lexical]
   }
 
   /** Retrieve the top-K experiences by fused multi-channel similarity. The
@@ -279,7 +346,7 @@ export class HotEngine {
     const weights = this.store.channelWeightsSnapshot()
     const situationVec = situation.trim().length > 0 ? situationVector(situation) : null
     const queryText = `${action} ${situation}`.trim()
-    const keys: readonly (keyof ChannelWeights)[] = ['semantic', 'situational', 'symptom', 'outcome']
+    const keys: readonly (keyof ChannelWeights)[] = ['semantic', 'situational', 'symptom', 'outcome', 'lexical']
     const scored = this.store.experiencesSnapshot()
       .map((exp) => {
         const raws = this.channelScores(exp, action, situationVec, queryText, queryEmbedding)
@@ -450,7 +517,7 @@ export class HotEngine {
    */
   learnFromFeedback(prediction: Prediction, error: number): void {
     const fusion = prediction.fusion
-    if (fusion === null || fusion.scores.length !== 4) return
+    if (fusion === null || (fusion.scores.length !== 4 && fusion.scores.length !== 5)) return
     const weights = this.store.channelWeightsSnapshot()
     let dominant = 0
     for (let index = 1; index < fusion.scores.length; index += 1) {
@@ -464,8 +531,9 @@ export class HotEngine {
       situational: weights.situational,
       symptom: weights.symptom,
       outcome: weights.outcome,
+      lexical: weights.lexical,
     }
-    const keys: readonly (keyof ChannelWeights)[] = ['semantic', 'situational', 'symptom', 'outcome']
+    const keys: readonly (keyof ChannelWeights)[] = ['semantic', 'situational', 'symptom', 'outcome', 'lexical']
     const key = keys[dominant]
     if (key === undefined) return
     updated[key] = Math.min(3, Math.max(0.2, weights[key] + lr * (target - weights[key])))

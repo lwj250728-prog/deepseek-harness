@@ -134,7 +134,7 @@ export class CognitiveStore {
   private tempStrategies = new Map<string, TempStrategy>()
   private clusterList: Cluster[] = []
   private calibration = emptyBuckets()
-  private channelWeights: ChannelWeights = { semantic: 1, situational: 1, symptom: 1, outcome: 1 }
+  private channelWeights: ChannelWeights = { semantic: 1, situational: 1, symptom: 1, outcome: 1, lexical: 1 }
   private explorationState: ExplorationState = { date: todayKey(), used: 0, entries: [] }
   private explorationTasks = new Map<string, ExplorationTask>()
   private loopExecutions = new Map<string, LoopExecutionReceipt>()
@@ -273,6 +273,8 @@ export class CognitiveStore {
           situational: clampWeight(parsed.situational),
           symptom: clampWeight(parsed.symptom),
           outcome: clampWeight(parsed.outcome),
+          // 旧 channel_weights.json 无 lexical 键 → 默认 1(不惩罚新通道)
+          lexical: clampWeight(parsed.lexical),
         }
       }
     }

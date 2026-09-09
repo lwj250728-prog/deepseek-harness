@@ -741,6 +741,7 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           situational: result.channelWeights.situational,
           symptom: result.channelWeights.symptom,
           outcome: result.channelWeights.outcome,
+          lexical: result.channelWeights.lexical,
         },
         taxonomy: {
           version: result.taxonomy.version,

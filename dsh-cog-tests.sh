@@ -888,6 +888,32 @@ missing = [n for n in range(15, maxch + 1) if ("ch%d" % n) not in prog]
 assert not missing, "账本漏记章节: %s" % missing[:5]
 '
 
+# ── T37 词元素检索通道(2026-09-09 08:4x 固化——cl-052 接入: 离线 76% vs 三通道融合 65%) ──
+echo "[T37] 词元素检索通道(BM25 通道已接入融合, 权重可学习, 全文可见)"
+t "src含BM25通道" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/hot-engine.ts")).read()
+assert "lexicalScore" in s and "lexicalCorpus" in s, "缺 BM25 通道实现"
+assert "\x27semantic\x27, \x27situational\x27, \x27symptom\x27, \x27outcome\x27, \x27lexical\x27" in s, "融合键未含 lexical"
+'
+t "ChannelWeights含lexical" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/types.ts")).read()
+assert "readonly lexical: number" in s, "类型缺 lexical"
+'
+t "lib含词元素通道(已部署)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")).read()
+assert "lexicalScore" in s and "lexicalCorpus" in s, "lib 未部署"
+'
+t "运行时权重含lexical" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/channel_weights.json")
+d = json.load(open(p))
+assert "lexical" in d, "运行时 channel_weights 缺 lexical: %s" % list(d)
+assert 0.2 <= d["lexical"] <= 3, "lexical 权重越界: %s" % d["lexical"]
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。

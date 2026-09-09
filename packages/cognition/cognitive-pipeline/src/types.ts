@@ -92,6 +92,13 @@ export interface ChannelWeights {
   readonly symptom: number
   /** Outcome-polarity priority when the query itself carries failure markers. */
   readonly outcome: number
+  /**
+   * Word-element (BM25) lexical similarity over situation+action+outcome
+   * (cl-052). Offline leave-one-out on chain ground truth measured 76% top-1
+   * hit for this channel alone vs 65% for the previous four-channel fusion;
+   * it exists because the semantic channel only ever saw the action text.
+   */
+  readonly lexical: number
 }
 
 /** The Situation–Action–Result triplet a raw experience is encoded into. */
