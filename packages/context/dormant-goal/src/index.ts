@@ -211,7 +211,33 @@ export function apply(ctx: Context, config: Config): void {
   const reload = async (): Promise<void> => {
     try {
       const raw = await readFile(poolPath, 'utf8')
-      pool = raw.split('\n').filter(Boolean).map(line => JSON.parse(line) as PoolGoal)
+      const loaded = raw.split('\n').filter(Boolean).map(line => JSON.parse(line) as PoolGoal)
+      // 2026-09-09 10:2x 修复(cl-060): 池里的 rep/kernel/focus 向量是 1024 维(bge-m3 embedding),
+      // 而哨兵运行时算的是 384 维哈希袋向量——cosine 长度不等恒返回 0, 于是自 09-04 建池以来
+      // triggerCount 一直是 0(机制从未可能触发)。这里在载入时按当前维度自愈: 维度不符就用
+      // 目标文本(kernel/focus)重算, 使机制不再依赖池文件里那份历史向量。
+      const probe = situationVector('probe')
+      let healed = 0
+      pool = loaded.map(goal => {
+        const mismatch = goal.repVector === undefined
+          || goal.repVector.length !== probe.length
+          || goal.kernelVector === undefined
+          || goal.kernelVector.length !== probe.length
+          || goal.focusVector === undefined
+          || goal.focusVector.length !== probe.length
+        if (!mismatch) return goal
+        healed += 1
+        return {
+          ...goal,
+          dim: probe.length,
+          repVector: situationVector(`${goal.kernel ?? ''} ${goal.focus ?? ''}`),
+          kernelVector: situationVector(goal.kernel ?? goal.title ?? ''),
+          focusVector: situationVector(goal.focus ?? goal.title ?? ''),
+        }
+      })
+      if (healed > 0) {
+        ctx.logger.warn(`[dormant-goal] ${healed} 个目标向量维度不符(池 ${loaded[0]?.repVector?.length ?? '?'} vs 运行时 ${probe.length}), 已按文本重算`)
+      }
       poolError = undefined
     } catch (error) {
       poolError = error instanceof Error ? error.message : String(error)

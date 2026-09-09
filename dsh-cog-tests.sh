@@ -967,6 +967,35 @@ fuse = pct("融合(语义+结果+行动, 等权)")
 assert lex >= fuse, "词元素通道 %d%% < 现有多通道融合 %d%%（cl-052 前提失效，需重估）" % (lex, fuse)
 '
 
+# ── T39 目标孵化哨兵可用性(2026-09-09 10:3x 固化——cl-060: 池向量 1024 维 vs 运行时 384 维, cosine 恒 0, 机制从未触发) ──
+echo "[T39] 目标孵化哨兵(向量维度自愈 + 阈值在哈希袋可达区间 + 触发计数会动)"
+t "src含维度自愈" bash -c "grep -q '维度不符' '$HOME/dsh-fork/packages/context/dormant-goal/src/index.ts'"
+t "lib含维度自愈(已部署)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/lib/index.js")).read()
+assert "维度不符" in s, "lib 未部署自愈逻辑"
+'
+t "阈值在哈希袋可达区间" python3 -c '
+import re, os
+t = open(os.path.expanduser("~/.dsh/profiles/web/cordis.patch.yml")).read()
+m = re.search(r"repThreshold:\s*([0-9.]+)", t)
+k = re.search(r"kernelThreshold:\s*([0-9.]+)", t)
+f = re.search(r"focusThreshold:\s*([0-9.]+)", t)
+assert m and k and f, "阈值未找到"
+# 哈希袋实测: 目标文本 vs 134 条情境最高 0.561, p95 0.42-0.46 → 阈值须 ≤ 0.55 才可能触发
+for name, val in (("rep", float(m.group(1))), ("kernel", float(k.group(1))), ("focus", float(f.group(1)))):
+    assert val <= 0.55, "%s 阈值 %.2f 超出哈希袋可达区间(实测最高 0.561)" % (name, val)
+'
+t "哨兵触发计数在动(或未达窗口)" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/dormant-goals.jsonl")
+goals = [json.loads(l) for l in open(p) if l.strip()]
+total = sum(g.get("triggerCount") or 0 for g in goals)
+# 首次修复后需要真实情境命中; 不强制>0, 但要求字段存在且机制可观测
+assert all("triggerCount" in g for g in goals), "triggerCount 字段缺失"
+print("累计触发:", total)
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
