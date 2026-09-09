@@ -1045,6 +1045,51 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     void appendFile(heartbeatPath, JSON.stringify({ ts: Date.now(), reason, ...extra }) + '\n').catch(() => undefined)
   }
 
+  // 2026-09-09 17:2x (cl-080 第二步): 停摆升级为告警 + 主动唤醒。
+  // 实测 15:31 重启后首 tick 的 reason=agent-not-live——目标会话未被加载, 于是整条自主链
+  // (帧→回合→预测) 全部停摆。心跳只是可见化, 这里做两件事: ①连续跳过达阈值写言行账本
+  // (帧头"认知饥饿"会读到), ②尝试用 ctx.agents.resume 把目标会话唤醒, 下个 tick 就能投帧。
+  const ledgerPath = join(dirname(config.thinkLogPath), 'claims-ledger.jsonl')
+  const STALL_ALERT_AFTER = 3
+  let stallStreak = 0
+  let stallAlertId: string | null = null
+  const raiseStallAlert = (reason: string, streak: number): void => {
+    if (stallAlertId !== null) return
+    const now = new Date()
+    stallAlertId = `cl-stall-${now.toISOString().slice(0, 16).replace(/[-:T]/g, '')}`
+    void appendFile(ledgerPath, JSON.stringify({
+      id: stallAlertId,
+      ts: now.toISOString(),
+      claim: `自主驱动停摆: 连续 ${streak} 个 tick 未产出帧(最近原因 ${reason})——帧/回合/预测链整体停摆`,
+      source: 'quiet-driver 心跳看门狗',
+      status: 'open',
+      reviewBy: now.toISOString().slice(0, 10),
+      reviewBasis: '恢复产出帧后自动关闭',
+      note: '修法: 目标会话未加载时主动 ctx.agents.resume 唤醒; 本告警由恢复路径自动关单。',
+    }, null, 0) + '\n').catch(() => undefined)
+  }
+  const clearStallAlert = (): void => {
+    if (stallAlertId === null) return
+    void appendFile(ledgerPath, JSON.stringify({
+      id: stallAlertId, status: 'done', closedAt: new Date().toISOString(),
+      doneNote: '已恢复产出帧, 停摆告警自动关闭',
+    }) + '\n').catch(() => undefined)
+    stallAlertId = null
+  }
+  const noteStall = (reason: string): void => {
+    stallStreak += 1
+    if (stallStreak >= STALL_ALERT_AFTER) raiseStallAlert(reason, stallStreak)
+  }
+  const wakeTargetAgent = async (): Promise<void> => {
+    try {
+      const handle = await ctx.agents.resume({ resumeSessionId: sessionId })
+      ctx.logger.info('[quiet-driver] target agent resumed: %s', handle.agent.session.id)
+      beat('agent-resumed')
+    } catch (error) {
+      beat('agent-resume-failed', { error: String(error).slice(0, 160) })
+    }
+  }
+
   let frames = 0
   const timer = setInterval(async () => {
     if (!config.enabled) return
@@ -1078,10 +1123,13 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     if (agent === undefined) {
       ctx.logger.info('[quiet-driver] tick: target agent not live — skip')
       beat('agent-not-live', { frames })
+      noteStall('agent-not-live')
+      void wakeTargetAgent()
       return
     }
     ensureTracking(agent) // attach user-activity listener as soon as the agent exists
     frames += 1
+    if (stallStreak > 0) { stallStreak = 0; clearStallAlert() }
     const userActive = Date.now() - lastUserMsgAt < config.userActiveWindowMs
     if (userActive) {
       // User is actively dialoguing → side-channel, never interrupt the dialog.
@@ -1099,6 +1147,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       // Not dialoguing but agent busy (long task) → yield, wait for next tick.
       ctx.logger.info('[quiet-driver] tick #%d: quiet but busy — yield', frames)
       beat('busy', { frames, status: agent.status })
+      noteStall('busy')
       return
     }
     if (config.onlyWhenIdle) {

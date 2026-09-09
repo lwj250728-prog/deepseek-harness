@@ -1677,6 +1677,29 @@ assert rows, "心跳账本为空"
 newest = max(r.get("ts", 0) for r in rows)
 assert time.time() * 1000 - newest < THRESH, "自主驱动停摆: 最新心跳 %.0f 分钟前" % ((time.time() * 1000 - newest) / 60000)
 '
+t "源码含主动唤醒+停摆告警" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
+assert "ctx.agents.resume(" in s, "缺主动唤醒"
+assert "wakeTargetAgent" in s and "noteStall(" in s, "唤醒/停摆计数未接线"
+assert "cl-stall-" in s and "raiseStallAlert" in s, "缺停摆告警"
+assert "clearStallAlert" in s, "缺恢复关单"
+'
+t "产物含唤醒与告警(已部署)" bash -c "grep -q 'agent-resumed' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js' && grep -q 'cl-stall' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
+t "停摆原因分布可查(实测agent-not-live)" python3 -c '
+import json, os, time, subprocess
+hb = os.path.expanduser("~/.dsh/cognitive-pipeline/quiet-driver-heartbeat.jsonl")
+lib = os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/lib/index.js")
+svc = os.popen("systemctl --user show dsh-web.service -p ActiveEnterTimestamp --value").read().strip()
+ep = subprocess.run(["date", "-d", svc, "+%s"], capture_output=True, text=True).stdout.strip()
+if not ep.isdigit() or int(ep) * 1000 < os.path.getmtime(lib) * 1000:
+    raise SystemExit(0)  # 未加载新 lib
+if not os.path.exists(hb):
+    raise SystemExit(0)
+rows = [json.loads(l) for l in open(hb, encoding="utf8") if l.strip()]
+assert rows, "心跳为空"
+assert all(r.get("reason") for r in rows), "心跳缺 reason"
+'
 t "心跳含跳过原因分类" python3 -c '
 import json, os, time, subprocess
 hb = os.path.expanduser("~/.dsh/cognitive-pipeline/quiet-driver-heartbeat.jsonl")
