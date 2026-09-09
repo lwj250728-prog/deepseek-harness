@@ -126,6 +126,13 @@ export class HashSemanticScorer implements SemanticScorer {
  * enough means history is relevant even when the semantic cosine is diluted),
  * and `channels` records the per-channel contributions (w_c · s_c) for
  * feedback learning. */
+/** 精排审计结果(cl-071): 供落盘后评估"提升项 vs 原首位"谁更准。 */
+interface RefineAudit {
+  readonly note: string | null
+  readonly promotedExpId: string | null
+  readonly originalTopExpId: string | null
+}
+
 interface RankedHit {
   readonly exp: Experience
   /** Semantic-channel cosine (the classic similarity). */
@@ -415,9 +422,10 @@ export class HotEngine {
     // Low-confidence deterministic routing triggers the LLM refine pass: the
     // route reads the fused candidates and may drop genuinely inapplicable
     // top hits (cosine similarity does not imply premise transferability).
-    const { note: refineNote, ranked: refined } = await this.refineRetrieval(
+    const refine = await this.refineRetrieval(
       input, ranked, oodSignal, taxonomyContext, sessionId, signal,
     )
+    const refined = refine.ranked
     const samples = refined.map(hit => hit.exp)
     const topChannels = refined[0] === undefined ? null : refined[0].channels
 
@@ -449,11 +457,11 @@ export class HotEngine {
     const adviceSuffix = this.taxonomyAdviceLine(taxonomyContext)
     if (isNovel) {
       return this.predictNovel(
-        input, topChannels, sessionId, signal, oodSignal, top1, successReference, taxonomyContext, adviceSuffix, refineNote,
+        input, topChannels, sessionId, signal, oodSignal, top1, successReference, taxonomyContext, adviceSuffix, refine,
       )
     }
     return this.predictKnown(
-      input, samples, topChannels, sessionId, signal, oodSignal, top1, successReference, taxonomyContext, adviceSuffix, refineNote,
+      input, samples, topChannels, sessionId, signal, oodSignal, top1, successReference, taxonomyContext, adviceSuffix, refine,
     )
   }
 
@@ -479,7 +487,7 @@ export class HotEngine {
     taxonomyContext: TaxonomyContext,
     sessionId: GenerateOptions['sessionId'] | undefined,
     signal: AbortSignal | undefined,
-  ): Promise<{ note: string | null; ranked: RankedHit[] }> {
+  ): Promise<RefineAudit & { ranked: RankedHit[] }> {
     // cl-070: 原门控只认"分类体系已建立且路由余量低"或 flat-top——而我们的分类体系是
     // no-taxonomy(version 0), 于是精排自接入起从未触发(pred_128 实测: coverage=no-taxonomy,
     // ood=none, advice 无'检索复核')。改为**检索分数本身**的判据: 融合分 top1 与 top2 的
@@ -490,7 +498,10 @@ export class HotEngine {
     const lowConfidence = (taxonomyContext.coverage === 'covered' && taxonomyContext.margin < this.config.retrievalFailureMargin)
       || oodSignal === 'flat-top'
       || (ranked.length >= 2 && relativeGap < this.config.refineRelativeGap)
-    if (!lowConfidence || ranked.length === 0) return { note: null, ranked: [...ranked] }
+    const originalTopExpId = ranked[0]?.exp.expId ?? null
+    if (!lowConfidence || ranked.length === 0) {
+      return { note: null, ranked: [...ranked], promotedExpId: null, originalTopExpId }
+    }
     const remaining = new Set(ranked.map(hit => hit.exp.expId))
     const reasons: string[] = []
     let dropped = 0
@@ -515,7 +526,9 @@ export class HotEngine {
       dropped += 1
       if (decision.reason !== null && decision.reason.length > 0) reasons.push(decision.reason)
     }
-    if (dropped === 0 && promoted === null) return { note: null, ranked: [...ranked] }
+    if (dropped === 0 && promoted === null) {
+      return { note: null, ranked: [...ranked], promotedExpId: null, originalTopExpId }
+    }
     const kept = ranked.filter(hit => remaining.has(hit.exp.expId))
     // 提升: 把精排官指定的那条移到最前(其余顺序不变)
     const ordered = promoted === null
@@ -525,7 +538,7 @@ export class HotEngine {
     if (dropped > 0) parts.push(`剔除 ${dropped} 条（${reasons.join('；') || '前提或情境不可迁移'}）`)
     if (promoted !== null && kept[0]?.exp.expId !== promoted) parts.push(`精排提升 ${promoted} 至首位`)
     const note = parts.length === 0 ? null : ` | 检索复核：${parts.join('；')}`
-    return { note, ranked: ordered }
+    return { note, ranked: ordered, promotedExpId: promoted, originalTopExpId }
   }
 
   /**
@@ -653,7 +666,7 @@ export class HotEngine {
     successReference: SuccessReference | null,
     taxonomyContext: TaxonomyContext,
     adviceSuffix: string,
-    refineNote: string | null,
+    refine: RefineAudit,
   ): Promise<PredictResult> {
     const hash = String(signatureHash(input.action))
     const expired = this.store.expireTempStrategies()
@@ -763,7 +776,7 @@ export class HotEngine {
     if (successReference !== null) {
       advice += ` | 参照成功策略（簇「${successReference.clusterName}」）：${successReference.decisionRule}`
     }
-    if (refineNote !== null) advice += refineNote
+    if (refine.note !== null) advice += refine.note
     advice += adviceSuffix
 
     const predictionId = this.store.nextPredictionId()
@@ -796,6 +809,10 @@ export class HotEngine {
       // contributions, so the feedback loop can reward/penalize the channel
       // that surfaced the (possibly useful) near-miss.
       fusion: topChannels === null ? null : { scores: [...topChannels] },
+      // cl-071: 精排审计落盘——事后可统计"被提升项 vs 原首位"谁更准
+      retrievalNote: refine.note,
+      promotedExpId: refine.promotedExpId,
+      originalTopExpId: refine.originalTopExpId,
     })
 
     return {
@@ -827,7 +844,7 @@ export class HotEngine {
     successReference: SuccessReference | null,
     taxonomyContext: TaxonomyContext,
     adviceSuffix: string,
-    refineNote: string | null,
+    refine: RefineAudit,
   ): Promise<PredictResult> {
     const positive = samples.filter(exp => outcomePolarity(exp.sar.outcomeUtility) === 'positive').length
     // Neutral experiences carry no net utility signal; they must not be
@@ -887,7 +904,7 @@ export class HotEngine {
     if (successReference !== null) {
       advice += ` | 参照成功策略（簇「${successReference.clusterName}」）：${successReference.decisionRule}`
     }
-    if (refineNote !== null) advice += refineNote
+    if (refine.note !== null) advice += refine.note
     advice += adviceSuffix
 
     const predictionId = this.store.nextPredictionId()
@@ -910,6 +927,10 @@ export class HotEngine {
       predictionError: null,
       resolvedAt: null,
       fusion: nearest === undefined || topChannels === null ? null : { scores: [...topChannels] },
+      // cl-071: 精排审计落盘——事后可统计"被提升项 vs 原首位"谁更准
+      retrievalNote: refine.note,
+      promotedExpId: refine.promotedExpId,
+      originalTopExpId: refine.originalTopExpId,
     })
 
     return {

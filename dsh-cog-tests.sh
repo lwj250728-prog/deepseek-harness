@@ -1165,6 +1165,47 @@ assert "py_compile" in s, "未覆盖 .py 语法检查"
 t "语法闸当前全绿" bash -c "bash '$HOME/dsh-fork/dsh-script-lint.sh' | grep -q '全部脚本语法通过'"
 t "语法闸已挂cron" bash -c "crontab -l 2>/dev/null | grep -q dsh-script-lint"
 
+# ── T48 精排审计落盘(2026-09-09 13:3x 固化——cl-071: 精排门控挂在旧前提, 提升项质量无法事后评估) ──
+# 根因: refineRetrieval 只回传 note 文本, 被提升项/原首位都随进程丢弃 → "提升得准不准"永远无从统计。
+# 验收: 类型有字段 + 两处写入点都落盘 + 编译产物新鲜 + 运行时账本真的出现该键(外部锚, 非自报)。
+echo "[T48] 精排审计落盘(cl-071: 类型/写入点/产物/运行时账本四层)"
+t "Prediction类型含精排审计字段" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/types.ts")).read()
+seg = s[s.index("export interface Prediction"):s.index("export interface TempStrategy") if "export interface TempStrategy" in s else len(s)]
+for key in ("retrievalNote", "promotedExpId", "originalTopExpId"):
+    assert key in seg, "Prediction 缺字段 %s" % key
+'
+t "两处addPrediction均落盘审计" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/hot-engine.ts")).read()
+assert s.count("retrievalNote: refine.note") == 2, "写入点不足两处: %d" % s.count("retrievalNote: refine.note")
+assert "promotedExpId: refine.promotedExpId" in s and "originalTopExpId: refine.originalTopExpId" in s, "缺提升项/原首位落盘"
+assert s.count("this.store.addPrediction(") == 2, "addPrediction 调用点数变了(%d), 需同步落盘" % s.count("this.store.addPrediction(")
+'
+t "编译产物含审计字段" bash -c "grep -q retrievalNote '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js' && grep -q promotedExpId '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js'"
+t "运行时账本已出现审计键" python3 -c '
+import json, os
+base = os.path.expanduser("~/.dsh/cognitive-pipeline")
+lib = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")
+build_ms = os.path.getmtime(lib) * 1000
+keys = ("retrievalNote", "promotedExpId", "originalTopExpId")
+rows = [json.loads(l) for l in open(os.path.join(base, "predictions.jsonl")) if l.strip()]
+assert rows, "预测账本为空"
+newer = [r for r in rows if r.get("timestamp", 0) > build_ms]
+if newer:
+    bad = [r for r in newer if not all(k in r for k in keys)]
+    assert not bad, "构建后有 %d 条预测缺审计键(运行时代码未更新)" % len(bad)
+else:
+    # 无新预测(预测只在用户活跃窗创建, cl-062) → 退化为运行时代码新鲜度锚:
+    # 进程启动必须晚于本次构建, 否则新字段根本没加载。
+    svc = os.popen("systemctl --user show dsh-web.service -p ActiveEnterTimestamp --value").read().strip()
+    import subprocess
+    ep = subprocess.run(["date", "-d", svc, "+%s"], capture_output=True, text=True).stdout.strip()
+    assert ep.isdigit(), "无法解析服务启动时间: %r" % svc
+    assert int(ep) * 1000 > build_ms, "服务启动早于构建(未加载新字段)"
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。

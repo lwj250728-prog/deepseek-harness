@@ -268,6 +268,18 @@ export interface Prediction {
   readonly fusion: {
     readonly scores: readonly number[]
   } | null
+  /** LLM refine note recorded at predict time (cl-071), null when the refine
+   * pass did not run or changed nothing. Kept verbatim so later evaluation can
+   * reconstruct which gating condition fired. */
+  readonly retrievalNote?: string | null
+  /** Experience the refine pass promoted to top-1, null when no promotion
+   * happened. Together with `originalTopExpId` this lets feedback measure
+   * whether the promoted hit actually predicted better than the fused top-1 —
+   * the audit the refine gate previously could not be scored on. */
+  readonly promotedExpId?: string | null
+  /** Fused top-1 experience id before the refine pass, null when retrieval
+   * returned nothing. */
+  readonly originalTopExpId?: string | null
 }
 
 /** Lifecycle state of one scratchpad strategy. */
