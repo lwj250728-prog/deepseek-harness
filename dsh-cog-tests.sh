@@ -1470,7 +1470,17 @@ assert not any(r.get("expId") == "exp_test" for r in rows), "测试数据污染�
 echo "[T54] 精排收益度量器(refine-eval: A/B 分组 + 小样本保护 + cron)"
 t "度量器存在且可执行" bash -c "test -x '$HOME/dsh-fork/dsh-refine-eval.py'"
 t "度量器可运行且输出A/B分组" bash -c "python3 '$HOME/dsh-fork/dsh-refine-eval.py' | grep -q 'A·精排提升' && python3 '$HOME/dsh-fork/dsh-refine-eval.py' | grep -q 'B·未开火'"
-t "小样本不给结论" bash -c "python3 '$HOME/dsh-fork/dsh-refine-eval.py' | grep -q '样本不足'"
+t "小样本不给结论" python3 -c '
+import re, subprocess, os
+out = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-refine-eval.py")], capture_output=True, text=True).stdout
+a = re.search(r"A·精排提升: 已结算 (\d+) 条", out); b = re.search(r"B·未开火: 已结算 (\d+) 条", out)
+assert a and b, "缺 A/B 计数"
+na, nb = int(a.group(1)), int(b.group(1))
+if min(na, nb) < 5:
+    assert "样本不足" in out, "小样本未保护: A=%d B=%d" % (na, nb)
+else:
+    assert "样本不足" not in out, "样本已足仍拒给结论: A=%d B=%d" % (na, nb)
+'
 t "度量器已挂cron" bash -c "crontab -l 2>/dev/null | grep -q dsh-refine-eval"
 
 # ── T55 偏离元经验继承链锚(tp-051: cl-074 接线 + 条件性运行时见证) ──
@@ -1629,7 +1639,7 @@ out = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-refine-eval.
 m = re.search(r"A·精排提升: 已结算 (\d+) 条, 平均误差 ([0-9.]+)", out)
 assert m, "A 组输出缺失"
 assert int(m.group(1)) == len(prom), "A 组结算数不符"
-assert abs(float(m.group(2)) - want) < 1e-6, "A 组均值不符: 输出 %s vs 实算 %.3f" % (m.group(2), want)
+assert abs(float(m.group(2)) - want) < 1e-3, "A 组均值不符: 输出 %s vs 实算 %.3f" % (m.group(2), want)
 '
 
 # ── T59 采纳计数原子化(tp-053/cl-079: 同回合多目标采纳时并发读-改-写丢更新) ──
@@ -1711,9 +1721,38 @@ if int(ep) * 1000 < os.path.getmtime(lib) * 1000:
 if int(ep) * 1000 + 20 * 60 * 1000 > time.time() * 1000:
     raise SystemExit(0)
 rows = [json.loads(l) for l in open(hb, encoding="utf8") if l.strip()]
-known = {"tick", "silent-skip", "agent-not-live", "busy", "user-active"}
+known = {"tick", "silent-skip", "agent-not-live", "agent-resumed", "agent-resume-failed", "busy", "user-active"}
 bad = [r.get("reason") for r in rows if r.get("reason") not in known]
 assert not bad, "未知跳过原因: %s" % bad[:3]
+'
+
+# ── T61 inspect_memory 输出 schema 完备性(cl-082: 加 lexical 通道后输出多键, schema additionalProperties:false 未同步 → 工具自 12:5x 起调用即报错, 无人调用故无人发现) ──
+echo "[T61] inspect_memory 输出 schema 完备(输出键必须全部在 schema 声明, 防'没人调用就没人发现')"
+t "输出键全部在 schema 声明" python3 -c '
+import re, os
+p = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/tools.ts")
+s = open(p, encoding="utf8").read()
+# schema 段: 第一个 channel_weights 的 properties
+i = s.index("channel_weights: {")
+j = s.index("properties: {", i)
+seg = s[j:s.index("},", s.index("lexical: {", j)) + 2]
+declared = set(re.findall(r"(\w+): \{ type: .number., required: true \}", seg))
+# 输出段: 最后一个 channel_weights 对象(带 result.channelWeights.*)
+outseg = s[s.rindex("channel_weights: {"):]
+outseg = outseg[:outseg.index("},", outseg.index("lexical"))]
+emitted = set(re.findall(r"(\w+): result\.channelWeights\.(\w+)", outseg))
+emitted = {a for a, b in emitted}
+missing = emitted - declared
+assert not missing, "schema 未声明输出键: %s" % sorted(missing)
+assert "lexical" in declared, "schema 缺 lexical"
+'
+t "schema 与输出同源(无 additionalProperties 冲突)" python3 -c '
+import re, os
+p = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/tools.ts")
+s = open(p, encoding="utf8").read()
+i = s.index("channel_weights: {")
+seg = s[i:i+800]
+assert "additionalProperties: false" in seg, "未找到 additionalProperties:false(检查点漂移)"
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"

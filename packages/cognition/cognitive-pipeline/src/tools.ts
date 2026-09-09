@@ -634,6 +634,7 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
               situational: { type: 'number', required: true },
               symptom: { type: 'number', required: true },
               outcome: { type: 'number', required: true },
+              lexical: { type: 'number', required: true },
             },
           },
           taxonomy: {
