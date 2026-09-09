@@ -1076,6 +1076,37 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     }) + '\n').catch(() => undefined)
     stallAlertId = null
   }
+  // 2026-09-09 23:3x (cl-090): "帧被投递但没人消费"守卫。实测 20:30 后 18 条 direct-frame
+  // 的 output **完全相同**(都是 20:21 那条回答)——agent.followup 把帧投进收件箱, 但没有为它
+  // 开新回合, extractAssistantResponse 的 whenIdle() 立即返回并扫到上一条 assistant 消息;
+  // 帧于是持续堆积, 直到用户发消息时一次性涌入(用户: "出现了好多帧问题")。
+  // 守卫: 连续 2 帧拿到与上一帧逐字相同的输出 → 判定"未消费", 暂停派帧 30 分钟并升级告警。
+  let staleDispatchCount = 0
+  let suspendDispatchUntil = 0
+  const STALE_DISPATCH_LIMIT = 2
+  const SUSPEND_MS = 30 * 60 * 1000
+  const noteDispatchResult = (responseText: string, previousOutput: string | undefined): boolean => {
+    if (responseText.length === 0 || previousOutput === undefined) {
+      staleDispatchCount = 0
+      return true
+    }
+    if (responseText === previousOutput) {
+      staleDispatchCount += 1
+      beat('dispatch-unconsumed', { staleDispatchCount })
+      if (staleDispatchCount >= STALE_DISPATCH_LIMIT) {
+        suspendDispatchUntil = Date.now() + SUSPEND_MS
+        raiseStallAlert('dispatch-unconsumed', staleDispatchCount)
+        ctx.logger.warn('[quiet-driver] 帧未被消费(输出与上帧逐字相同) ×%d → 暂停派帧 %d 分钟',
+          staleDispatchCount, Math.round(SUSPEND_MS / 60000))
+      }
+      return false
+    }
+    staleDispatchCount = 0
+    clearStallAlert()
+    return true
+  }
+  const dispatchSuspended = (): boolean => Date.now() < suspendDispatchUntil
+
   const noteStall = (reason: string): void => {
     stallStreak += 1
     if (stallStreak >= STALL_ALERT_AFTER) raiseStallAlert(reason, stallStreak)
@@ -1356,6 +1387,10 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     const inducement = openQ !== null
       ? { id: openQ.id, question: openQ.question, category: '开放问题' }
       : ((escalated || prevConfirmed) ? await pickInducement(config.inducementsPath) : null)
+          if (dispatchSuspended()) {
+            beat('dispatch-suspended', { frames })
+            return
+          }
           const message = createUserMessage({
             content: [{ type: 'text', text: buildFrameText(carrier, frameCtx.output, escalated ? MAX_INCREMENTAL_FRAMES : 0, goals, inducement) }],
             source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧 #${frames}` },
@@ -1365,10 +1400,13 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
           // 自主进化 #001: direct-frame 应答落盘——等主会话应答完, 提取最后 assistant 文本写入 output。
           // (原 output 恒空 = 空闲唤醒的认知产物全丢; 补上沉淀环, 不需主会话自律。)
           const responseText = await extractAssistantResponse(ctx, agent)
+          // cl-091: 判定本帧是否真被消费(输出与上一帧逐字相同 = 没被消费)。
+          const consumed = noteDispatchResult(responseText, frameCtx.output)
           // 记录直驱帧到 think-log（含协议模式+主会话应答产出），供 v18 下帧参考。
           await logFrame(config.thinkLogPath, {
             ts: Date.now(), kind: 'direct-frame', frameNo: frames, mode,
             session: sessionId, output: responseText,  // 不再恒空——应答沉淀
+            consumed,
           })
           if (responseText.length > 0) {
             ctx.logger.info('[quiet-driver] direct-frame #%d response persisted (%d chars)', frames, responseText.length)

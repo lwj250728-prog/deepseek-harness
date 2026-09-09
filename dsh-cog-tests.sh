@@ -1953,7 +1953,39 @@ for r in rows:
 assert not bad, "构建后仍出现跨链提升(cl-089 未生效): %s" % bad[:3]
 '
 
-echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
+# ── T68 未消费帧守卫(cl-091: 20:30 后 18 条 direct-frame 输出逐字相同 → 帧堆积后一次性涌入) ──
+echo "[T68] 未消费帧守卫(输出比对/暂停派帧/可见化)"
+t "源码含未消费判定与暂停" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
+for key in ("noteDispatchResult", "staleDispatchCount", "suspendDispatchUntil", "dispatch-suspended"):
+    assert key in s, "缺 %s" % key
+assert "responseText === previousOutput" in s, "判据不是逐字比对"
+'
+t "派发前检查暂停状态" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
+i = s.index("if (dispatchSuspended())")
+j = s.index("agent.followup(message)", i)
+assert 0 < j - i < 900, "暂停检查不在派发之前"
+'
+t "产物含守卫(已部署)" bash -c "grep -q 'dispatch-suspended' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
+t "条件性见证: 近期帧输出不再逐字重复" python3 -c '
+import json, os, datetime
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/quiet-driver-frames.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+rows = [r for r in rows if r.get("kind") == "direct-frame" and r.get("output")]
+if len(rows) < 3:
+    raise SystemExit(0)
+# 只看最近 6 条: 连续两条 output 逐字相同 = 未被消费(旧行为), 守卫上线后应消失
+tail = rows[-6:]
+dup = [(tail[i].get("ts"), str(tail[i].get("output"))[:40]) for i in range(1, len(tail))
+       if tail[i].get("output") == tail[i-1].get("output")]
+# 允许存在(守卫尚未加载/正在重启), 但必须被标注 consumed=False
+bad = [d for d in dup if tail[[r.get("ts") for r in tail].index(d[0])].get("consumed") is not False]
+assert not bad, "重复输出帧未被标注 consumed=False: %s" % bad[:2]
+'
+
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
 # 改法: 失败写入有机制保证的通道(言行账本, 帧头已提示"Q3 前先查它");
