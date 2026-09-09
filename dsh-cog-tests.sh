@@ -1486,7 +1486,7 @@ t "度量器可运行且输出A1/A2/B分组" bash -c "python3 '$HOME/dsh-fork/ds
 t "小样本不给结论" python3 -c '
 import re, subprocess, os
 out = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-refine-eval.py")], capture_output=True, text=True).stdout
-a = re.search(r"A1·真提升\(changed\): 已结算 (\d+) 条", out); b = re.search(r"B·未开火: 已结算 (\d+) 条", out)
+a = re.search(r"A1·真提升\(changed\): 已结算 (\d+) 条", out); b = re.search(r"B·未开火\(审计后\): 已结算 (\d+) 条", out)
 assert a and b, "缺 A1/B 计数"
 na, nb = int(a.group(1)), int(b.group(1))
 if min(na, nb) < 5:
@@ -1641,6 +1641,14 @@ assert int(m.group(4)) == len(noop), "noop 计数不符: 输出 %s vs 实算 %d"
 m2 = re.search(r"已排除自主回合预测 (\d+)", out)
 assert m2 and int(m2.group(1)) == len(auto), "排除数不符: %s vs %d" % (m2.group(1) if m2 else "?", len(auto))
 assert "自主回合预测(另一问题, 单列)" in out, "自主预测未单列"
+'
+t "B组须带审计键(防时代混淆)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/dsh-refine-eval.py"), encoding="utf8").read()
+assert "L·审计前历史行" in s and "B·未开火(审计后)" in s, "未区分审计前后"
+i = s.index("no_refine = ")
+seg = s[i:i+400]
+assert "originalTopExpId" in seg and "promotedExpId" in seg, "B 组未要求审计键+未提升"
 '
 t "A组均值只用同源样本" python3 -c '
 import json, os, re, subprocess, statistics

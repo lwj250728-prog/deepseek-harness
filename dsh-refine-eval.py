@@ -47,13 +47,17 @@ def main():
     rows = [r for r in rows if not is_autonomous(r)]
     audited = [r for r in rows if 'originalTopExpId' in r]
     promoted = [r for r in audited if r.get('promotedExpId')]
-    no_refine = [r for r in rows if r.get('retrievalNote') is None and r.get('originalTopExpId') is None]
+    # cl-093: B 组定义修正——此前"无 note 且无 originalTopExpId"只命中**审计字段上线前**的
+    # 历史行(129 条), 与"门控未开火"不是一回事; 现在要求带审计键且未提升。
+    legacy = [r for r in rows if 'originalTopExpId' not in r]
+    no_refine = [r for r in rows
+                 if r.get('retrievalNote') is None and r.get('promotedExpId') is None and 'originalTopExpId' in r]
 
     noop = [r for r in promoted if r.get('promotedExpId') == r.get('originalTopExpId')]
     changed = [r for r in promoted if r.get('promotedExpId') != r.get('originalTopExpId')]
     print(f'检索类预测 {len(rows)}（已排除自主回合预测 {len(auto)}）；带审计键 {len(audited)}；'
           f'精排提升 {len(promoted)}（真提升 {len(changed)} / 身份提升 noop {len(noop)}）')
-    print(f'精排门控未开火 {len(no_refine)}')
+    print(f'门控未开火(带审计键) {len(no_refine)} ｜ 审计前历史行(无法判门控) {len(legacy)}')
     if auto:
         settled_auto = [r for r in auto if resolved(r)]
         if settled_auto:
@@ -66,7 +70,8 @@ def main():
     groups = {
         'A1·真提升(changed)': [r for r in changed if resolved(r)],
         'A2·身份提升(noop)': [r for r in noop if resolved(r)],
-        'B·未开火': [r for r in no_refine if resolved(r)],
+        'B·未开火(审计后)': [r for r in no_refine if resolved(r)],
+        'L·审计前历史行': [r for r in legacy if resolved(r)],
     }
     for name, g in groups.items():
         if not g:
