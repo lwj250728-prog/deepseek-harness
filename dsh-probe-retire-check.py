@@ -64,11 +64,18 @@ def lower_index(line: str, marker: str) -> int:
     return line.lower().index(marker)
 
 
-def deadline_anchor(root: str) -> int | None:
-    """Read the written deadline from the diagnosis report, when present."""
+def deadline_anchor(root: str):
+    """Read the written deadline from the diagnosis report, when present.
+
+    → (found, ts_ms)：found 表示**文件里有没有 probe-deadline 行**，ts_ms 是解析结果(None=解析失败)。
+    实测教训(2026-09-11 05:1x)：原实现把"没有期限行"和"期限行解析不出来"都返回 None, 于是格式一坏
+    (ISO 令牌后面紧跟括号没有空格 → raw.split()[0] 把中文括号吞进 token)就**静默回退到另一个锚点**
+    (探针首条记录的 t), 判出一个"超期 24.1h"的红——看着像探针过期, 其实是解析失败。
+    与 T11 的修法同族：缺证据必须说出来, 不能伪装成另一种判定。
+    """
     text = read_text(os.path.join(root, 'cl-100-diagnosis.md'))
     if text is None:
-        return None
+        return False, None
     for line in text.splitlines():
         marker = 'probe-deadline:'
         if marker not in line.lower():
@@ -76,10 +83,10 @@ def deadline_anchor(root: str) -> int | None:
         raw = line[lower_index(line, marker) + len(marker):].strip()
         token = raw.split()[0].rstrip('，。；,;') if raw.split() else ''
         try:
-            return int(datetime.datetime.fromisoformat(token).timestamp() * 1000)
+            return True, int(datetime.datetime.fromisoformat(token).timestamp() * 1000)
         except Exception:
-            return None
-    return None
+            return True, None
+    return False, None
 
 
 def main() -> int:
@@ -101,7 +108,14 @@ def main() -> int:
     src_has = src_text is not None and SRC_MARKER in src_text
     present = lib_has or src_has
 
-    anchors = [ts for ts in (probe_first_ts(probe), deadline_anchor(args.root)) if ts is not None]
+    found, written = deadline_anchor(args.root)
+    if found and written is None:
+        # 有期限行却解析不出来：这是"缺证据", 不许静默回退到另一个锚点去判真假。
+        print('红：cl-100-diagnosis.md 有 probe-deadline 行但无法解析出时刻'
+              '（缺证据不得当成"用别的锚点"——ISO 令牌后请留一个空格再写说明）', file=sys.stderr)
+        return 1
+
+    anchors = [ts for ts in (probe_first_ts(probe), written) if ts is not None]
 
     if not anchors:
         if present:

@@ -2419,6 +2419,17 @@ if python3 "$HOME/dsh-fork/dsh-probe-retire-check.py" --root "$tmp" --lib "$tmp/
   echo "守卫未开火(应红却绿)"; exit 1
 fi
 '
+t "退场守卫负向: 期限行解析失败必须说出来(不得静默换锚点)" bash -c '
+set -e
+tmp=$(mktemp -d); trap "rm -rf $tmp" EXIT
+printf "%s\n" "# cl-100" "probe-deadline: 坏格式（ISO 令牌后紧跟括号会被 split 吞掉）" > "$tmp/cl-100-diagnosis.md"
+printf "%s\n" "const f = \"settle-debug.jsonl\"" > "$tmp/fake-lib.js"
+printf "%s\n" "// cl-100 PROBE" > "$tmp/fake-src.ts"
+if python3 "$HOME/dsh-fork/dsh-probe-retire-check.py" --root "$tmp" --lib "$tmp/fake-lib.js" --src "$tmp/fake-src.ts" 2>"$tmp/err"; then
+  echo "解析失败却判绿(应红)"; exit 1
+fi
+grep -q "无法解析" "$tmp/err" || { echo "红是红了, 但理由不是解析失败: $(cat "$tmp/err")"; exit 1; }
+'
 t "退场守卫负向: 超期已退场必须绿" bash -c '
 set -e
 tmp=$(mktemp -d); now=$(date +%s%3N); trap "rm -rf $tmp" EXIT
@@ -5064,6 +5075,74 @@ import subprocess
 r = subprocess.run(["bash", "/home/ubuntu/dsh-fork/dsh-guard-t142-probe.sh"], capture_output=True, text=True, timeout=180)
 assert r.returncode == 1, "开火探针未按预期开火(exit=%d): %s" % (r.returncode, r.stderr[-140:])
 print("探针开火: " + r.stderr.strip().splitlines()[-1][:90])
+'
+# ── T143 反收敛: 目标侧不得静默停滞(cl-192) ──
+# 起因(反事实诱导探索查出): 最近 12h 的 20 次提交 100% 是判据/指标清洁工作, 触及目标侧实质的为 0;
+# 而套件 475/0 —— 两条曲线解耦: 判据越来越硬, 目标没动。机制解释: 判据工作的裁决是**确定的绿**,
+# 目标侧工作的裁决不确定, 于是收敛到前者。故把"停滞"本身做成判据(不靠我自觉):
+#   ①目标链数量验收线 ≥10(既有验收指标), 未达标且 3 天没长过 → 红
+#   ②账本最老未关单项 >72h → 红(要么做完/要么重划范围/要么进豁免册写明理由与到期日)
+# 豁免册 stall-waivers.json 只允许"确实需要更长时间的证据型项"(如等平台 30 天验证期), 到期即失效。
+echo "[T143] 反收敛(目标链须在长/最老未关单项不得 3 天不动)"
+t "目标链数量停滞即红(未达标且 3 天没长)" python3 -c '
+import json, os, time
+p = os.environ.get("DSH_CHAINS") or os.path.expanduser("~/.dsh/cognitive-pipeline/chains.json")
+TARGET, WINDOW_H = 10, 72
+n = len(json.load(open(p, encoding="utf8")))
+idle_h = (time.time() - os.path.getmtime(p)) / 3600.0
+if n >= TARGET:
+    print("链 " + str(n) + " 条, 已达验收线 " + str(TARGET))
+else:
+    assert idle_h <= WINDOW_H, ("目标链 " + str(n) + " 条(<验收线 " + str(TARGET)
+                                + ")且已 " + str(round(idle_h, 1)) + " 小时没有新增: 目标侧在停滞")
+    print("链 " + str(n) + "/" + str(TARGET) + ", " + str(round(idle_h, 1)) + "h 前有动静")
+'
+t "最老未关单项不得 3 天不动(豁免须有理由与到期日)" python3 -c '
+import json, os, datetime
+lp = os.environ.get("DSH_COG_LEDGER") or os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
+wp = os.environ.get("DSH_STALL_WAIVERS") or os.path.join(os.path.dirname(lp), "stall-waivers.json")
+WINDOW_H = 72
+lat = {}
+for line in open(lp, encoding="utf8"):
+    if line.strip():
+        r = json.loads(line)
+        if r.get("id"): lat[r["id"]] = r
+TERMINAL = {"done", "retired", "closed"}
+tz = datetime.timezone(datetime.timedelta(hours=8))
+now = datetime.datetime.now(tz)
+oldest = []
+for k, v in lat.items():
+    if v.get("status") in TERMINAL or not k.startswith("cl-"): continue
+    try:
+        age = (now - datetime.datetime.fromisoformat(str(v.get("ts"))[:19]).replace(tzinfo=tz)).total_seconds() / 3600.0
+    except Exception:
+        continue
+    oldest.append((age, k))
+oldest.sort(reverse=True)
+assert oldest, "无未关单 cl 项 —— 本断言前提不成立, 不得算通过"
+waivers = {}
+if os.path.exists(wp):
+    for w in json.load(open(wp, encoding="utf8")).get("waivers", []):
+        waivers[w["id"]] = w
+stale = [(a, k) for a, k in oldest if a > WINDOW_H]
+bad = []
+for a, k in stale:
+    w = waivers.get(k)
+    if not w or not w.get("reason"):
+        bad.append(k + "(" + str(round(a, 1)) + "h)")
+        continue
+    until = w.get("until")
+    ok_until = bool(until) and datetime.datetime.fromisoformat(until).replace(tzinfo=tz) > now
+    if not ok_until:
+        bad.append(k + "(豁免已过期/无到期日)")
+assert not bad, "未关单 cl 项停滞超过 " + str(WINDOW_H) + "h 且无有效豁免: " + repr(bad[:5])
+print("最老未关单 " + oldest[0][1] + " " + str(round(oldest[0][0], 1)) + "h(窗口 " + str(WINDOW_H) + "h), 豁免 " + str(len(waivers)) + " 项")
+'
+t "停滞判据须能开火(合成 96h 旧账本)" python3 -c '
+import subprocess
+r = subprocess.run(["bash", "/home/ubuntu/dsh-fork/dsh-guard-t143-probe.sh"], capture_output=True, text=True, timeout=120)
+assert r.returncode == 1, "停滞判据没开火(exit=" + str(r.returncode) + "): " + r.stderr[-160:]
+print("停滞判据开火: " + (r.stderr.strip().splitlines() or [""])[-1][:80])
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
