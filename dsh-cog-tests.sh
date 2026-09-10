@@ -2750,7 +2750,7 @@ assert "backoffMaxMs?: number" in src, "缺 backoffMaxMs 配置项"
 # cl-118 实测: 6h 上限把整条通道静默了 40 分钟 => 默认下调为 2h
 assert "backoffMaxMs: z.number().min(0).default(2 * 60 * 60 * 1000)" in src, "默认值应为 2h"
 assert "admitLeastBackedOff" in src, "缺通道保活守卫(全部候选被挡时应放行最接近到期者)"
-assert "backoffMaxMs: config.backoffMaxMs ?? 6 * 60 * 60 * 1000" in src, "resolveConfig 未透传"
+assert "backoffMaxMs: config.backoffMaxMs ?? 2 * 60 * 60 * 1000" in src, "resolveConfig 未透传(或默认值与 Config 不一致)"
 assert "resolved.backoffMaxMs" in src, "调用点未用配置值(仍是硬编码)"
 '
 t "退避挡下时审计带"为什么"(expId/连击/有效冷却)" python3 -c '
