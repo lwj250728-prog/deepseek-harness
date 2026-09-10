@@ -9,6 +9,9 @@
  * 用法：npx tsx dsh-waiting-guard-test.ts
  * 退出码：0 = 全部通过；1 = 有失败。
  */
+import { readFileSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { isWaitingNextAction } from './packages/context/quiet-driver/src/waiting.ts'
 
 const cases: Array<[string, string, boolean]> = [
@@ -32,6 +35,30 @@ for (const [name, action, want] of cases) {
   const got = isWaitingNextAction(action)
   if (got !== want) failed.push(`${name}(got=${got} want=${want})`)
 }
+
+// ── 效果见证: 修复之后不得再有"等待型目标被推行动帧" ──────────────────────────
+// 判据锚在产物构建时刻(而不是"最近 N 小时"), 否则修复前的旧轰炸会长期压红;
+// 同时打印审计条数, 让"空过"是可见的而不是藏起来的。
+const LIB = join(homedir(), 'dsh-fork/packages/context/quiet-driver/lib/index.js')
+const FRAMES = join(homedir(), '.dsh/cognitive-pipeline/quiet-driver-frames.jsonl')
+let audited = 0
+try {
+  const cutoff = statSync(LIB).mtimeMs
+  const rows = readFileSync(FRAMES, 'utf8').split('\n').filter(line => line.trim().length > 0)
+  for (const line of rows) {
+    let record: { kind?: unknown, ts?: unknown, nextAction?: unknown, goalId?: unknown }
+    try { record = JSON.parse(line) } catch { continue }
+    if (record.kind !== 'action-frame') continue
+    if (typeof record.ts !== 'number' || record.ts <= cutoff) continue
+    audited += 1
+    if (typeof record.nextAction === 'string' && isWaitingNextAction(record.nextAction)) {
+      failed.push(`构建后仍有等待型目标收到行动帧: ${String(record.goalId)} → ${record.nextAction.slice(0, 40)}`)
+    }
+  }
+} catch (error) {
+  failed.push(`行动帧审计无法执行: ${String(error)}`)
+}
+console.log(`效果见证: 构建后行动帧审计 ${audited} 条`)
 if (failed.length > 0) {
   console.error(`失败 ${failed.length}/${cases.length}: ${failed.join(', ')}`)
   process.exit(1)

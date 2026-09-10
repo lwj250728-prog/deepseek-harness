@@ -2591,7 +2591,7 @@ t "findOpenAlertId/localDay 语义单测(6 例)" bash -c "cd '$HOME/dsh-fork' &&
 
 # ── T90 等待型 nextAction 判定(cl-110: 等待型目标不得被推行动帧) ──
 echo "[T90] 等待型判定(容忍空格 / 不误判可执行项)"
-t "isWaitingNextAction 单测(12 例)" bash -c "cd '$HOME/dsh-fork' && timeout 180 npx tsx dsh-waiting-guard-test.ts"
+t "isWaitingNextAction 单测 + 构建后行动帧审计" bash -c "cd '$HOME/dsh-fork' && timeout 180 npx tsx dsh-waiting-guard-test.ts"
 t "行动帧循环已用纯函数判定(cl-110 接线)" bash -c "
 grep -q 'isWaitingNextAction' '$HOME/dsh-fork/packages/context/quiet-driver/src/waiting.ts' &&
 grep -q 'isWaitingNextAction(g.nextAction)' '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts'
