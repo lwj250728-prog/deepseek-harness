@@ -24,7 +24,9 @@ import subprocess
 import sys
 
 DIR = os.path.expanduser('~/.dsh/cognitive-pipeline')
-LOG = os.path.join(DIR, 'memory-watch.jsonl')
+# 记录路径可覆盖: 合成(低内存)用例必须写自己的临时账本 —— 否则哨兵账本里会混入假告警,
+# 而哨兵的全部价值就是取 OOM 前兆轨迹可信(cl-157, 同 cl-140 的观测通道污染家族)。
+LOG = os.environ.get('DSH_MEMORY_WATCH_LOG') or os.path.join(DIR, 'memory-watch.jsonl')
 TZ = datetime.timezone(datetime.timedelta(hours=8))
 ALERT_MB = 350
 WATCH_SCRIPTS = ('dsh-adoption-stats.py', 'dsh-ab-compare.py', 'dsh-adoption-observe.py',

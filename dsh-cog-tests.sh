@@ -4263,7 +4263,9 @@ t "内存哨兵必须在低内存时告警" python3 -c '
 import json, os, subprocess, sys
 fake = "/tmp/t125-meminfo"
 assert os.path.exists(fake), "缺合成 meminfo"
-env = dict(os.environ, DSH_MEMINFO_PATH=fake)
+# 合成用例必须写自己的账本: 否则低内存假告警会混进生产 memory-watch.jsonl(cl-157)
+env = dict(os.environ, DSH_MEMINFO_PATH=fake,
+           DSH_MEMORY_WATCH_LOG="/tmp/t125-memory-watch.jsonl")
 r = subprocess.run([sys.executable, os.path.expanduser("~/dsh-fork/dsh-memory-watch.py"), "--json"],
                    capture_output=True, text=True, timeout=300, env=env)
 assert r.returncode == 2, "低内存时哨兵退出码应为 2, 实为 %s" % r.returncode
@@ -4272,6 +4274,19 @@ rec = json.loads(line)
 assert rec["alert"] is True, "哨兵未告警: %s" % rec
 assert rec["memAvailableMB"] < 400, "读到的可用内存不符: %s" % rec["memAvailableMB"]
 print("哨兵告警开火(可用 %sMB)" % rec["memAvailableMB"])
+'
+t "合成用例不得写进生产内存账本" python3 -c '
+import hashlib, os, subprocess, sys
+prod = os.path.expanduser("~/.dsh/cognitive-pipeline/memory-watch.jsonl")
+assert os.path.exists(prod), "生产内存账本不存在"
+before = hashlib.sha256(open(prod, "rb").read()).hexdigest()
+env = dict(os.environ, DSH_MEMINFO_PATH="/tmp/t125-meminfo",
+           DSH_MEMORY_WATCH_LOG="/tmp/t125-memory-watch2.jsonl")
+r = subprocess.run([sys.executable, os.path.expanduser("~/dsh-fork/dsh-memory-watch.py")],
+                   capture_output=True, text=True, timeout=300, env=env)
+assert r.returncode == 2, "合成低内存应告警(退出 2), 实为 %s" % r.returncode
+assert hashlib.sha256(open(prod, "rb").read()).hexdigest() == before, "合成用例污染了生产内存账本"
+print("生产账本未被写入")
 '
 t "内存记录字段完整且排程带 origin" python3 -c '
 import json, os, subprocess
