@@ -3059,6 +3059,33 @@ if d["before"]["injectedCharsMean"] is None:
     print("诚实标注: 加宽前的成本未埋点(仪表是改变之后才加的), 成本对比暂不可比")
 '
 
+# ── T105 隐式采纳代理的诚实处置(cl-125: 饱和的指标不许当结论用) ──
+echo "[T105] 隐式采纳代理(饱和必须自曝 / 只采显式口径)"
+t "隐式采纳代理已落盘且带饱和判定" bash -c "
+python3 '$HOME/dsh-fork/dsh-implicit-adoption.py' --quiet >/dev/null 2>&1 || true
+python3 -c \"
+import json, os
+p = os.path.expanduser('~/.dsh/cognitive-pipeline/implicit-adoption.json')
+assert os.path.exists(p), 'implicit-adoption.json 缺失'
+d = json.load(open(p, encoding='utf8'))
+for k in ('explicitRate', 'proxySaturated', 'verdict', 'useExplicitRateOnly', 'caveat'):
+    assert k in d, '缺字段 %s' % k
+print('显式 %.1f%% | 代理判定 %s' % ((d['explicitRate'] or 0) * 100, d['verdict']))
+\"
+"
+t "饱和的代理不得被当成采纳率(只采显式口径)" python3 -c '
+import json, os
+d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/implicit-adoption.json"), encoding="utf8"))
+combined = d.get("explicitPlusImplicitRate") or 0
+if combined > 0.25:
+    # 实测 74.8%~95.9%: 自指工程回路里经验动作词与其他回合的工具调用天然重叠 => 无信息量。
+    # 这条断言把"必须自曝饱和、只采显式口径"固化下来, 防后来者拿它当业绩。
+    assert d.get("proxySaturated") is True, "代理明显饱和却未标记"
+    assert d.get("useExplicitRateOnly") is True, "饱和代理仍被允许当口径"
+    assert "假阳性" in d.get("caveat", ""), "缺假阳性标注"
+print("代理饱和已显式标记, 口径=显式(%.1f%%)" % ((d["explicitRate"] or 0) * 100))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
