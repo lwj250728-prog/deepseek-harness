@@ -4495,7 +4495,8 @@ sizes = sorted({len(r["expIds"]) for r in after})
 # 实测加宽前(topK=1)的分布就是 {1: 11, 2: 9}。故上界取 top+1, 并额外要求"不得超过加宽期的上界"。
 limit = top + 1
 assert all(s <= limit for s in sizes), "运行时条目数 %s 超过 topK=%d 的可解释上界 %d => 配置未生效" % (sizes, top, limit)
-assert any(s <= top for s in sizes), "没有任何注入落在 topK=%d 之内: 配置可能未生效" % top
+# 实测(topK=1 时期): 少量样本可能**全部**是 2 条(novelty 覆盖多带一条), 那是合法形态;
+# 故只保上界, 不再要求"至少一条落在 topK 内"(该要求在小样本上会假红)。
 print("运行时证据通过: %d 条注入, 条目数 %s (topK=%d, 上界 %d)" % (len(after), sizes, top, limit))
 '
 
@@ -4573,6 +4574,50 @@ else:
     assert "afterOldLens" not in segs, "口径点在切换点之前, 不应出现 afterOldLens 段"
     assert segs.get("afterNewLens"), "缺 after 段"
     print("口径点在切换点之前: 未切段(单片 after)")
+'
+
+# ── T131 被引用的模型 id 必须在供应商广告目录内(cl-171: 下架 id 静默留在配置里) ──
+# 实证: 认知管线自身的 LLM 路由(cordis.patch.yml)长期写着 deepseek-v4-flash, 而该 id 09-10 起
+# 已不在供应商目录(仅 deepseek-flash / deepseek-v4-pro); 服务端靠别名兜着, 一旦别名失效,
+# **第 2 层 LLM 裁判**(SAR 抽取/精排/标定/OOD/聚类重建)会整体失效 —— 而配置侧毫无提示。
+# 判据: settings.yaml 与 profile patch 里出现的每个 model id, 必须能在目录快照中找到(或登记豁免)。
+echo "[T131] 模型引用一致性(配置引用的 id 须在广告目录内 / 两类消费者须分别记录)"
+t "配置引用的模型 id 必须都在广告目录内" python3 -c '
+import json, os, re
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+cat = json.load(open(os.path.join(D, "model-catalog.json"), encoding="utf8"))
+advertised = set(cat.get("catalog") or [])
+assert advertised, "缺供应商目录快照(断言前提不成立)"
+refs = {}
+for path, label in ((os.path.expanduser("~/.dsh/settings.yaml"), "agent-default"),
+                    (os.path.expanduser("~/.dsh/profiles/web/cordis.patch.yml"), "profile-patch")):
+    if not os.path.exists(path):
+        continue
+    for line in open(path, encoding="utf8"):
+        s = line.strip()
+        if s.startswith("#"):
+            continue
+        m = re.match(r"model:\s*([A-Za-z0-9._/-]+)\s*$", s)
+        # 排除: 嵌入模型(BAAI/...) 与**哨兵值**(default/auto/inherit 表示"沿用上层默认", 不是具体 id)
+        if m and not m.group(1).startswith("BAAI") and m.group(1).lower() not in ("default", "auto", "inherit"):
+            refs.setdefault(m.group(1), []).append(label)
+assert refs, "没解析到任何被引用的模型 id"
+missing = {k: v for k, v in refs.items() if k not in advertised}
+assert not missing, "配置引用了不在广告目录内的模型 id: %s (目录: %s)" % (missing, sorted(advertised))
+print("引用的 %d 个模型 id 全在广告目录内: %s" % (len(refs), sorted(refs)))
+'
+t "检查器须分别报告 agent 默认档与管线路由" python3 -c '
+import json, os
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+cat = json.load(open(os.path.join(D, "model-catalog.json"), encoding="utf8"))
+assert "agentDefaultModel" in cat, "检查器未报告 agent 默认档(cl-171 前它把管线路由误当成默认档)"
+assert "pipelineModel" in cat, "检查器未报告管线路由模型"
+adv = set(cat.get("catalog") or [])
+for label, key in (("agent 默认档", "agentDefaultModel"), ("管线路由", "pipelineModel")):
+    v = cat.get(key)
+    if v:
+        assert v in adv, "%s(%s)不在广告目录内" % (label, v)
+print("两类消费者已分别记录且均在目录内")
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
