@@ -15,6 +15,8 @@
  * @module @deepseek-ai/dsh-cognitive-inject
  */
 
+import { appendFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
@@ -28,6 +30,7 @@ import {
   situationVector,
   symptomOverlap,
 } from '@deepseek-ai/dsh-cognitive-pipeline'
+import { classifyTurnKind, decideInjection } from './turn-kind.ts'
 import type { CognitivePipelineService } from '@deepseek-ai/dsh-cognitive-pipeline'
 import type { Experience, OutcomePolarity, SolidifiedStrategy } from '@deepseek-ai/dsh-cognitive-pipeline'
 import {
@@ -77,6 +80,13 @@ export interface Config {
    * embedding cosine (bge-m3) → 0.5 (business med 0.651, chitchat med 0.470,
    * business min 0.455). Lower than minSimilarity is meaningless. */
   directSimilarityThreshold?: number
+  /** cl-114: 会话回合数达到此值即视为"已建立"(上下文已稀释)——反思类帧不再注入。
+   *  实测: 1100 回合的主会话里反思类帧 0/501 采纳; 而同样帧在 1-3 回合的新会话
+   *  (子代理/旁路)采纳 ~17%。默认 20。 */
+  establishedSessionTurns?: number
+  /** cl-114: 行动帧(已建立会话内)的额外相似度余量——该类别采纳率 2.0%, 不该按
+   *  用户回合的宽松度放行。默认 0.08。 */
+  actionFrameMarginBoost?: number
   /** Soft trigger boost: when a trigger word (static/derived/jump) fires, the
    * top similarity is boosted by this amount before the gate check. Calibrated
    * with the embedding space: 0.15 lifts a near-miss business hit (e.g. 0.455
@@ -123,6 +133,10 @@ export const Config: z<Config> = z.object({
   enabled: z.boolean().default(true),
   injectCooldownMs: z.number().min(0).default(10 * 60 * 1000),
   directSimilarityThreshold: z.number().min(0).max(1).default(0.5),
+  /** cl-114: 会话回合数达到此值即视为"已建立"(上下文稀释): 反思类帧不再注入。 */
+  establishedSessionTurns: z.number().step(1).min(1).default(20),
+  /** cl-114: 行动帧(已建立会话内)的额外相似度余量, 只有更贴的经验才注入。 */
+  actionFrameMarginBoost: z.number().min(0).max(1).default(0.08),
   triggerBoost: z.number().min(0).max(1).default(0.15),
   review: z.object({
     enabled: z.boolean().default(false),
@@ -144,6 +158,10 @@ export interface ResolvedConfig {
   readonly enabled: boolean
   readonly injectCooldownMs: number
   readonly directSimilarityThreshold: number
+  /** cl-114: 会话回合数达到此值即视为已建立(反思类帧不再注入)。 */
+  readonly establishedSessionTurns: number
+  /** cl-114: 行动帧的额外相似度余量。 */
+  readonly actionFrameMarginBoost: number
   readonly triggerBoost: number
   readonly review: ResolvedReviewConfig
 }
@@ -173,6 +191,8 @@ export function resolveConfig(config: Config): ResolvedConfig {
     enabled: config.enabled ?? true,
     injectCooldownMs: config.injectCooldownMs ?? 10 * 60 * 1000,
     directSimilarityThreshold: config.directSimilarityThreshold ?? 0.5,
+    establishedSessionTurns: config.establishedSessionTurns ?? 20,
+    actionFrameMarginBoost: config.actionFrameMarginBoost ?? 0.08,
     triggerBoost: config.triggerBoost ?? 0.15,
     review: Object.freeze({
       enabled: review.enabled ?? false,
@@ -663,6 +683,29 @@ export function apply(ctx: Context, config: Config = {}): void {
     const afterFailure = isAfterFailure(agent)
     const situation = situationText(decision.messages, resolved.contextDepth)
     if (situation.trim().length === 0) return decision
+    // ── cl-114 回合类型闸门 + 四级漏斗审计 ────────────────────────────────
+    // 实测(主会话 852 条已结算注入按回合类别): 用户回合 13/252=5.2%,
+    // 行动帧 2/99=2.0%, 反思类帧 0/501=0.0% 却占 59% 体积; 但同样的反思帧在
+    // 1-3 回合的新会话(子代理/旁路)里采纳率 ~17%。=> 只在"上下文已稀释的
+    // 长会话"里对反思类帧静默; 行动帧收紧余量; 用户回合不变。
+    const turnKind = classifyTurnKind(messages)
+    const sessionTurns = agent.session.events.filter(ev => ev.type === 'turn/start').length
+    const gate = decideInjection({
+      kind: turnKind,
+      sessionTurns,
+      establishedSessionTurns: resolved.establishedSessionTurns,
+    })
+    const auditPath = join(ctx.cognitivePipeline.resolved.root, 'retrieval-audit.jsonl')
+    const audit = (payload: Record<string, unknown>): void => {
+      void appendFile(auditPath, JSON.stringify({
+        t: Date.now(), sessionId: String(agent.session.id), turnKind, sessionTurns,
+        decision: gate, ...payload,
+      }) + '\n').catch(() => undefined)
+    }
+    if (gate === 'skip') {
+      audit({ stage: 'skipped-reflective-frame' })
+      return decision
+    }
     // ── Situation-driven gate (architecture change, finding #12) ──────────
     // Retrieval runs FIRST (hash-bag cosine is millisecond-cheap); the gate is
     // decided AFTER retrieval by significance, not before by trigger words:
@@ -682,18 +725,30 @@ export function apply(ctx: Context, config: Config = {}): void {
       : resolved.minSimilarity
     const topK = afterFailure ? resolved.failureTopK : resolved.topK
     const hits = await retrieve(ctx.cognitivePipeline, situation, threshold, topK)
-    if (hits.length === 0) return decision
+    if (hits.length === 0) {
+      audit({ stage: 'no-candidates', threshold })
+      return decision
+    }
     const topHit = hits[0]?.similarity ?? 0
     const gateScore = verdict.fired ? topHit + resolved.triggerBoost : topHit
-    const gateThreshold = afterFailure
+    const gateThreshold = (afterFailure
       ? resolved.minSimilarity * resolved.failureThresholdFactor
-      : resolved.directSimilarityThreshold
-    if (gateScore < gateThreshold) return decision
+      : resolved.directSimilarityThreshold)
+      // 行动帧: 只有比常规更贴的经验才注入(2.0% 采纳率, 不该按用户回合的宽松度放行)
+      + (gate === 'inject-strict' ? resolved.actionFrameMarginBoost : 0)
+    if (gateScore < gateThreshold) {
+      audit({ stage: 'below-gate', candidates: hits.length, topHit, gateScore, gateThreshold,
+        triggerSource: verdict.triggerSource })
+      return decision
+    }
     // Cooldown filter: a memory injected into THIS session within the window
     // is not injected again — same-session repeats are noise (finding #3:
     // exp_1 13×, exp_303 9×). All recent → nothing new to say, stay silent.
     const cooled = coolDownInjected(ctx.cognitivePipeline, agent.session.id, hits, resolved.injectCooldownMs)
-    if (cooled.length === 0) return decision
+    if (cooled.length === 0) {
+      audit({ stage: 'cooldown', candidates: hits.length, topHit, triggerSource: verdict.triggerSource })
+      return decision
+    }
     // Prewarm enrichment for the veto gate: a short message ("重启") may match
     // an unrelated experience by surface words (exp_67's literal-overlap false
     // positive). The veto route judges applicability — so it must see what the
@@ -715,7 +770,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     const vetoed = await vetoTopCandidates(
       ctx, ctx.cognitivePipeline.resolved.route, vetoSituation, cooled, signal,
     )
-    if (vetoed.accepted.length === 0) return decision
+    if (vetoed.accepted.length === 0) {
+      audit({ stage: 'veto-rejected', candidates: hits.length, overThreshold: cooled.length,
+        vetoRejected: vetoed.rejectedNotes.length, topHit, triggerSource: verdict.triggerSource })
+      return decision
+    }
     // Solidified-strategy priority, AFTER the veto: when the ACCEPTED
     // experiences link to a chain that seeded a solidified strategy (the
     // repeated-success promotion), inject the STRATEGY — a short,
@@ -734,6 +793,9 @@ export function apply(ctx: Context, config: Config = {}): void {
         jumpWords: verdict.jumpWords,
         strategyId: strategy.strategyId,
       })
+      audit({ stage: 'injected', path: 'strategy', candidates: hits.length, overThreshold: cooled.length,
+        vetoAccepted: vetoed.accepted.length, vetoRejected: vetoed.rejectedNotes.length,
+        expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource })
       return {
         kind: 'enter',
         messages: [...decision.messages, block],
@@ -786,6 +848,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       jumpWords: verdict.jumpWords,
     })
     markHitsReviewed(ctx.cognitivePipeline, vetoed.accepted)
+    audit({ stage: 'injected', path: 'raw', candidates: hits.length, overThreshold: cooled.length,
+      vetoAccepted: vetoed.accepted.length, vetoRejected: vetoed.rejectedNotes.length,
+      expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource })
     return {
       kind: 'enter',
       messages: [...decision.messages, block],

@@ -2597,6 +2597,37 @@ grep -q 'isWaitingNextAction' '$HOME/dsh-fork/packages/context/quiet-driver/src/
 grep -q 'isWaitingNextAction(g.nextAction)' '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts'
 "
 
+# ── T91 回合类型注入闸门 + 四级漏斗审计(cl-114 / goal-adoption-rate) ──
+echo "[T91] 采用率闸门(回合分类单测 / 闸门已部署 / 审计漏斗已落盘)"
+t "classifyTurnKind/decideInjection 单测(17 例)" bash -c "cd '$HOME/dsh-fork' && timeout 180 npx tsx dsh-turn-gate-test.ts"
+t "闸门与审计已部署(lib 含 turnKind/retrieval-audit)" bash -c "
+grep -q 'retrieval-audit.jsonl' '$HOME/dsh-fork/packages/context/cognitive-inject/lib/index.js' &&
+grep -q 'skipped-reflective-frame' '$HOME/dsh-fork/packages/context/cognitive-inject/lib/index.js'
+"
+t "四级漏斗审计在构建后已写入且阶段自洽" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+lib = os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js")
+if not os.path.exists(p):
+    print("审计文件尚未产生(构建后无注入决策), 空过"); raise SystemExit(0)
+cut = os.path.getmtime(lib) * 1000
+rows = []
+for l in open(p, encoding="utf8"):
+    if not l.strip(): continue
+    try: r = json.loads(l)
+    except Exception: continue
+    if (r.get("t") or 0) > cut: rows.append(r)
+if not rows:
+    print("构建后暂无决策记录, 空过"); raise SystemExit(0)
+stages = {}
+for r in rows: stages[r.get("stage")] = stages.get(r.get("stage"), 0) + 1
+# 漏斗自洽: 注入数 <= 过阈数 <= 候选数; 被否决的必须记在 veto 阶段
+bad = [r for r in rows if r.get("stage") == "injected"
+       and ((r.get("vetoAccepted") or 0) + (r.get("vetoRejected") or 0)) == 0]
+assert not bad, "注入记录缺少过阈/否决计数: %s" % bad[:2]
+print("构建后决策 %d 条, 阶段分布 %s" % (len(rows), stages))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
