@@ -249,7 +249,21 @@ t "src含入账纪律子句" bash -c "grep -q '先入账再回答' '$HOME/dsh-fo
 # 11b. lib 已重建含子句(部署生效)
 t "lib含入账纪律子句(已部署)" bash -c "grep -q '先入账再回答' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
 # 11c. lib 早于服务启动(当前进程跑的是新 lib)
-t "lib早于服务启动(进程用新lib)" bash -c "lib_ts=\$(stat -c %Y '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'); svc_ts=\$(systemctl --user show dsh-web.service -p ActiveEnterTimestamp --value 2>/dev/null); svc_ep=\$(date -d \"\$svc_ts\" +%s 2>/dev/null); [ -n \"\$svc_ep\" ] && [ \"\$lib_ts\" -lt \"\$svc_ep\" ]"
+# 2026-09-10 19:1x 修假红: 原判据把"读不到 systemd 时间戳"与"lib 比进程新"混成同一个 false,
+# 于是 18:19 的自主跑出现一次无法复现的红(现在 lib 16:41 < 服务 16:42 明明成立)。缺证据与判假必须分开:
+# 时间戳读不到 => 重试一次, 仍读不到就在输出里说明"缺证据", 不再伪装成"lib 更新"。
+t "lib早于服务启动(进程用新lib)" bash -c "
+lib=\"$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js\"
+lib_ts=\$(stat -c %Y \"\$lib\" 2>/dev/null)
+if [ -z \"\$lib_ts\" ]; then echo '[缺证据] 读不到 lib 文件时间戳'; exit 1; fi
+svc_ts=\"\$(systemctl --user show dsh-web.service -p ActiveEnterTimestamp --value 2>/dev/null)\"
+if [ -z \"\$svc_ts\" ]; then sleep 2; svc_ts=\"\$(systemctl --user show dsh-web.service -p ActiveEnterTimestamp --value 2>/dev/null)\"; fi
+if [ -z \"\$svc_ts\" ]; then echo '[缺证据] 读不到服务启动时间(重试后仍为空)'; exit 1; fi
+svc_ep=\$(date -d \"\$svc_ts\" +%s 2>/dev/null)
+if [ -z \"\$svc_ep\" ]; then echo \"[缺证据] 无法解析服务启动时间: \$svc_ts\"; exit 1; fi
+if [ \"\$lib_ts\" -ge \"\$svc_ep\" ]; then echo \"[真红] lib(\$lib_ts) >= 服务启动(\$svc_ep): 进程可能未用上新构建\"; exit 1; fi
+exit 0
+"
 
 # ── T12 异模型盲审通道(2026-09-08 12:0x 固化——tp-015: oq-022 effectiveness 外部判定源) ──
 echo "[T12] 异模型盲审通道(oq-022——effectiveness 外部判定源可用)"
