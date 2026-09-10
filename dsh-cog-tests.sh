@@ -3962,6 +3962,61 @@ else:
     print("首班未到(尚无 origin=cron 记录), 排程已带 origin 标记")
 '
 
+# ── T120 机制台账: 防"修复广度不完整"(cl-148) ──
+# 本轮实证: 我给"排程痕迹必须可辨来源"加 origin 标记时只改了 5 个新机制里的 3 个,
+# 漏掉的恰是后果最重的两个(闸门会改写目标 nextAction / 观察快照是判据唯一入口)。
+# 同一天"修复只覆盖碰到的那几处"已多次出现 ⇒ 把**广度本身**做成判据:
+# 排程调用的 dsh 脚本必须在台账在册, 且台账声明的性质(存在/origin 标记/排程带 origin/记录文件)逐条成立。
+echo "[T120] 机制台账(广度完整 / 声明的性质须成立 / 历史基线不追溯)"
+t "台账完整且排程脚本全部在册" python3 -c '
+import json, os, subprocess
+inv = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/mechanism-inventory.json"), encoding="utf8"))
+assert inv.get("baselineAt"), "缺基线时间戳(无法区分历史与新增)"
+assert inv.get("mechanisms"), "台账为空 —— 断言前提不成立"
+r = subprocess.run([__import__("sys").executable,
+                    os.path.expanduser("~/dsh-fork/dsh-mechanism-inventory-check.py"), "--json"],
+                   capture_output=True, text=True, timeout=300)
+assert r.returncode == 0, "台账核验报缺口: %s" % r.stdout[-300:]
+d = json.loads(r.stdout)
+assert d["problems"] == [], "缺口: %s" % d["problems"]
+print("台账 %d 项, 排程脚本 %d 个, 缺口 0" % (d["inventory"], d["cronScripts"]))
+'
+t "声明 originTagged 的脚本必须真有标记" python3 -c '
+import json, os
+inv = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/mechanism-inventory.json"), encoding="utf8"))
+bad = [e["script"] for e in inv["mechanisms"]
+       if e.get("originTagged") and "DSH_RUN_ORIGIN" not in open(e["script"], encoding="utf8").read()]
+assert not bad, "声明带 origin 标记但源码没有: %s" % bad
+n = len([e for e in inv["mechanisms"] if e.get("originTagged")])
+print("%d 个机制声明并实有 origin 标记" % n)
+'
+t "排程机制的 crontab 条目必须带 origin=cron" python3 -c '
+import json, os, subprocess
+inv = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/mechanism-inventory.json"), encoding="utf8"))
+out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30).stdout
+lines = [l for l in out.splitlines() if "dsh-" in l]
+missing = []
+for e in inv["mechanisms"]:
+    if not e.get("cron"):
+        continue
+    name = os.path.basename(e["script"])
+    hit = [l for l in lines if name in l]
+    assert hit, "台账称有排程但 crontab 找不到: %s" % name
+    if not any("DSH_RUN_ORIGIN=cron" in l for l in hit):
+        missing.append(name)
+assert not missing, "排程条目缺 origin 标记: %s" % missing
+print("排程机制条目均带 origin=cron")
+'
+t "台账不得腐烂(在册脚本与记录文件须存在)" python3 -c '
+import json, os
+inv = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/mechanism-inventory.json"), encoding="utf8"))
+gone = [e["script"] for e in inv["mechanisms"] if not os.path.exists(e["script"])]
+missing = [p for e in inv["mechanisms"] for p in (e.get("records") or []) if not os.path.exists(p)]
+assert not gone, "在册脚本已消失: %s" % gone
+assert not missing, "声明的记录文件不存在: %s" % missing
+print("台账 %d 项与其记录文件均在" % len(inv["mechanisms"]))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──

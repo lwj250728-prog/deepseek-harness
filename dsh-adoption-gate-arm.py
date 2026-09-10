@@ -75,7 +75,7 @@ def main() -> int:
     log_path = _arg('--log', LOG)
     payload = refresh() if ab_path == AB else _load(ab_path)
     if payload is None:
-        line = '缺判据: ab-compare 不可用, 闸门未检查'
+        line = '缺判据 origin=%s: ab-compare 不可用, 闸门未检查' % os.environ.get('DSH_RUN_ORIGIN', 'manual')
         print(line, file=sys.stderr)
         with open(log_path, 'a', encoding='utf8') as fh:
             fh.write('%s %s\n' % (datetime.datetime.now(TZ).isoformat(), line))
@@ -120,8 +120,8 @@ def main() -> int:
             with open(goals_path, 'w', encoding='utf8') as fh:
                 fh.write('\n'.join(json.dumps(x, ensure_ascii=False) for x in rows) + '\n')
 
-    line = ('%s 闸门=%s | 方向=%s | 后窗回合=%d | lift样本=%d | %s'
-            % (stamp, 'ARMED' if armed else 'waiting', direction, turns, lift_n,
+    line = ('%s origin=%s 闸门=%s | 方向=%s | 后窗回合=%d | lift样本=%d | %s'
+            % (stamp, os.environ.get('DSH_RUN_ORIGIN', 'manual'), 'ARMED' if armed else 'waiting', direction, turns, lift_n,
                '、'.join(reasons) or '未达标(继续观察)'))
     with open(log_path, 'a', encoding='utf8') as fh:
         fh.write(line + '\n')

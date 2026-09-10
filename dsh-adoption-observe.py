@@ -60,6 +60,7 @@ def main() -> int:
                     'rollbackIf': verdict.get('rollbackIf'), 'abVerdict': payload.get('verdict')},
         'confounders': [c.get('kind') for c in (payload.get('confounders') or [])],
         'source': 'transcribed from ab-compare.json (single A/B producer)',
+        'origin': os.environ.get('DSH_RUN_ORIGIN', 'manual'),
     }
     with open(OUT, 'a', encoding='utf8') as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + '\n')
