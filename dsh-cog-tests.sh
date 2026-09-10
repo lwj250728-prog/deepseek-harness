@@ -3850,6 +3850,68 @@ assert not bad, "新增断言 body 含裸单引号(会静默改义): %s" % bad
 print("检查 %d 条 body, 无新增裸单引号" % len(bodies))
 '
 
+# ── T119 守卫必须能开火(cl-144: 判据静默失效是今天最贵的坑) ──
+# 实证三次: ①裸子串搜套件被用例自身写的 T999 满足 ②合成用例写死的取值进了套件文本, 覆盖率"找到"它
+# ③断言 body 内的裸单引号被 bash 提前闭合, 源码被吞引号后仍能求值 => 守卫彻底静默失效却全绿。
+# 三次都只被"正向路径必须开火"那条断言抓住。故: 每条新守卫必须登记开火路径, 且声明的命令
+# 现场真跑一次、必须非零退出 —— 这是"守卫现在活着"的直接证据, 不是文本推断。
+echo "[T119] 守卫可开火登记(新守卫须登记 / 声明的开火路径须现场生效 / 排程驱动)"
+t "登记簿完整且新守卫全部登记" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/guard-fire.json")
+assert os.path.exists(p), "开火登记簿不存在"
+reg = json.load(open(p, encoding="utf8"))
+assert reg.get("baselineAt"), "缺基线时间戳(无法区分历史与新增守卫)"
+assert reg.get("guards"), "无任何登记的守卫 —— 断言前提不成立"
+suite = open(os.path.expanduser("~/dsh-fork/dsh-cog-tests.sh"), encoding="utf8").read()
+new_groups = sorted({"T" + m for m in __import__("re").findall(r"\[T(\d{2,3})\]", suite) if int(m) >= 112})
+declared = {g["guard"] for g in reg["guards"]}
+missing = [g for g in new_groups if g not in declared]
+assert not missing, "新守卫未登记开火路径: %s" % missing
+print("新守卫 %d 个, 全部已登记" % len(new_groups))
+'
+t "声明的开火断言必须真实存在于该组" python3 -c '
+import json, os, re
+reg = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/guard-fire.json"), encoding="utf8"))
+suite = open(os.path.expanduser("~/dsh-fork/dsh-cog-tests.sh"), encoding="utf8").read()
+blocks = {}
+for blk in re.split(r"\n(?=# ── T\d)", suite):
+    m = re.search(r"\[T(\d{2,3})\]", blk)
+    if m: blocks["T" + m.group(1)] = blk
+bad = []
+for entry in reg["guards"]:
+    gid = entry["guard"]
+    assert gid in blocks, "登记的守卫 %s 已从套件消失(腐烂)" % gid
+    for fire in entry.get("mustFire") or []:
+        name = fire.get("assertion")
+        if name and ("t \"" + name + "\"") not in blocks[gid]:
+            bad.append("%s: %s" % (gid, name))
+assert not bad, "声明的开火断言不在该组内: %s" % bad
+print("开火断言全部在组内")
+'
+t "声明的开火命令必须现场开火(非零退出)" python3 -c '
+import json, os, subprocess
+reg = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/guard-fire.json"), encoding="utf8"))
+cmds = [f["command"] for g in reg["guards"] for f in (g.get("mustFire") or []) if f.get("command")]
+assert cmds, "没有任何登记的开火命令 —— 断言前提不成立(只有文本声明不算证据)"
+ok = 0
+for cmd in cmds:
+    r = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True, timeout=600)
+    assert r.returncode != 0, "开火命令退出码 0(守卫其实没开火): %s" % cmd[:80]
+    ok += 1
+print("%d 条开火命令现场非零退出(守卫活着)" % ok)
+'
+t "开火核验须由排程驱动且日志新鲜" python3 -c '
+import os, subprocess, time
+out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30).stdout
+assert "dsh-guard-fire-check.py" in out, "开火核验未挂排程"
+log = os.path.expanduser("~/.dsh/cognitive-pipeline/guard-fire.log")
+assert os.path.exists(log), "开火核验日志不存在(排程从未产出痕迹)"
+age = time.time() - os.path.getmtime(log)
+assert age < 8 * 3600, "开火核验日志 %.1f 小时未更新" % (age / 3600)
+print("排程在册且日志新鲜(%.0f 分钟前)" % (age / 60))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
