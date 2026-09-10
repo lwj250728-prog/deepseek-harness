@@ -2903,6 +2903,50 @@ print("决策 %d, 注入 %d, 不同经验 %d, 惰性 %s"
       % (d["decisions"], d["injected"], d["distinctExperiencesInjected"], d["inertLevers"]))
 '
 
+# ── T101 候选供给量必须可见(cl-122: 三个杠杆的"供给不足"叙事源于量错了对象) ──
+echo "[T101] 候选供给量(过阈原始数 / 与选择结果自洽)"
+t "审计带 rawHits/topHits(供给量与头部相似度)" python3 -c '
+import json, os, time
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+recent = [r for r in rows if "rawHits" in r]
+assert recent, "审计尚无 rawHits——供给量未落地(cl-122)"
+last = recent[-1]
+assert isinstance(last.get("topHits"), list) and last["topHits"], "缺 topHits"
+print("最近一次供给: rawHits=%s topHits=%s candidates=%s"
+      % (last.get("rawHits"), last.get("topHits"), last.get("candidates")))
+'
+t "供给量自洽: rawHits >= candidates, topHits 单调不增" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+bad = []
+for r in rows:
+    raw, cand = r.get("rawHits"), r.get("candidates")
+    if isinstance(raw, int) and isinstance(cand, int) and raw < cand:
+        # coverViewpoints 只能收窄候选, 不可能放大 => rawHits < candidates 即记账错位
+        bad.append((r.get("stage"), raw, cand))
+    top = r.get("topHits")
+    if isinstance(top, list) and len(top) > 1:
+        if any(top[i] < top[i + 1] for i in range(len(top) - 1)):
+            bad.append((r.get("stage"), "topHits 非降序", top))
+assert not bad, "供给量记账不自洽: %s" % bad[:3]
+'
+t "供给量与选择结果的落差被记录(防再次误读为供给不足)" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip() and "rawHits" in l]
+if not rows:
+    print("尚无 rawHits 记录, 空过"); raise SystemExit(0)
+recs = [r for r in rows if isinstance(r.get("candidates"), int)]
+assert recs, "无同时含 rawHits 与 candidates 的记录"
+r = recs[-1]
+# 实测教训(cl-119/120/121): 我拿 candidates(=2, coverViewpoints 之后)当"候选供给", 得出
+# "供给只有 1-2 条"的错误叙事; 真实供给是 rawHits(实测 218)。这条断言要求两者都在场。
+print("供给 %s -> 选择 %s(落差 %s 条被 coverViewpoints/topK 收窄)"
+      % (r.get("rawHits"), r.get("candidates"), (r.get("rawHits") or 0) - (r.get("candidates") or 0)))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
