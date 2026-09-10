@@ -557,13 +557,29 @@ function isAfterFailure(agent: Agent): boolean {
 /** Summed trigger weight (static, derived, or jump) needed to prime injection. */
 const TRIGGER_MATCH_THRESHOLD = 0.6
 
+/** One matched trigger word and how much it contributed. */
+export interface TriggerContribution {
+  readonly word: string
+  readonly kind: 'static' | 'derived' | 'jump'
+  readonly weight: number
+}
+
 /** One trigger verdict: whether the gate opened, the contributing trigger
  * source (for the injection record), and the jump words that contributed
- * (for citation-rate measurement). */
+ * (for citation-rate measurement).
+ *
+ * `matched`/`score` exist because `triggerSource` only names the FIRST matched
+ * word — measured: `static:异常` appeared on 239 injections with 0 adoptions,
+ * but that label does not mean 异常 alone opened the gate (weak words
+ * accumulate to the 0.6 threshold). Attributing outcomes to the first-matched
+ * word would indict the wrong word, so the full contribution list is carried
+ * for real attribution. */
 export interface TriggerVerdict {
   readonly fired: boolean
   readonly triggerSource: string
   readonly jumpWords: readonly string[]
+  readonly matched: readonly TriggerContribution[]
+  readonly score: number
 }
 
 /**
@@ -585,9 +601,10 @@ export function triggeredBy(
   depth: number,
 ): TriggerVerdict {
   const text = situationText(messages, depth)
-  if (text.trim().length === 0) return { fired: false, triggerSource: '', jumpWords: [] }
+  if (text.trim().length === 0) return { fired: false, triggerSource: '', jumpWords: [], matched: [], score: 0 }
   let score = 0
   let source = ''
+  const matched: TriggerContribution[] = []
   // Static triggers are multi-character phrases; match them as substrings
   // (tokenize splits CJK per character, so token matching would never hit).
   // 2026-09-08 分级(cl-008 数据实证): 强词(失败/崩溃——66%/50%引用)单独触发;
@@ -596,8 +613,11 @@ export function triggeredBy(
     if (text.includes(trigger)) {
       const weight = STRONG_STATIC_TRIGGERS.has(trigger) ? STRONG_STATIC_WEIGHT : WEAK_STATIC_WEIGHT
       score += weight
+      matched.push({ word: trigger, kind: 'static', weight })
       if (source === '') source = `static:${trigger}`
-      if (score >= TRIGGER_MATCH_THRESHOLD) return { fired: true, triggerSource: source, jumpWords: [] }
+      if (score >= TRIGGER_MATCH_THRESHOLD) {
+        return { fired: true, triggerSource: source, jumpWords: [], matched, score }
+      }
     }
   }
   const derived = deriveTriggerWords(service)
@@ -609,8 +629,11 @@ export function triggeredBy(
     const weight = derived.get(word)
     if (weight !== undefined && weight >= DERIVED_TRIGGER_MIN) {
       score += weight
+      matched.push({ word, kind: 'derived', weight })
       if (source === '') source = `derived:${word}`
-      if (score >= TRIGGER_MATCH_THRESHOLD) return { fired: true, triggerSource: source, jumpWords: [] }
+      if (score >= TRIGGER_MATCH_THRESHOLD) {
+        return { fired: true, triggerSource: source, jumpWords: [], matched, score }
+      }
     }
   }
   // Jump route: associative words alone can open the gate. Jump words are
@@ -625,12 +648,16 @@ export function triggeredBy(
     if (!text.includes(jump.jumpWord)) continue
     hitJumps.push(jump.jumpWord)
     for (const entry of jump.triggers) {
-      score += entry.weight * scale
+      const contribution = entry.weight * scale
+      score += contribution
+      matched.push({ word: jump.jumpWord, kind: 'jump', weight: contribution })
       if (source === '') source = `jump:${jump.jumpWord}→${entry.trigger}`
-      if (score >= TRIGGER_MATCH_THRESHOLD) return { fired: true, triggerSource: source, jumpWords: hitJumps }
+      if (score >= TRIGGER_MATCH_THRESHOLD) {
+        return { fired: true, triggerSource: source, jumpWords: hitJumps, matched, score }
+      }
     }
   }
-  return { fired: false, triggerSource: '', jumpWords: [] }
+  return { fired: false, triggerSource: '', jumpWords: [], matched, score }
 }
 
 /**
@@ -738,7 +765,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       + (gate === 'inject-strict' ? resolved.actionFrameMarginBoost : 0)
     if (gateScore < gateThreshold) {
       audit({ stage: 'below-gate', candidates: hits.length, topHit, gateScore, gateThreshold,
-        triggerSource: verdict.triggerSource })
+        triggerSource: verdict.triggerSource, triggerScore: verdict.score, matched: verdict.matched })
       return decision
     }
     // Cooldown filter: a memory injected into THIS session within the window
@@ -795,7 +822,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       })
       audit({ stage: 'injected', path: 'strategy', candidates: hits.length, overThreshold: cooled.length,
         vetoAccepted: vetoed.accepted.length, vetoRejected: vetoed.rejectedNotes.length,
-        expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource })
+        expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource,
+        triggerScore: verdict.score, matched: verdict.matched })
       return {
         kind: 'enter',
         messages: [...decision.messages, block],
@@ -850,7 +878,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     markHitsReviewed(ctx.cognitivePipeline, vetoed.accepted)
     audit({ stage: 'injected', path: 'raw', candidates: hits.length, overThreshold: cooled.length,
       vetoAccepted: vetoed.accepted.length, vetoRejected: vetoed.rejectedNotes.length,
-      expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource })
+      expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource,
+      triggerScore: verdict.score, matched: verdict.matched })
     return {
       kind: 'enter',
       messages: [...decision.messages, block],

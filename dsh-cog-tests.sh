@@ -2661,6 +2661,26 @@ assert not bad, "漏斗数字不自洽(candidates/overThreshold/veto): %s" % bad
 '
 t "目标入池体检: 全部 active 目标三前提齐备" bash -c "python3 '$HOME/dsh-fork/dsh-goal-onboard-check.py' all"
 
+# ── T93 触发词归因(首命中标签会判死无辜的词) ──
+echo "[T93] 触发词归因(matched/score 落地 / 单测 / 审计带归因)"
+t "triggeredBy 归因单测(8 例)" bash -c "cd '$HOME/dsh-fork' && timeout 180 npx tsx dsh-trigger-attribution-test.ts"
+t "审计记录带触发归因(matched + triggerScore)" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+lib = os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js")
+src = open(lib, encoding="utf8").read()
+assert "triggerScore" in src and "matched" in src, "lib 未含归因字段"
+if not os.path.exists(p):
+    print("审计文件缺失, 空过"); raise SystemExit(0)
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+cut = os.path.getmtime(lib) * 1000
+recent = [r for r in rows if (r.get("t") or 0) > cut]
+if not recent:
+    print("构建后暂无审计记录, 空过"); raise SystemExit(0)
+missing = [r for r in recent if r.get("stage") in ("injected", "below-gate") and "matched" not in r]
+assert not missing, "构建后的注入/未过闸记录缺 matched 归因: %s" % missing[:2]
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
