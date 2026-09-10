@@ -3632,7 +3632,8 @@ json.dump(ab, open(tmp_ab, "w", encoding="utf8"), ensure_ascii=False)
 tmp_goals = "/tmp/t116-goals-wait.jsonl"
 shutil.copy(os.path.join(DIR, "dormant-goals.jsonl"), tmp_goals)
 before = open(tmp_goals, encoding="utf8").read()
-r = subprocess.run([sys.executable, script, "--goals", tmp_goals, "--ab", tmp_ab],
+r = subprocess.run([sys.executable, script, "--goals", tmp_goals, "--ab", tmp_ab,
+                    "--log", "/tmp/t116-gate-wait.log"],
                    capture_output=True, text=True, timeout=300)
 assert r.returncode == 0, r.stderr[:200]
 assert "waiting" in r.stdout, "未达标却报 ARMED: %s" % r.stdout.strip()
@@ -3651,7 +3652,8 @@ tmp_ab = "/tmp/t116-ab-armed.json"
 json.dump(ab, open(tmp_ab, "w", encoding="utf8"), ensure_ascii=False)
 tmp_goals = "/tmp/t116-goals-armed.jsonl"
 shutil.copy(os.path.join(DIR, "dormant-goals.jsonl"), tmp_goals)
-r = subprocess.run([sys.executable, script, "--goals", tmp_goals, "--ab", tmp_ab],
+r = subprocess.run([sys.executable, script, "--goals", tmp_goals, "--ab", tmp_ab,
+                    "--log", "/tmp/t116-gate-armed.log"],
                    capture_output=True, text=True, timeout=300)
 assert r.returncode == 0, r.stderr[:200]
 assert "ARMED" in r.stdout, "达标却未武装: %s" % r.stdout.strip()
@@ -3669,6 +3671,27 @@ assert os.path.exists(log), "闸门日志不存在(排程从未产出痕迹)"
 age = time.time() - os.path.getmtime(log)
 assert age < 90 * 60, "闸门日志 %.1f 小时未更新" % (age / 3600)
 print("闸门在册且日志新鲜(%.0f 分钟前)" % (age / 60))
+'
+
+t "合成测试不得写进生产闸门日志" python3 -c '
+import hashlib, json, os, shutil, subprocess, sys
+DIR = os.path.expanduser("~/.dsh/cognitive-pipeline")
+script = os.path.expanduser("~/dsh-fork/dsh-adoption-gate-arm.py")
+prod = os.path.join(DIR, "adoption-gate.log")
+assert os.path.exists(prod), "生产闸门日志不存在, 断言前提不成立"
+before = hashlib.sha256(open(prod, "rb").read()).hexdigest()
+ab = json.load(open(os.path.join(DIR, "ab-compare.json"), encoding="utf8"))
+v = dict(ab.get("adoptionVerdict") or {}); v["direction"] = "adverse-significant"
+ab["adoptionVerdict"] = v
+tmp_ab = "/tmp/t116b-ab.json"; json.dump(ab, open(tmp_ab, "w", encoding="utf8"), ensure_ascii=False)
+tmp_goals = "/tmp/t116b-goals.jsonl"; shutil.copy(os.path.join(DIR, "dormant-goals.jsonl"), tmp_goals)
+r = subprocess.run([sys.executable, script, "--goals", tmp_goals, "--ab", tmp_ab,
+                    "--log", "/tmp/t116b-gate.log"], capture_output=True, text=True, timeout=300)
+assert r.returncode == 0, r.stderr[:200]
+after = hashlib.sha256(open(prod, "rb").read()).hexdigest()
+assert before == after, "合成用例污染了生产闸门日志(读日志者会看到假 ARMED 痕迹)"
+assert os.path.exists("/tmp/t116b-gate.log"), "合成用例没有留下自己的日志"
+print("生产日志未被写入, 合成痕迹隔离")
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"

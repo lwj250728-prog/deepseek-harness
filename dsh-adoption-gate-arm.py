@@ -70,11 +70,14 @@ def main() -> int:
     dry = '--dry-run' in sys.argv
     goals_path = _arg('--goals', GOALS)
     ab_path = _arg('--ab', AB)
+    # 测试必须能把痕迹写到自己的临时文件: 合成用例写进生产日志 = 制造假痕迹
+    # (实测踩过: 两条合成 ARMED 行混进 adoption-gate.log, 读日志的人会以为闸门真的武装了)。
+    log_path = _arg('--log', LOG)
     payload = refresh() if ab_path == AB else _load(ab_path)
     if payload is None:
         line = '缺判据: ab-compare 不可用, 闸门未检查'
         print(line, file=sys.stderr)
-        with open(LOG, 'a', encoding='utf8') as fh:
+        with open(log_path, 'a', encoding='utf8') as fh:
             fh.write('%s %s\n' % (datetime.datetime.now(TZ).isoformat(), line))
         return 1
     verdict = payload.get('adoptionVerdict') or {}
@@ -120,7 +123,7 @@ def main() -> int:
     line = ('%s 闸门=%s | 方向=%s | 后窗回合=%d | lift样本=%d | %s'
             % (stamp, 'ARMED' if armed else 'waiting', direction, turns, lift_n,
                '、'.join(reasons) or '未达标(继续观察)'))
-    with open(LOG, 'a', encoding='utf8') as fh:
+    with open(log_path, 'a', encoding='utf8') as fh:
         fh.write(line + '\n')
     print(line)
     if armed and not changed and not dry:
