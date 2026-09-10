@@ -1057,17 +1057,24 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
   const raiseStallAlert = (reason: string, streak: number): void => {
     if (stallAlertId !== null) return
     const now = new Date()
-    stallAlertId = `cl-stall-${now.toISOString().slice(0, 16).replace(/[-:T]/g, '')}`
-    void appendFile(ledgerPath, JSON.stringify({
-      id: stallAlertId,
-      ts: now.toISOString(),
-      claim: `自主驱动停摆: 连续 ${streak} 个 tick 未产出帧(最近原因 ${reason})——帧/回合/预测链整体停摆`,
-      source: 'quiet-driver 心跳看门狗',
-      status: 'open',
-      reviewBy: now.toISOString().slice(0, 10),
-      reviewBasis: '恢复产出帧后自动关闭',
-      note: '修法: 目标会话未加载时主动 ctx.agents.resume 唤醒; 本告警由恢复路径自动关单。',
-    }, null, 0) + '\n').catch(() => undefined)
+    void (async (): Promise<void> => {
+      // cl-109: 与到期告警同一类修复——先复用已有的未关闭停摆告警(重启期间停摆
+      // 持续时不再重复开单), 否则才用本地日历日 + 时间戳开新单。
+      const existing = await findOpenAlertId('cl-stall-')
+      stallAlertId = existing ?? `cl-stall-${now.toISOString().slice(0, 16).replace(/[-:T]/g, '')}`
+      if (existing !== null) return
+      await appendFile(ledgerPath, JSON.stringify({
+        id: stallAlertId,
+        ts: now.toISOString(),
+        claim: `自主驱动停摆: 连续 ${streak} 个 tick 未产出帧(最近原因 ${reason})——帧/回合/预测链整体停摆`,
+        source: 'quiet-driver 心跳看门狗',
+        status: 'open',
+        // cl-107/cl-109: 本地日历日 + 3 天窗口(UTC 写法会让夜间告警落地即过期)。
+        reviewBy: localDay(3),
+        reviewBasis: '恢复产出帧后自动关闭',
+        note: '修法: 目标会话未加载时主动 ctx.agents.resume 唤醒; 本告警由恢复路径自动关单。',
+      }, null, 0) + '\n').catch(() => undefined)
+    })()
   }
   const clearStallAlert = (): void => {
     if (stallAlertId === null) return
@@ -1226,6 +1233,29 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     return new Date(shifted.getTime() - shifted.getTimezoneOffset() * 60000).toISOString().slice(0, 10)
   }
 
+  /** cl-108/cl-109: 告警是"条件型"而非"日期型"——同一前缀只允许一个未关闭告警。
+   *  旧实现把 id 绑在时间戳上且句柄只在内存里, 跨日/重启都会再开一单, 于是
+   *  "条件一直没解除"会堆出多条 open 告警。读账本(last-wins)复用已有的未关闭 id。 */
+  const findOpenAlertId = async (prefix: string): Promise<string | null> => {
+    try {
+      const { readFile } = await import('node:fs/promises')
+      const raw = await readFile(ledgerPath, 'utf8')
+      const statusById = new Map<string, string>()
+      for (const line of raw.split('\n')) {
+        if (line.trim().length === 0) continue
+        try {
+          const record = JSON.parse(line) as { id?: unknown, status?: unknown }
+          if (typeof record.id !== 'string' || !record.id.startsWith(prefix)) continue
+          statusById.set(record.id, String(record.status ?? ''))
+        } catch { /* 坏行跳过 */ }
+      }
+      for (const [id, status] of statusById) if (status === 'open') return id
+      return null
+    } catch {
+      return null
+    }
+  }
+
   // cl-106: 巡检的"真相源"是插件硬编码清单(llm.listModels 返回 DEFAULT_MODELS),
   // 结构上发现不了到期。这里旁读实时目录检查结果(由 dsh-model-catalog-check.py
   // 落盘, cron 每 30 分钟刷新): 目录说"不在"就算不在——只影响告警, 不影响唤醒
@@ -1245,30 +1275,6 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       return 'unknown'
     } catch {
       return 'unknown'
-    }
-  }
-
-  /** cl-108: 到期告警是"条件型"而非"日期型"——同一条件只允许一个未关闭告警。
-   *  旧实现把 id 绑在日期上且 modelAlertId 只在内存里, 跨日/重启都会再开一单,
-   *  于是"模型一直没换"会堆出多条 open 告警。这里读账本(last-wins)找出已有的
-   *  未关闭告警并复用其 id。 */
-  const findOpenModelAlertId = async (): Promise<string | null> => {
-    try {
-      const { readFile } = await import('node:fs/promises')
-      const raw = await readFile(join(dirname(config.thinkLogPath), 'claims-ledger.jsonl'), 'utf8')
-      const statusById = new Map<string, string>()
-      for (const line of raw.split('\n')) {
-        if (line.trim().length === 0) continue
-        try {
-          const record = JSON.parse(line) as { id?: unknown, status?: unknown }
-          if (typeof record.id !== 'string' || !record.id.startsWith('cl-model-expired')) continue
-          statusById.set(record.id, String(record.status ?? ''))
-        } catch { /* 坏行跳过 */ }
-      }
-      for (const [id, status] of statusById) if (status === 'open') return id
-      return null
-    } catch {
-      return null
     }
   }
 
@@ -1365,7 +1371,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     })
     if (modelAlertId !== null) return
     // cl-108: 条件型幂等——已有未关闭告警就复用, 不按日期重复开单。
-    const existingAlert = await findOpenModelAlertId()
+    const existingAlert = await findOpenAlertId('cl-model-expired')
     if (existingAlert !== null) {
       modelAlertId = existingAlert
       return
