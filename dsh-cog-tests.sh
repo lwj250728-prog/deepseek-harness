@@ -3724,8 +3724,13 @@ tmp_ab = "/tmp/t116-ab-armed.json"
 json.dump(ab, open(tmp_ab, "w", encoding="utf8"), ensure_ascii=False)
 tmp_goals = "/tmp/t116-goals-armed.jsonl"
 shutil.copy(os.path.join(DIR, "dormant-goals.jsonl"), tmp_goals)
+# 合成基线须去掉 adjudicatedAt: 真基线已裁决, 闸门对它"不再武装"(T129 守那一路);
+# 本用例要测的是"达标必须武装", 故喂一份不带裁决标记的合成基线。
+tmp_bl = "/tmp/t116-baselines.json"
+json.dump({"splitAt": "2026-09-10T23:05:41+08:00", "beforeValue": {"topK": 3},
+           "afterValue": {"topK": 1}}, open(tmp_bl, "w", encoding="utf8"))
 r = subprocess.run([sys.executable, script, "--goals", tmp_goals, "--ab", tmp_ab,
-                    "--log", "/tmp/t116-gate-armed.log"],
+                    "--baselines", tmp_bl, "--log", "/tmp/t116-gate-armed.log"],
                    capture_output=True, text=True, timeout=300)
 assert r.returncode == 0, r.stderr[:200]
 assert "ARMED" in r.stdout, "达标却未武装: %s" % r.stdout.strip()
@@ -4490,6 +4495,35 @@ assert all(s <= top for s in sizes), "运行时条目数 %s 超过 topK=%d => �
 if top == 1:
     assert sizes == [1], "topK=1 却出现条目数 %s => 运行进程仍用旧配置" % sizes
 print("运行时证据通过: %d 条注入, 条目数 %s (topK=%d)" % (len(after), sizes, top))
+'
+
+# ── T129 已裁决的基线不得重复武装(cl-166: 同一步被重复提醒) ──
+# 实证: 23:05 回滚后 23:11 闸门又 ARMED(lift 样本=143 —— before+after 跨窗口相加), 把已清空的 nextAction
+# 写回, 于是行动帧对**已执行完**的步骤再提醒一次。判据必须区分"该基线已裁决"与"新证据出现"。
+echo "[T129] 闸门不得对已裁决基线重复武装(源码须读 adjudicatedAt / 行为须保持 waiting)"
+t "闸门源码须读 adjudicatedAt 且 lift 路有变后样本下限" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/dsh-adoption-gate-arm.py"), encoding="utf8").read()
+assert "adjudicatedAt" in src, "闸门未读 adjudicatedAt(已裁决基线会被反复武装)"
+assert "after_turns >= 20" in src, "lift 路缺变化后样本下限(变后 1 回合也能算达标)"
+print("源码级: 两处收紧都在")
+'
+t "已裁决基线下运行闸门必须 waiting 且不改写目标" python3 -c '
+import json, os, shutil, subprocess, sys
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+bl = os.path.join(D, "ab-baselines.json")
+d = json.load(open(bl, encoding="utf8"))
+assert d.get("adjudicatedAt"), "当前基线未标 adjudicatedAt —— 断言前提不成立(裁决后才守这条)"
+tmp_goals = "/tmp/t129-goals.jsonl"
+shutil.copy(os.path.join(D, "dormant-goals.jsonl"), tmp_goals)
+before = open(tmp_goals, encoding="utf8").read()
+r = subprocess.run([sys.executable, os.path.expanduser("~/dsh-fork/dsh-adoption-gate-arm.py"),
+                    "--goals", tmp_goals], capture_output=True, text=True, timeout=600)
+assert r.returncode == 0, r.stderr[:200]
+assert "waiting" in r.stdout, "已裁决基线却被武装: %s" % r.stdout.strip()
+assert "已裁决" in r.stdout, "waiting 但未说明是因为已裁决: %s" % r.stdout.strip()
+assert open(tmp_goals, encoding="utf8").read() == before, "已裁决基线下仍改写了 nextAction"
+print("已裁决基线: 保持 waiting 且未改写")
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"

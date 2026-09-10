@@ -26,6 +26,7 @@ DIR = os.path.expanduser('~/.dsh/cognitive-pipeline')
 REPO = os.path.expanduser('~/dsh-fork')
 GOALS = os.path.join(DIR, 'dormant-goals.jsonl')
 AB = os.path.join(DIR, 'ab-compare.json')
+BASELINES = os.path.join(DIR, 'ab-baselines.json')
 LOG = os.path.join(DIR, 'adoption-gate.log')
 TZ = datetime.timezone(datetime.timedelta(hours=8))
 TARGET = 'goal-adoption-rate'
@@ -103,11 +104,20 @@ def main() -> int:
     lift_turns = (adoption.get('segments') or {}).get('before', {}).get('turnsWithInjection')
     lift_n = turns + (lift_turns or 0)
 
-    # 闸门一: 方向可裁决(区间分离); 闸门二: lift 的样本达标(>=100 回合)
-    gate_direction = direction in ('adverse-significant', 'better-significant')
-    gate_lift = lift_n >= 100
+    # 闸门一: 方向可裁决(区间分离); 闸门二: lift 的样本达标(>=100 回合)。
+    # cl-166 两处收紧(实测踩到): ①**已裁决的基线不得重复武装** —— 23:05 回滚后 23:11 闸门又 ARMED
+    #   (lift 样本=143) 并把已清空的 nextAction 重新写回, 造成对同一步的重复提醒;
+    # ②lift 路须有足量的**变化后样本**(afterTurns>=20), 否则回滚后 1 个回合也能被拿来'达标'。
+    baselines_path = _arg('--baselines', BASELINES)
+    bl = json.load(open(baselines_path, encoding='utf8')) if os.path.exists(baselines_path) else {}
+    adjudicated = bool(bl.get('adjudicatedAt'))
+    after_turns = (union or {}).get('turnsWithInjection') or 0
+    gate_direction = direction in ('adverse-significant', 'better-significant') and not adjudicated
+    gate_lift = lift_n >= 100 and after_turns >= 20 and not adjudicated
     armed = gate_direction or gate_lift
     reasons = []
+    if adjudicated:
+        reasons.append('当前基线已裁决(adjudicatedAt=%s), 不再重复武装' % str(bl.get('adjudicatedAt'))[:19])
     if gate_direction:
         reasons.append('方向已分离(%s)' % direction)
     if gate_lift:
