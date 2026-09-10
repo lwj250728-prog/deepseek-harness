@@ -3159,6 +3159,30 @@ t "lift 判据已入目标池(lift>=2 且 n>=100)" bash -c "
 grep -q 'lift' '$HOME/.dsh/cognitive-pipeline/dormant-goals.jsonl'
 "
 
+# ── T108 结算效果见证(cl-128 的效果侧: 文本命中不得 book 为未引用) ──
+echo "[T108] 结算效果(文本命中 / book 一致性 / 样本可见)"
+t "结算效果脚本可运行且给出判读" bash -c "
+timeout 400 python3 '$HOME/dsh-fork/dsh-settlement-effect.py' --quiet >/dev/null 2>&1 || true
+python3 -c \"
+import json, os
+p = os.path.expanduser('~/.dsh/cognitive-pipeline/settlement-effect.json')
+assert os.path.exists(p), 'settlement-effect.json 缺失'
+d = json.load(open(p, encoding='utf8'))
+for k in ('scopeInjections', 'textHits', 'textHitsBookedFalse', 'verdict', 'minSample'):
+    assert k in d, '缺字段 %s' % k
+print('构建后注入 %d, 文本命中 %d, 其中 book=false %d => %s'
+      % (d['scopeInjections'], d['textHits'], d['textHitsBookedFalse'], d['verdict']))
+\"
+"
+t "文本命中不得被结算为未引用(样本足够时)" python3 -c '
+import json, os
+d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/settlement-effect.json"), encoding="utf8"))
+if d["textHits"] < d["minSample"]:
+    print("样本不足(%d < %d), 空过可见" % (d["textHits"], d["minSample"])); raise SystemExit(0)
+assert d["textHitsBookedFalse"] == 0, "文本命中却 book 为未引用 %d 条: %s" % (
+    d["textHitsBookedFalse"], d.get("misses"))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
