@@ -5167,6 +5167,48 @@ assert "间隔" in r.stderr, "红是红了, 理由不对: " + r.stderr[:120]
 print("合成违规开火: " + r.stderr.strip().splitlines()[-1][:70])
 '
 t "部署后保活不得架空退避(真实审计)" python3 /home/ubuntu/dsh-fork/dsh-keepalive-lint.py
+# ── T145 部署动作须可复现(tp-123: 延迟部署脚本只活在 /tmp) ──
+# 起因: 两次延迟部署用的是 /tmp/dsh-post-deploy*.sh —— 重启命令/等待时长/复跑顺序都没进版本库与台账,
+# 事后无法复现"那次部署做了什么", /tmp 一清证据就没了。修法: dsh-deploy-window.sh 版本化 + 持久记录
+# deploy-log.jsonl。判据三条: 在版本库里 / plan-only 无副作用 / 真跑时留下 start+done 两条持久记录。
+echo "[T145] 部署动作可复现(脚本须在版本库 / plan-only 无副作用 / 须留持久记录)"
+t "部署脚本必须在版本库里(不得只活在 /tmp)" python3 -c '
+import os, subprocess
+script = "/home/ubuntu/dsh-fork/dsh-deploy-window.sh"
+assert os.path.exists(script), "部署脚本不存在"
+out = subprocess.run(["git", "-C", "/home/ubuntu/dsh-fork", "ls-files", "--error-unmatch",
+                      "dsh-deploy-window.sh"], capture_output=True, text=True)
+assert out.returncode == 0, "部署脚本未入版本库(只活在磁盘上: 磁盘坏了就没了, 也无法复现那次部署)"
+tmp = [f for f in os.listdir("/tmp") if f.startswith("dsh-post-deploy")]
+assert not tmp, "仍有一次性部署脚本在 /tmp: %s —— 部署动作不许只活在那里" % tmp
+print("部署脚本在册且 /tmp 无遗留一次性脚本")
+'
+t "部署脚本 --plan-only 必须无副作用" python3 -c '
+import os, subprocess
+log = "/tmp/t145-plan.jsonl"
+if os.path.exists(log): os.remove(log)
+r = subprocess.run(["bash", "/home/ubuntu/dsh-fork/dsh-deploy-window.sh", "--plan-only", "--log", log],
+                   capture_output=True, text=True, timeout=60)
+assert r.returncode == 0, "plan-only 退出码 %d: %s" % (r.returncode, r.stderr[-120:])
+assert "计划" in r.stdout, "plan-only 没打印计划: " + r.stdout[:120]
+assert not os.path.exists(log), "plan-only 写了记录(不该有副作用)"
+print("plan-only 只打印计划, 未写记录")
+'
+t "部署脚本须留持久记录(start + done)" python3 -c '
+import json, os, subprocess
+log = "/tmp/t145-run.jsonl"
+if os.path.exists(log): os.remove(log)
+r = subprocess.run(["bash", "/home/ubuntu/dsh-fork/dsh-deploy-window.sh", "--skip-restart", "--skip-suite",
+                    "--delay-seconds", "0", "--log", log], capture_output=True, text=True, timeout=60)
+assert r.returncode == 0, "干跑退出码 %d: %s" % (r.returncode, r.stderr[-120:])
+assert os.path.exists(log), "干跑没留下记录 —— 部署又变成不可复现的了"
+rows = [json.loads(l) for l in open(log, encoding="utf8") if l.strip()]
+phases = [x.get("phase") for x in rows]
+assert "start" in phases and "done" in phases, "记录缺少 start/done: %s" % phases
+for k in ("ts", "origin", "script"):
+    assert rows[0].get(k), "记录缺字段 " + k
+print("持久记录 %d 条: %s" % (len(rows), phases))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
