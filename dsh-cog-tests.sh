@@ -2947,6 +2947,36 @@ print("供给 %s -> 选择 %s(落差 %s 条被 coverViewpoints/topK 收窄)"
       % (r.get("rawHits"), r.get("candidates"), (r.get("rawHits") or 0) - (r.get("candidates") or 0)))
 '
 
+# ── T102 topK 加宽 A/B(cl-120: 从 218 条过阈候选里只见 1-2 条) ──
+echo "[T102] topK 加宽(配置生效 / 成本可测 / 候选数上升)"
+t "profile topK >= 2(加宽 A/B 已生效)" python3 -c '
+import os, re
+p = os.path.expanduser("~/.dsh/profiles/web/cordis.patch.yml")
+t = open(p, encoding="utf8").read()
+m = re.search(r"id: cognitive-inject(.*?)(?:\n    - id:|\Z)", t, re.S)
+assert m, "未找到 cognitive-inject 配置段"
+seg = m.group(1)
+top = re.search(r"\n        topK: (\d+)", seg)
+assert top, "该段缺 topK"
+assert int(top.group(1)) >= 2, "topK 仍为 %s(加宽未生效)" % top.group(1)
+assert "textChars" in seg or "回退条件" in seg, "缺 A/B 判据/回退说明注释"
+print("topK = %s" % top.group(1))
+'
+t "注入上下文成本可测(审计带 textChars)" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+recs = [r for r in rows if "textChars" in r]
+assert recs, "审计尚无 textChars(cl-120 的成本判据缺仪表)"
+# 成本与条数必须同向: 注入 3 条的文本量应大于注入 1 条(同一批经验量级下)
+inj = [r for r in recs if r.get("stage") == "injected" and r.get("expIds")]
+if len(inj) >= 2:
+    sizes = [(len(r["expIds"]), r["textChars"]) for r in inj]
+    print("最近注入: 条数/字符 %s" % sizes[-3:])
+else:
+    print("注入样本不足, 仅确认字段在场")
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──

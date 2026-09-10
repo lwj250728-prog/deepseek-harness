@@ -398,7 +398,8 @@ async function retrieve(
   topK: number,
   novelty?: (expId: string) => number,
   noveltyMargin = 0,
-): Promise<{ hits: readonly RankedHit[], rotated: boolean, rawHits: number, topHits: readonly number[] }> {
+): Promise<{ hits: readonly RankedHit[], rotated: boolean, rawHits: number,
+  topHits: readonly number[], textChars: number }> {
   const vector = actionVector(situation, [])
   const situationVec = situationVector(situation)
   const embedder = service.embedder
@@ -434,6 +435,10 @@ async function retrieve(
   // 看不到"到底有几条过阈可选"。没有这个数, topK/轮换/退避的空间都只能靠猜。
   const rawHits = hits.length
   const topHits = hits.slice(0, 5).map(hit => Number(hit.similarity.toFixed(3)))
+  // cl-120 A/B: topK 加宽会增加上下文成本, 所以每次注入的文本长度必须可测——
+  // 判据是"采纳率/不同经验数上升"与"成本上升"的对照, 不能只看前者。
+  const textChars = (subset: readonly RankedHit[]): number =>
+    subset.reduce((sum, hit) => sum + hit.text.length, 0)
   const covered = coverViewpoints(hits, topK, novelty, noveltyMargin)
   // cl-121 可用性见证: 与"纯分数选择"比对, 记录本轮轮换是否真的换了人。
   // 三个调度杠杆先后被判惰性(闸门/退避/轮换), 所以"是否真的开火"必须落盘可见——
@@ -441,7 +446,7 @@ async function retrieve(
   const baseline = noveltyMargin > 0 ? coverViewpoints(hits, topK) : covered
   const rotated = covered.length !== baseline.length
     || covered.some(hit => !baseline.some(base => base.expId === hit.expId))
-  return { hits: covered, rotated, rawHits, topHits }
+  return { hits: covered, rotated, rawHits, topHits, textChars: textChars(covered) }
 }
 
 /**
@@ -858,7 +863,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (record.sessionId !== agent.session.id) continue
       for (const expId of record.expIds) sessionCounts.set(expId, (sessionCounts.get(expId) ?? 0) + 1)
     }
-    const { hits, rotated, rawHits, topHits } = await retrieve(ctx.cognitivePipeline, situation, threshold, topK,
+    const { hits, rotated, rawHits, topHits, textChars } = await retrieve(ctx.cognitivePipeline, situation, threshold, topK,
       expId => sessionCounts.get(expId) ?? 0, resolved.noveltyMargin)
     if (hits.length === 0) {
       audit({ stage: 'no-candidates', threshold, rotated, rawHits })
@@ -872,7 +877,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       // 行动帧: 只有比常规更贴的经验才注入(2.0% 采纳率, 不该按用户回合的宽松度放行)
       + (gate === 'inject-strict' ? resolved.actionFrameMarginBoost : 0)
     if (gateScore < gateThreshold) {
-      audit({ stage: 'below-gate', candidates: hits.length, topHit, gateScore, gateThreshold, rotated, rawHits, topHits,
+      audit({ stage: 'below-gate', candidates: hits.length, topHit, gateScore, gateThreshold, rotated, rawHits, topHits, textChars,
         triggerSource: verdict.triggerSource, triggerScore: verdict.score, matched: verdict.matched })
       return decision
     }
@@ -882,7 +887,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const { kept: cooled, backoffDropped, details: backoffDetails, admitted: backoffAdmitted } = coolDownInjected(
       ctx.cognitivePipeline, agent.session.id, hits, resolved.injectCooldownMs, resolved.backoffMaxMs)
     if (cooled.length === 0) {
-      audit({ stage: 'cooldown', candidates: hits.length, topHit, backoffDropped, rotated, rawHits, topHits,
+      audit({ stage: 'cooldown', candidates: hits.length, topHit, backoffDropped, rotated, rawHits, topHits, textChars,
         backoffDetails, backoffAdmitted, triggerSource: verdict.triggerSource })
       return decision
     }
@@ -908,7 +913,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       ctx, ctx.cognitivePipeline.resolved.route, vetoSituation, cooled, signal,
     )
     if (vetoed.accepted.length === 0) {
-      audit({ stage: 'veto-rejected', candidates: hits.length, overThreshold: cooled.length, rotated, rawHits, topHits,
+      audit({ stage: 'veto-rejected', candidates: hits.length, overThreshold: cooled.length, rotated, rawHits, topHits, textChars,
         vetoRejected: vetoed.rejectedNotes.length, topHit, triggerSource: verdict.triggerSource })
       return decision
     }
@@ -930,7 +935,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         jumpWords: verdict.jumpWords,
         strategyId: strategy.strategyId,
       })
-      audit({ stage: 'injected', path: 'strategy', backoffDropped, backoffDetails, backoffAdmitted, rotated, rawHits, topHits, candidates: hits.length, overThreshold: cooled.length,
+      audit({ stage: 'injected', path: 'strategy', backoffDropped, backoffDetails, backoffAdmitted, rotated, rawHits, topHits, textChars, candidates: hits.length, overThreshold: cooled.length,
         vetoAccepted: vetoed.accepted.length, vetoRejected: vetoed.rejectedNotes.length,
         expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource,
         triggerScore: verdict.score, matched: verdict.matched })
@@ -986,7 +991,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       jumpWords: verdict.jumpWords,
     })
     markHitsReviewed(ctx.cognitivePipeline, vetoed.accepted)
-    audit({ stage: 'injected', path: 'raw', backoffDropped, backoffDetails, backoffAdmitted, rotated, rawHits, topHits, candidates: hits.length, overThreshold: cooled.length,
+    audit({ stage: 'injected', path: 'raw', backoffDropped, backoffDetails, backoffAdmitted, rotated, rawHits, topHits, textChars, candidates: hits.length, overThreshold: cooled.length,
       vetoAccepted: vetoed.accepted.length, vetoRejected: vetoed.rejectedNotes.length,
       expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource,
       triggerScore: verdict.score, matched: verdict.matched })
