@@ -3592,6 +3592,85 @@ assert len(set(map(str, vals))) > 1, "citationCount 全常量(%s) => 使用度�
 print("citationCount 取值多样(%d 种), 使用度信号活着" % len(set(map(str, vals))))
 '
 
+# ── T116 采纳裁决须用区间而非点估计 + 观察型闸门必须能开火(cl-134 修订 / tp-099) ──
+# 首红背景: 旧判据拿点估计比"后窗文本率 < 前窗一半"(0.150 vs 0.353)就打了 adverse 标签,
+# 但 Wilson 区间 [0.236,0.490] vs [0.089,0.391] 大幅重叠 —— 那是把噪声当信号, 与今天
+# 在 n=1 / 3-of-3 上栽的三次同型。方向裁决改为"区间分离"才算证据。
+# 另一半: 观察型步骤必须有人把 nextAction 翻成可执行, 否则等样本达标了也没人推进
+# (exp_189: 触发链必须有明确消费者), 故闸门脚本要正反两路都实测开火。
+echo "[T116] 采纳判据(区间分离 / 闸门正反两路 / 排程驱动)"
+t "采纳对照必须带 Wilson 区间" python3 -c '
+import json, os
+DIR = os.path.expanduser("~/.dsh/cognitive-pipeline")
+ab = json.load(open(os.path.join(DIR, "ab-compare.json"), encoding="utf8"))
+seg = (ab.get("adoption") or {}).get("segments", {}).get("before") or {}
+union = (ab.get("adoption") or {}).get("afterUnion") or {}
+assert seg.get("textRateCI"), "前窗缺 Wilson 区间(点估计不足以裁决方向)"
+assert union.get("textRateCI"), "后窗缺 Wilson 区间"
+lo, hi = union["textRateCI"]
+assert 0.0 <= lo <= hi <= 1.0, "区间越界: %s" % (union["textRateCI"],)
+print("区间在册: 前窗%s 后窗%s" % (seg["textRateCI"], union["textRateCI"]))
+'
+t "方向判定不得只用点估计(源码须比较区间)" python3 -c '
+import os
+s = open(os.path.expanduser("~/dsh-fork/dsh-ab-compare.py"), encoding="utf8").read()
+assert "wilson_ci" in s, "没有区间函数"
+assert "textRateCI" in s, "判据未引用区间字段"
+assert "_a_ci[1] < _b_ci[0]" in s or "_a_ci" in s and "_b_ci" in s, "方向判定未比较区间端点"
+print("方向判定基于区间分离")
+'
+t "闸门未达标时不得改写 nextAction" python3 -c '
+import json, os, shutil, subprocess, sys
+DIR = os.path.expanduser("~/.dsh/cognitive-pipeline")
+script = os.path.expanduser("~/dsh-fork/dsh-adoption-gate-arm.py")
+ab = json.load(open(os.path.join(DIR, "ab-compare.json"), encoding="utf8"))
+v = dict(ab.get("adoptionVerdict") or {})
+v.update({"direction": "indistinguishable"})          # 未达标态
+ab["adoptionVerdict"] = v
+tmp_ab = "/tmp/t116-ab-wait.json"
+json.dump(ab, open(tmp_ab, "w", encoding="utf8"), ensure_ascii=False)
+tmp_goals = "/tmp/t116-goals-wait.jsonl"
+shutil.copy(os.path.join(DIR, "dormant-goals.jsonl"), tmp_goals)
+before = open(tmp_goals, encoding="utf8").read()
+r = subprocess.run([sys.executable, script, "--goals", tmp_goals, "--ab", tmp_ab],
+                   capture_output=True, text=True, timeout=300)
+assert r.returncode == 0, r.stderr[:200]
+assert "waiting" in r.stdout, "未达标却报 ARMED: %s" % r.stdout.strip()
+assert open(tmp_goals, encoding="utf8").read() == before, "未达标却改写了 nextAction"
+print("未达标: 只记账不改写")
+'
+t "闸门达标时必须武装 nextAction(否则等待型目标静默停摆)" python3 -c '
+import json, os, shutil, subprocess, sys
+DIR = os.path.expanduser("~/.dsh/cognitive-pipeline")
+script = os.path.expanduser("~/dsh-fork/dsh-adoption-gate-arm.py")
+ab = json.load(open(os.path.join(DIR, "ab-compare.json"), encoding="utf8"))
+v = dict(ab.get("adoptionVerdict") or {})
+v.update({"direction": "adverse-significant", "enoughSample": True})
+ab["adoptionVerdict"] = v
+tmp_ab = "/tmp/t116-ab-armed.json"
+json.dump(ab, open(tmp_ab, "w", encoding="utf8"), ensure_ascii=False)
+tmp_goals = "/tmp/t116-goals-armed.jsonl"
+shutil.copy(os.path.join(DIR, "dormant-goals.jsonl"), tmp_goals)
+r = subprocess.run([sys.executable, script, "--goals", tmp_goals, "--ab", tmp_ab],
+                   capture_output=True, text=True, timeout=300)
+assert r.returncode == 0, r.stderr[:200]
+assert "ARMED" in r.stdout, "达标却未武装: %s" % r.stdout.strip()
+rows = [json.loads(l) for l in open(tmp_goals, encoding="utf8") if l.strip()]
+goal = [x for x in rows if x.get("id") == "goal-adoption-rate"][-1]
+assert goal["nextAction"].startswith("执行"), "达标后 nextAction 仍非可执行: %s" % goal["nextAction"][:40]
+print("达标: nextAction 已改写为可执行裁决")
+'
+t "闸门必须由排程驱动且日志新鲜" python3 -c '
+import os, subprocess, time
+out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30).stdout
+assert "dsh-adoption-gate-arm.py" in out, "闸门未挂排程 => 达标了也没人翻 nextAction"
+log = os.path.expanduser("~/.dsh/cognitive-pipeline/adoption-gate.log")
+assert os.path.exists(log), "闸门日志不存在(排程从未产出痕迹)"
+age = time.time() - os.path.getmtime(log)
+assert age < 90 * 60, "闸门日志 %.1f 小时未更新" % (age / 3600)
+print("闸门在册且日志新鲜(%.0f 分钟前)" % (age / 60))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──

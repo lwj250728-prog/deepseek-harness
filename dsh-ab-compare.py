@@ -44,6 +44,22 @@ def commit_epoch(rev: str) -> int | None:
         return None
 
 
+def wilson_ci(successes: int, total: int, z: float = 1.96) -> tuple[float, float] | None:
+    """Wilson score interval for a binomial proportion.
+
+    为什么不能只看点估计: 前窗 35.3%(n=51) 与后窗 20.0%(n=25) 的点比较看起来"降了一半",
+    但两者的 95% 区间大幅重叠 —— 用点估计做方向裁决会把噪声当信号(今天已经在 n=1/3-of-3
+    上栽过三次)。方向裁决改为"区间分离"才算证据, 阈值数字(曾经的 >=40)只作为最小样本护栏。
+    """
+    if total <= 0:
+        return None
+    phat = successes / total
+    denom = 1 + z * z / total
+    center = (phat + z * z / (2 * total)) / denom
+    half = (z * ((phat * (1 - phat) / total + z * z / (4 * total * total)) ** 0.5)) / denom
+    return (max(0.0, round(center - half, 4)), min(1.0, round(center + half, 4)))
+
+
 def _iso_ms(iso: str | None) -> int | None:
     if not iso:
         return None
@@ -152,8 +168,12 @@ def adoption_comparison(split_ms: int, until_fix_ms: int | None, until_fix_iso: 
             'citedPerHour': (round((rate(seg, 'total.cited') or 0) / hours, 2) if hours else None),
             'turnsWithInjection': seg.get('turnsWithInjection'),
             'textRate': seg.get('textMentionAdoptionRate'),
+            'textRateCI': wilson_ci(seg.get('textMentionAdoptionTurns') or 0,
+                                    seg.get('turnsWithInjection') or 0),
             'backgroundRate': seg.get('backgroundRate'),
             'lift': seg.get('lift'),
+            'rateLedgerCI': wilson_ci(seg.get('total', {}).get('cited') or 0,
+                                      seg.get('total', {}).get('injected') or 0),
         }
     # 后窗合体(账本口径跨了变更点 => 比例不可直接相加, 只给绝对条数与回合级文本率)
     after_union = None
@@ -174,6 +194,7 @@ def adoption_comparison(split_ms: int, until_fix_ms: int | None, until_fix_iso: 
             'lensWarning': '跨结算口径变更点, 比例仅供看量级, 判定须分段看',
             'turnsWithInjection': turns,
             'textRate': union_text,
+            'textRateCI': wilson_ci(round((union_text or 0) * turns), turns),
             'backgroundRate': union_background,
             'lift': (round(union_text / union_background, 3)
                      if union_text is not None and union_background else None),
@@ -339,17 +360,34 @@ def main() -> int:
         _segs = adoption['segments']
         _b, _union = _segs.get('before'), adoption.get('afterUnion') or {}
         _turns = _union.get('turnsWithInjection') or 0
-        _enough = _turns >= 40
-        _direction = None
-        if _b and _union.get('textRate') is not None and _b.get('textRate') is not None:
-            _direction = ('adverse' if _union['textRate'] < _b['textRate'] / 2
-                          else 'not-adverse' if _union['textRate'] >= _b['textRate'] else 'mixed')
+        # 方向裁决 = 区间分离(证据), 不再是"点估计差一半"这种魔数比较(cl-134 修订)。
+        # 最小样本护栏仍在(n>=20), 但护栏只用来避免 n=3 时区间过宽导致"分离"的假象。
+        _min_turns = 20
+        _b_ci = (_b or {}).get('textRateCI')
+        _a_ci = _union.get('textRateCI')
+        _separated_adverse = (
+            _b_ci is not None and _a_ci is not None and _turns >= _min_turns
+            and _a_ci[1] < _b_ci[0])            # 后窗区间上界 < 前窗区间下界 => 显著不利
+        _separated_better = (
+            _b_ci is not None and _a_ci is not None and _turns >= _min_turns
+            and _a_ci[0] > _b_ci[1])            # 显著更优
+        if _turns < _min_turns:
+            _direction = 'insufficient-sample'
+        elif _separated_adverse:
+            _direction = 'adverse-significant'
+        elif _separated_better:
+            _direction = 'better-significant'
+        else:
+            _direction = 'indistinguishable'     # 区间重叠 => 现有样本分辨不出差异
         adoption_verdict = {
-            'enoughSample': _enough,
-            'sampleNote': '后窗有注入回合 %s(阈值 40 才允许下方向性结论)' % _turns,
+            'enoughSample': _direction in ('adverse-significant', 'better-significant'),
+            'sampleNote': ('后窗回合 %s(最小护栏 %s); 前窗区间 %s vs 后窗区间 %s'
+                           % (_turns, _min_turns, _b_ci, _a_ci)),
             'direction': _direction,
-            'rollbackIf': '后窗回合文本率 < 前窗一半 且 后窗有注入回合>=40 => topK 回滚到 1',
+            'rollbackIf': '方向判为 adverse-significant(后窗区间上界 < 前窗区间下界) => topK 回滚到 1',
+            'keepIf': '方向判为 better-significant 或 indistinguishable 且主判据不降 => 保留 topK=3',
             'judgeLiftAt': 'lift 需 n>=100(目标池判据), 当前仅作方向指示',
+            'ciMethod': 'Wilson score interval, 95%',
         }
     payload = {
         'verdict': verdict,
