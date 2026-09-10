@@ -935,7 +935,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         jumpWords: verdict.jumpWords,
         strategyId: strategy.strategyId,
       })
-      audit({ stage: 'injected', path: 'strategy', backoffDropped, backoffDetails, backoffAdmitted, rotated, rawHits, topHits, textChars, candidates: hits.length, overThreshold: cooled.length,
+      audit({ stage: 'injected', path: 'strategy', backoffDropped, backoffDetails, backoffAdmitted, rotated, rawHits, topHits, textChars,
+        injectedChars: vetoed.accepted.reduce((sum, hit) => sum + hit.text.length, 0), candidates: hits.length, overThreshold: cooled.length,
         vetoAccepted: vetoed.accepted.length, vetoRejected: vetoed.rejectedNotes.length,
         expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource,
         triggerScore: verdict.score, matched: verdict.matched })
@@ -991,7 +992,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       jumpWords: verdict.jumpWords,
     })
     markHitsReviewed(ctx.cognitivePipeline, vetoed.accepted)
-    audit({ stage: 'injected', path: 'raw', backoffDropped, backoffDetails, backoffAdmitted, rotated, rawHits, topHits, textChars, candidates: hits.length, overThreshold: cooled.length,
+    audit({ stage: 'injected', path: 'raw', backoffDropped, backoffDetails, backoffAdmitted, rotated, rawHits, topHits, textChars,
+      // 成本判据必须看"真正进了上下文的那几条"(veto 之后), 而不是候选池大小
+      injectedChars: vetoed.accepted.reduce((sum, hit) => sum + hit.text.length, 0), candidates: hits.length, overThreshold: cooled.length,
       vetoAccepted: vetoed.accepted.length, vetoRejected: vetoed.rejectedNotes.length,
       expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource,
       triggerScore: verdict.score, matched: verdict.matched })
