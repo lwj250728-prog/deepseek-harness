@@ -21,6 +21,7 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import { findOpenAlertId, localDay } from './alert-ledger.ts'
+import { isWaitingNextAction } from './waiting.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -1446,14 +1447,15 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
           if (config.actionFrameEnabled) {
             // 多目标轮转(用户 2026-09-06): 找所有 active+nextAction 目标,
             // 跳过 等待用户型/冷却中/停滞 的, 优先推一个可执行目标——A 冷却期推动 B。
-            const WAITING_PREFIX = /^(?:待用户|等待用户|请用户|需用户|等用户|待你|等你|待事件|待日期|等待外部|等外部|待[0-9]{4})/
+            // cl-110: 等待型判定抽成纯函数(src/waiting.ts)并容忍空白——
+            // 旧正则 `待[0-9]{4}` 不匹配 "待 09-11", 于是等待型目标照样被推行动帧。
             const now = Date.now()
             const goals = await findAllActionableGoals(config.goalsPoolPath)
             // 分三类: ready(可推) / stalled(停滞≥3次) / 其余(等待或冷却)
             const ready: typeof goals = []
             let stalled: typeof goals = []
             for (const g of goals) {
-              if (WAITING_PREFIX.test(g.nextAction)) continue  // 等待用户 → 评估帧携带, 不推
+              if (isWaitingNextAction(g.nextAction)) continue  // 等待型 → 评估帧携带, 不推
               const lastAt = await readLastActionFrameAt(config.thinkLogPath, g.id)
               const repeatCount = await countRepeatActionFrames(config.thinkLogPath, g.nextAction, g.id)
               if (repeatCount >= 3) { stalled.push(g); continue }  // 停滞 → 记录待升级
