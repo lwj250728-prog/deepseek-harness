@@ -4014,18 +4014,25 @@ for entry in reg["guards"]:
 assert not bad, "声明的开火断言不在该组内: %s" % bad
 print("开火断言全部在组内")
 '
-t "声明的开火命令必须现场开火(非零退出)" python3 -c '
+t "声明的开火命令必须现场开火(exit=申报码, 且非探针崩溃)" python3 -c '
 import json, os, subprocess
 reg = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/guard-fire.json"), encoding="utf8"))
-cmds = [f["command"] for g in reg["guards"] for f in (g.get("mustFire") or []) if f.get("command")]
-assert cmds, "没有任何登记的开火命令 —— 断言前提不成立(只有文本声明不算证据)"
-ok = 0
-for cmd in cmds:
-    r = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True, timeout=600)
-    assert r.returncode != 0, "开火命令退出码 0(守卫其实没开火): %s" % cmd[:80]
-    ok += 1
-print("%d 条开火命令现场非零退出(守卫活着)" % ok)
+items = [(g["guard"], f) for g in reg["guards"] for f in (g.get("mustFire") or []) if f.get("command")]
+assert items, "没有任何登记的开火命令 —— 断言前提不成立(只有文本声明不算证据)"
+bad = []
+for gid, f in items:
+    want = str(f.get("expectedExit", 1))
+    r = subprocess.run(["bash", "/home/ubuntu/dsh-fork/dsh-guard-fire-run.sh", gid, want, f["command"]],
+                       capture_output=True, text=True, timeout=900)
+    if r.returncode != 1:
+        last = (r.stderr.strip().splitlines() or [""])[-1]
+        bad.append("%s exit=%d %s" % (gid, r.returncode, last[:100]))
+assert not bad, "开火不可判别(探针崩溃/没开火/退出码漂移一律算红): %s" % bad
+print("%d 条开火命令经统一执行器判定为**真开火**(非崩溃/非漂移)" % len(items))
 '
+# tp-119/cl-191: 判定器本身也是机制 —— 它必须能分开"真开火/探针崩溃/没开火/退出码漂移",
+# 否则"非零退出"又会退化成把三种东西混成一种的老毛病。
+t "开火判定器自身须可判别(崩溃/未开火/漂移/真开火)" bash /home/ubuntu/dsh-fork/dsh-guard-fire-run-selftest.sh
 t "开火核验须由排程驱动且日志新鲜" python3 -c '
 import os, subprocess, time
 out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30).stdout
