@@ -4052,6 +4052,49 @@ else:
     print("摘要年龄 %.1fh(尚未陈旧)" % age)
 '
 
+# ── T122 基线不得被事后扩(反证探索所得: 守卫可以被"加进基线"静默消音) ──
+# 反事实追问"如果'机械守门有效'这个核心假设是错的, 证据会是什么样?" 找出的答案是:
+# 今天每个守卫都自带一份**可自由编辑的基线**(那 81/17/101/8 条历史积压), 只要往基线里加一行,
+# 对应守卫立刻恢复全绿 —— 也就是说守卫的有效性可以被"消音"而不是被解决, 而**没有任何判据盯着基线增长**。
+# 实测(git 历史): 四份基线至今都只有创建版本、未被扩过, 所以假设暂未被证伪; 但缺口是结构性的, 故加此判据。
+echo "[T122] 基线完整性(不得被事后扩 / 须有创建时间与 git 版本可比)"
+t "基线内容必须与首次入库版本一致" python3 -c '
+import json, os, subprocess
+COG = os.path.expanduser("~/.dsh/cognitive-pipeline")
+REPO = os.path.expanduser("~/.dsh")
+FILES = {
+  "experience-assertions.json": "baselineUncovered",
+  "enum-consumers.json": "baselineUncovered",
+  "guard-fire.json": "baselineGroups",
+  "mechanism-inventory.json": "baselineUnregistered",
+}
+def revs(rel):
+    out = subprocess.run(["git", "-C", REPO, "log", "--format=%h", "--", rel],
+                         capture_output=True, text=True, timeout=60).stdout.split()
+    return out
+def show(rel, rev):
+    out = subprocess.run(["git", "-C", REPO, "show", "%s:%s" % (rev, rel)],
+                         capture_output=True, text=True, timeout=60).stdout
+    try: return json.loads(out)
+    except Exception: return None
+checked, problems = 0, []
+for fname, key in FILES.items():
+    cur = json.load(open(os.path.join(COG, fname), encoding="utf8"))
+    assert cur.get("baselineAt"), "%s 缺基线时间戳" % fname
+    rel = "cognitive-pipeline/" + fname
+    rs = revs(rel)
+    assert rs, "%s 尚无 git 版本, 断言前提不成立" % fname
+    first = show(rel, rs[-1])          # 最早版本
+    if first is None or key not in first:
+        continue
+    if sorted(map(str, first[key])) != sorted(map(str, cur.get(key) or [])):
+        problems.append("%s: 基线从 %d 变为 %d(守卫可能被静默消音)" % (fname, len(first[key]), len(cur.get(key) or [])))
+    checked += 1
+assert checked >= 3, "可比对的基线不足(%d), 断言前提不成立" % checked
+assert not problems, "基线被事后扩: %s" % problems
+print("%d 份基线与其首次入库版本一致" % checked)
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
