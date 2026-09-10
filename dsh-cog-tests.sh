@@ -3045,18 +3045,18 @@ print("供给 %s -> 选择 %s(落差 %s 条被 coverViewpoints/topK 收窄)"
 
 # ── T102 topK 加宽 A/B(cl-120: 从 218 条过阈候选里只见 1-2 条) ──
 echo "[T102] topK 加宽(配置生效 / 成本可测 / 候选数上升)"
-t "profile topK >= 2(加宽 A/B 已生效)" python3 -c '
+# 2026-09-10 23:1x 退役: 原断言写死"topK >= 2(加宽已生效)" —— 那是**旧状态**;
+# 回滚 topK→1 后它必然转红。改为不在本组断言具体取值(取值正确性由 T128 的
+# "配置现值 == 预登记基线 afterValue" 保证, 那才是不会随决策漂移的不变式)。
+t "topK 配置段可解析(取值正确性见 T128)" python3 -c '
 import os, re
 p = os.path.expanduser("~/.dsh/profiles/web/cordis.patch.yml")
 t = open(p, encoding="utf8").read()
 m = re.search(r"id: cognitive-inject(.*?)(?:\n    - id:|\Z)", t, re.S)
 assert m, "未找到 cognitive-inject 配置段"
-seg = m.group(1)
-top = re.search(r"\n        topK: (\d+)", seg)
-assert top, "该段缺 topK"
-assert int(top.group(1)) >= 2, "topK 仍为 %s(加宽未生效)" % top.group(1)
-assert "textChars" in seg or "回退条件" in seg, "缺 A/B 判据/回退说明注释"
-print("topK = %s" % top.group(1))
+vals = re.findall(r"^\s*topK:\s*(\d+)\s*$", m.group(1), re.M)
+assert vals, "cognitive-inject 段内找不到 topK"
+print("topK 段可解析: %s(取值与基线的比对见 T128)" % vals[-1])
 '
 t "注入上下文成本可测(审计带 textChars)" python3 -c '
 import json, os
@@ -4436,6 +4436,60 @@ assert "adopted_at + datetime.timedelta(hours=24) >= datetime.datetime.now(" in 
 # 报告须显示元层提交单列(信息不丢, 但不计入推进)
 assert "metaCommits" in src, "元层提交未单列"
 print("三处灌水形态均已被判据覆盖")
+'
+
+# ── T128 配置类改动必须验证"在运行进程里生效"(cl-165) ──
+# 起因(今天反复踩): 改配置 ≠ 生效。topK 3→1 回滚若只改 profile 而不重启, 运行进程仍用旧值;
+# 而"看着生效"的常见假证据是"文件已改"(状态证据)。故本组用**三层**判定:
+#   ①配置现值与预登记基线一致(不许脱节) ②进程启动晚于配置改动(已加载) ③运行时效果证据
+#   —— 重启后新产生的注入记录条目数必须与 topK 声明一致(topK=1 ⇒ 每条注入只含 1 个经验)。
+echo "[T128] 配置改动生效验证(现值/序关系/运行时证据)"
+t "配置现值必须与预登记基线一致" python3 -c '
+import json, os, re
+prof = os.path.expanduser("~/.dsh/profiles/web/cordis.patch.yml")
+base = os.path.expanduser("~/.dsh/cognitive-pipeline/ab-baselines.json")
+assert os.path.exists(prof) and os.path.exists(base), "缺 profile 或基线文件"
+text = open(prof, encoding="utf8").read()
+tops = re.findall(r"^\s*topK:\s*(\d+)\s*$", text, re.M)
+assert tops, "profile 里找不到 topK"
+declared = int(tops[-1])
+b = json.load(open(base, encoding="utf8"))
+after = (b.get("afterValue") or {}).get("topK")
+assert after is not None, "基线未记录 afterValue.topK"
+assert declared == after, "配置 topK=%s 与预登记基线 afterValue.topK=%s 脱节" % (declared, after)
+print("配置与基线一致: topK=%d" % declared)
+'
+t "进程必须晚于配置改动启动(改动已加载)" python3 -c '
+import os, subprocess, time
+prof = os.path.expanduser("~/.dsh/profiles/web/cordis.patch.yml")
+cfg_mtime = os.path.getmtime(prof)
+out = subprocess.run(["pgrep", "-f", "bin.js web"], capture_output=True, text=True, timeout=20).stdout.split()
+assert out, "找不到 web 服务进程"
+lstart = subprocess.run(["ps", "-o", "lstart=", "-p", out[0]], capture_output=True, text=True, timeout=20).stdout.strip()
+start = time.mktime(time.strptime(lstart))
+assert start > cfg_mtime, "进程(%.0f)早于配置改动(%.0f): 改动未加载, 需重启" % (start, cfg_mtime)
+print("进程晚于配置改动 %.0f 秒" % (start - cfg_mtime))
+'
+t "运行时证据: 注入条目数须与 topK 一致" python3 -c '
+import json, os, re, subprocess, time
+prof = os.path.expanduser("~/.dsh/profiles/web/cordis.patch.yml")
+top = int(re.findall(r"^\s*topK:\s*(\d+)\s*$", open(prof, encoding="utf8").read(), re.M)[-1])
+out = subprocess.run(["pgrep", "-f", "bin.js web"], capture_output=True, text=True, timeout=20).stdout.split()
+lstart = subprocess.run(["ps", "-o", "lstart=", "-p", out[0]], capture_output=True, text=True, timeout=20).stdout.strip()
+start_ms = time.mktime(time.strptime(lstart)) * 1000
+inj = {}
+for line in open(os.path.expanduser("~/.dsh/cognitive-pipeline/injections.jsonl"), encoding="utf8"):
+    if line.strip():
+        r = json.loads(line)
+        if isinstance(r.get("injectionId"), str): inj[r["injectionId"]] = r
+after = [r for r in inj.values() if (r.get("createdAt") or 0) >= start_ms and r.get("expIds")]
+if not after:
+    print("重启后尚无注入样本(未到首样本), 不假装通过也不判红"); raise SystemExit(0)
+sizes = sorted({len(r["expIds"]) for r in after})
+assert all(s <= top for s in sizes), "运行时条目数 %s 超过 topK=%d => 配置未生效" % (sizes, top)
+if top == 1:
+    assert sizes == [1], "topK=1 却出现条目数 %s => 运行进程仍用旧配置" % sizes
+print("运行时证据通过: %d 条注入, 条目数 %s (topK=%d)" % (len(after), sizes, top))
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
