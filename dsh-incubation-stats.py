@@ -82,6 +82,9 @@ def external_anchors():
     if os.path.exists(suite):
         suite_assertions = len(re.findall(r'^t "', open(suite, encoding='utf8').read(), flags=re.M))
 
+    audit_path = os.path.join(D, 'retrieval-audit.jsonl')
+    audit_lines = sum(1 for l in open(audit_path, encoding='utf8') if l.strip()) if os.path.exists(audit_path) else 0
+
     audited = 0
     pred = os.path.join(D, 'predictions.jsonl')
     if os.path.exists(pred):
@@ -97,6 +100,10 @@ def external_anchors():
         'retrievalCommits': git_count(['packages/cognition/cognitive-pipeline']),   # 检索专属
         'incubationCommits': git_count(['packages/context/dormant-goal', 'packages/context/quiet-driver']),  # 数字生命专属
         'auditedPredictions': audited,   # 检索专属(精排 A/B 样本)
+        # goal-adoption-rate 专属: 注入策略代码的提交数 + 四级漏斗审计条数
+        # (审计条数是该目标第 1 步的直接产物, 也是"采纳率可被度量"的载体)
+        'injectionCommits': git_count(['packages/context/cognitive-inject']),
+        'adoptionAudits': audit_lines,
     }
 
 
@@ -143,6 +150,8 @@ GOAL_WITNESS = {
     'goal-novel-60w': ('draftsChars',),
     'goal-retrieval-optimization': ('retrievalCommits', 'auditedPredictions', 'suiteAssertions'),
     'goal-digital-life-incubation': ('incubationCommits', 'suiteAssertions'),
+    # 采用率优化: 注入策略提交 + 四级漏斗审计条数(可度量化本身就是产物)
+    'goal-adoption-rate': ('injectionCommits', 'adoptionAudits', 'suiteAssertions'),
 }
 GLOBAL_WITNESS = ('draftsChars', 'gitCommits', 'suitePasses')
 
@@ -278,7 +287,8 @@ else:
         '- 触发 = 哨兵 pre-step 命中（dormant-goals.jsonl.triggerCount）',
         '- 采纳 = 结构性证据：回合内目标 nextAction/notes 真的变了（incubation-log.jsonl 记 evidence=pool-change；关键词仅在池不可读时兜底）',
         '- 推进(专属) = 采纳后 24h 内**该目标专属**外部产物锚增长（cl-077）：小说→draftsChars；'
-        '检索→retrievalCommits/auditedPredictions/suiteAssertions；数字生命→incubationCommits/suiteAssertions',
+        '检索→retrievalCommits/auditedPredictions/suiteAssertions；数字生命→incubationCommits/suiteAssertions；'
+        '采纳率→injectionCommits/adoptionAudits/suiteAssertions',
         '- 推进率(全局锚对照) = 旧判据（draftsChars/gitCommits/suitePasses）——只回答"机器在动吗"，保留作对照，不作结论',
         '- 待观察 = 采纳未满 24h 或缺少监视记录',
         '- 不可判定 = 计数器 adoptedCount 与有据采纳的差额：基线前的存量采纳无时间戳，24h 窗口无从计算；单列，既不进分子也不进分母（incubation-baseline.json 固定该差额）',
