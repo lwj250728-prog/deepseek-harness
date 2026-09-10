@@ -4017,6 +4017,41 @@ assert not missing, "声明的记录文件不存在: %s" % missing
 print("台账 %d 项与其记录文件均在" % len(inv["mechanisms"]))
 '
 
+# ── T121 离线整合层必须可判读(摘要年龄 / 重建尝试落盘) ──
+# cl-135 追查所得: taxonomy.json 卡在 09-09(今日实测年龄 25.7h), 而 rebuild_taxonomy 今天被拒
+# (误差 0.491 vs 0.070, 20 簇被拒)**在磁盘上零痕迹** —— 套件里 4 处 taxonomy 相关断言没有一条管
+# 年龄/版本/重建结果。于是"整合层停止吸收新样本"这件事只能靠偶然想起; 想加判据连数据源都没有。
+# 判据设计: 摘要年龄 > 24h 时, 24h 内必须**至少有一次重建尝试**记录(成功的或被告知被拒的都算) ——
+# 这检验的是"层还在被尝试", 而不是"层成功了"(成功与否是内容问题, 被拒也要留痕)。
+echo "[T121] 离线整合层可判读(年龄 / 重建尝试落盘 / 记录字段完整)"
+t "重建尝试必须落盘且字段完整" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/taxonomy-rebuild.jsonl")
+assert os.path.exists(p), "重建记录文件不存在: 层被拒也无痕迹(想加判据都没数据源)"
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+assert rows, "重建记录为空 —— 断言前提不成立"
+for key in ("ts", "accepted", "oldError", "newError", "sampleCount"):
+    missing = [r.get("ts") for r in rows if key not in r]
+    assert not missing, "记录缺字段 %s: %s" % (key, missing[:3])
+print("重建记录 %d 行, 字段完整" % len(rows))
+'
+t "摘要陈旧时必须有近期重建尝试" python3 -c '
+import json, os, datetime, time
+TZ = datetime.timezone(datetime.timedelta(hours=8))
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+tax = os.path.join(D, "taxonomy.json")
+assert os.path.exists(tax), "taxonomy.json 不存在"
+age = (time.time() - os.path.getmtime(tax)) / 3600.0
+rows = [json.loads(l) for l in open(os.path.join(D, "taxonomy-rebuild.jsonl"), encoding="utf8") if l.strip()]
+recent = [r for r in rows if (time.time() - datetime.datetime.fromisoformat(r["ts"]).timestamp()) < 24 * 3600]
+if age > 24:
+    assert recent, ("摘要已陈旧 %.1fh 且 24h 内没有任何重建尝试记录 —— "
+                    "整合层被遗忘(不是被拒, 是根本没再试)" % age)
+    print("摘要年龄 %.1fh, 24h 内有 %d 次重建尝试(被拒也算)" % (age, len(recent)))
+else:
+    print("摘要年龄 %.1fh(尚未陈旧)" % age)
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
