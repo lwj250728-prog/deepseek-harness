@@ -3362,6 +3362,94 @@ assert not suspicious, "这些标 failed 但已写下完整结论, 应转 conclu
 print("无 failed/concluded 混用")
 '
 
+# ── T113 采纳 A/B 对照的窗口/口径/判据守卫(cl-134: 主判据此前在对照里缺席) ──
+# 今天连踩三坑, 全部落在这条链上:
+#   ①主判据(不同经验数+采纳率不降+绝对采纳数不降)在 A/B 里缺席, 采纳侧要人肉另跑脚本;
+#   ②子窗口运行(--since/--until)覆盖了唯一口径的落盘快照, 下游把它当水位 => 整张表错位;
+#   ③"口径变更时刻"取了 commit author time(04:57 提交)而非生效时刻(15:50 部署)
+#     => 后窗被切成 [14:07, 04:57) 空集却照样出数;
+#   ④判据字段只在打印分支里算, --quiet 消费者读到 null("判据只长在显示路径上")。
+# 本组断言把这四类固化为守卫。
+echo "[T113] 采纳对照(快照不被子窗口改写 / 口径取自账本 / 前窗非空 / 判据落盘)"
+t "子窗口运行不得改写规范快照" python3 -c '
+import json, os, subprocess, sys, hashlib
+DIR = os.path.expanduser("~/.dsh/cognitive-pipeline")
+snap = os.path.join(DIR, "adoption-stats.json")
+script = os.path.expanduser("~/dsh-fork/dsh-adoption-stats.py")
+assert os.path.exists(snap), "规范快照不存在, 断言前提不成立"
+before = hashlib.sha256(open(snap, "rb").read()).hexdigest()
+w0 = json.load(open(snap, encoding="utf8")).get("windowStart")
+# 用最贴近真实用法的子窗口调用(后窗): 修复前正是这种调用覆盖了快照。
+r = subprocess.run([sys.executable, script, "--since", "2026-09-10T14:07:00", "--json"],
+                   capture_output=True, text=True, timeout=300)
+assert r.returncode == 0, "子窗口调用失败: %s" % (r.stderr or "")[:200]
+after = hashlib.sha256(open(snap, "rb").read()).hexdigest()
+assert before == after, "子窗口运行改写了规范快照(windowStart %s => %s)" % (
+    w0, json.load(open(snap, encoding="utf8")).get("windowStart"))
+print("快照未被改写(windowStart=%s)" % w0)
+'
+t "口径变更时刻必须取自账本事实时间" python3 -c '
+import json, os
+DIR = os.path.expanduser("~/.dsh/cognitive-pipeline")
+ab = json.load(open(os.path.join(DIR, "ab-compare.json"), encoding="utf8"))
+adopt = (ab.get("adoption") or {})
+got = adopt.get("settlementLensChangedAt")
+ledger = None
+for line in open(os.path.join(DIR, "ab-confounders.jsonl"), encoding="utf8"):
+    if not line.strip():
+        continue
+    row = json.loads(line)
+    if row.get("kind") == "settlement-fix":
+        ledger = row.get("ts")
+assert ledger, "账本里没有 settlement-fix 记录, 断言前提不成立"
+import datetime
+assert got, "对照未记录口径变更时刻"
+pg, pl = datetime.datetime.fromisoformat(got), datetime.datetime.fromisoformat(ledger)
+# 裸时间戳(无时区)是缺陷不是格式偏好: 跨文件比较必然失配(cl-134 首次红即此)。
+assert pg.tzinfo is not None and pl.tzinfo is not None, (
+    "口径时刻缺时区(裸本地时间): 对照=%s 账本=%s" % (got, ledger))
+assert pg == pl, "口径时刻与账本不是同一瞬间: 对照=%s 账本=%s" % (got, ledger)
+print("口径时刻与账本同一瞬间: %s" % ledger)
+'
+t "前窗不得为空(窗口错位必须显式失败)" python3 -c '
+import json, os
+DIR = os.path.expanduser("~/.dsh/cognitive-pipeline")
+ab = json.load(open(os.path.join(DIR, "ab-compare.json"), encoding="utf8"))
+segs = ((ab.get("adoption") or {}).get("segments") or {})
+before = segs.get("before")
+assert before is not None, "对照里没有前窗, 断言前提不成立"
+assert (before.get("injected") or 0) > 0, (
+    "前窗注入为 0 => 窗口错位(如把提交时刻当口径时刻), 这种对照不得出数")
+assert (before.get("hours") or 0) > 0, "前窗时长为非正数: %s" % before.get("hours")
+print("前窗非空: %s 注入 / %sh" % (before.get("injected"), before.get("hours")))
+'
+t "判据字段必须在 --quiet 下也落盘" python3 -c '
+import json, os, subprocess, sys
+DIR = os.path.expanduser("~/.dsh/cognitive-pipeline")
+r = subprocess.run([sys.executable, os.path.expanduser("~/dsh-fork/dsh-ab-compare.py"), "--quiet"],
+                   capture_output=True, text=True, timeout=600)
+assert r.returncode == 0, "ab-compare --quiet 失败: %s" % (r.stderr or "")[:200]
+ab = json.load(open(os.path.join(DIR, "ab-compare.json"), encoding="utf8"))
+av = ab.get("adoptionVerdict")
+assert isinstance(av, dict), "quiet 模式下 adoptionVerdict 缺失(判据只长在显示路径上)"
+for key in ("enoughSample", "sampleNote", "rollbackIf"):
+    assert av.get(key) is not None, "quiet 模式下 adoptionVerdict.%s 为 null" % key
+assert ab.get("adoption", {}).get("afterUnion"), "quiet 模式下后窗合体缺失"
+print("quiet 模式判据完整: 样本%s 方向%s" % (av.get("enoughSample"), av.get("direction")))
+'
+t "采纳观察必须由排程驱动且日志新鲜" python3 -c '
+import os, subprocess, time
+# "排程≠完成"的老坑(cl-117: cron 带 --quiet 导致 mtime 不更新, 跑没跑无法证明)。
+# 这条守卫要求: cron 条目存在 + 观察日志在 2h 内被写过(裸时间戳, 不静默)。
+out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30).stdout
+assert "dsh-adoption-observe.py" in out, "采纳观察未挂排程(观察型目标会退化成靠记性)"
+log = os.path.expanduser("~/.dsh/cognitive-pipeline/adoption-observe.log")
+assert os.path.exists(log), "观察日志不存在: 排程从未真正产出痕迹"
+age = time.time() - os.path.getmtime(log)
+assert age < 2 * 3600, "观察日志 %.1f 小时未更新(排程在跑但无产出, 或已失效)" % (age / 3600)
+print("观察排程在册且日志新鲜(%.0f 分钟前)" % (age / 60))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──

@@ -85,6 +85,9 @@ def turn_classes(log_path: str) -> tuple[list[dict], list[int]]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--since', default=None, help='ISO 时间；默认取结算修复水位')
+    parser.add_argument('--until', default=None,
+                        help='ISO 时间上界(左闭右开)。A/B 对照须由同一生产者切两个窗口, '
+                             '而不是另写脚本算第二套口径(cl-134)')
     parser.add_argument('--session-id', default=MAIN_SESSION)
     parser.add_argument('--json', action='store_true')
     args = parser.parse_args()
@@ -95,6 +98,12 @@ def main() -> int:
         return 1
     since = (int(datetime.datetime.fromisoformat(args.since).timestamp() * 1000)
              if args.since else watermark + DEPLOY_GRACE_MS)
+    until = (int(datetime.datetime.fromisoformat(args.until).timestamp() * 1000)
+             if args.until else None)
+
+    def in_window(created: int) -> bool:
+        """左闭右开窗口。单点实现, 所有取数路径共用(防同一脚本内两套口径)。"""
+        return created >= since and (until is None or created < until)
 
     log_path = session_log_path(args.session_id)
     if log_path is None:
@@ -137,7 +146,7 @@ def main() -> int:
         if str(record.get('sessionId')) != args.session_id:
             continue
         created = record.get('createdAt') or 0
-        if created < since:
+        if not in_window(created):
             continue
         index = bisect.bisect_right(starts, created) - 1
         if index < 0:
@@ -203,7 +212,7 @@ def main() -> int:
         turn_nos = [x for _, x in ordered]
         for record in session_records:
             created = record.get('createdAt') or 0
-            if created < since:
+            if not in_window(created):
                 continue
             index = bisect.bisect_right(start_ms, created) - 1
             if index < 0:
@@ -216,7 +225,7 @@ def main() -> int:
             if mentioned - injected:
                 mentioned_background.append(turn)
     turns_with_injection = len({turn_nos[bisect.bisect_right(start_ms, r.get('createdAt') or 0) - 1]
-                                for r in session_records if (r.get('createdAt') or 0) >= since
+                                for r in session_records if in_window(r.get('createdAt') or 0)
                                 and bisect.bisect_right(start_ms, r.get('createdAt') or 0) - 1 >= 0}) \
         if log_path2 is not None else 0
     adoption_turns = len(set(mentioned_injected))
@@ -237,6 +246,9 @@ def main() -> int:
         'windowStart': datetime.datetime.fromtimestamp(since / 1000).isoformat(),
         'windowStartSource': ('cl-100 结算修复提交 %s + 部署宽限 %d 分钟(提交→重启之间由旧进程结算)'
                               % (SETTLEMENT_FIX_COMMIT, DEPLOY_GRACE_MS // 60000)),
+        'windowEnd': (datetime.datetime.fromtimestamp(until / 1000).isoformat()
+                      if until is not None else None),
+        'windowSemantics': '左闭右开 [windowStart, windowEnd); windowEnd=null 表示到当前',
         'sessionId': args.session_id,
         'classes': {k: {'injected': v[0], 'cited': v[1], 'unsettled': v[2],
                         'rate': round(v[1] / v[0], 4) if v[0] else None}
@@ -249,13 +261,20 @@ def main() -> int:
                               'rate': round(v[1] / v[0], 4) if v[0] else None}
                           for k, v in sorted(lenses.items())},
     }
-    with open(os.path.join(DIR, 'adoption-stats.json'), 'w', encoding='utf8') as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    # 只有"默认全窗口"才写规范文件。子窗口结果不得覆盖唯一口径的落盘快照——
+    # 09-10 17:4x 实测踩过: 加 --since 跑后窗时把快照的 windowStart 改成 14:07,
+    # 下游 A/B 读快照当水位, 于是整张对照表的窗口全错位(cl-134)。
+    canonical = args.since is None and args.until is None
+    if canonical:
+        with open(os.path.join(DIR, 'adoption-stats.json'), 'w', encoding='utf8') as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+    payload['canonicalSnapshotWritten'] = canonical
 
     if args.json:
         print(json.dumps(payload, ensure_ascii=False))
         return 0
-    print('窗口起点: %s (来源: %s)' % (payload['windowStart'], payload['windowStartSource']))
+    print('窗口: %s → %s (来源: %s)'
+          % (payload['windowStart'], payload['windowEnd'] or '当前', payload['windowStartSource']))
     for kind, values in payload['classes'].items():
         print('  %-8s 注入 %3d 采纳 %2d 未结算 %d 采纳率 %s'
               % (kind, values['injected'], values['cited'], values['unsettled'],
