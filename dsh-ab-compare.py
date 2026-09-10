@@ -62,6 +62,46 @@ def summarize(rows: list[dict]) -> dict:
     }
 
 
+def novelty_stats(split_ms: int) -> dict:
+    """注入新鲜度: 每个 expId 在被注入时刻"此前已被注入过几次"。
+
+    cl-120+cl-121 的设计目标是"让模型看到更新鲜的经验"; 采纳率(最终指标)样本还小,
+    而这个中间变量可以立刻量出来——它才是加宽/轮换是否起作用的直接证据。
+    """
+    injections = {}
+    for line in open(os.path.join(DIR, 'injections.jsonl'), encoding='utf8'):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(record.get('injectionId'), str):
+            injections[record['injectionId']] = record
+    main = 'session-63251d85-ef77-4299-939d-9a6fe9b5bec6'
+    ordered = sorted((r for r in injections.values() if str(r.get('sessionId')) == main),
+                     key=lambda r: r.get('createdAt') or 0)
+    seen: dict[str, int] = {}
+    before, after = [], []
+    for record in ordered:
+        bucket = after if (record.get('createdAt') or 0) >= split_ms else before
+        for exp_id in record.get('expIds') or []:
+            bucket.append(seen.get(exp_id, 0))
+            seen[exp_id] = seen.get(exp_id, 0) + 1
+
+    def summarize(values: list[int]) -> dict:
+        if not values:
+            return {'n': 0}
+        ordered_values = sorted(values)
+        return {
+            'n': len(values),
+            'priorInjectionsMedian': ordered_values[len(ordered_values) // 2],
+            'priorInjectionsMean': round(sum(values) / len(values), 1),
+            'neverInjectedShare': round(sum(1 for v in values if v == 0) / len(values), 3),
+        }
+    return {'before': summarize(before), 'after': summarize(after)}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--split', default=None)
@@ -93,6 +133,7 @@ def main() -> int:
                else 'comparable')
     payload = {
         'verdict': verdict,
+        'novelty': novelty_stats(split_ms),
         'minSample': MIN_SAMPLE,
         'splitAt': split_iso,
         'splitReason': 'topK 1 -> 3 (cl-120 主杠杆)',
@@ -109,6 +150,10 @@ def main() -> int:
         print('  %-28s %-22s %-22s' % ('指标', '加宽前', '加宽后'))
         for key in keys:
             print('  %-28s %-22s %-22s' % (key, payload['before'].get(key), payload['after'].get(key)))
+        print('  %-28s %-22s %-22s' % ('-- 新鲜度 --', '', ''))
+        for key in ('n', 'priorInjectionsMedian', 'priorInjectionsMean', 'neverInjectedShare'):
+            print('  %-28s %-22s %-22s'
+                  % (key, payload['novelty']['before'].get(key), payload['novelty']['after'].get(key)))
     return 0
 
 

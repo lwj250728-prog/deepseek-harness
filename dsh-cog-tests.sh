@@ -3050,6 +3050,22 @@ want = "insufficient-sample" if n < d["minSample"] else "comparable"
 assert d["verdict"] == want, "判读与样本量不符: verdict=%s n=%d min=%d" % (d["verdict"], n, d["minSample"])
 print("判读 %s(前 %d / 后 %d, 阈值 %d)" % (d["verdict"], d["before"]["decisions"], d["after"]["decisions"], d["minSample"]))
 '
+t "A/B 必带新鲜度指标(cl-120+121 的中间变量)" python3 -c '
+import json, os
+d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/ab-compare.json"), encoding="utf8"))
+assert "novelty" in d, "对照缺新鲜度指标"
+for side in ("before", "after"):
+    s = d["novelty"][side]
+    assert "n" in s, "%s 侧缺 n" % side
+# 采纳率是最终指标但样本小; 新鲜度(该经验此前被注入过几次)是加宽/轮换的直接中间变量,
+# 必须随对照一起报——否则"机制有没有起作用"只能靠感觉。
+if d["novelty"]["after"].get("n", 0) > 0:
+    print("新鲜度: 加宽前中位 %s / 加宽后中位 %s; 从未注入过占比 %s -> %s"
+          % (d["novelty"]["before"].get("priorInjectionsMedian"),
+             d["novelty"]["after"].get("priorInjectionsMedian"),
+             d["novelty"]["before"].get("neverInjectedShare"),
+             d["novelty"]["after"].get("neverInjectedShare")))
+'
 t "成本基线的缺口被显式记录(改变前未埋点 => 不可比)" python3 -c '
 import json, os
 d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/ab-compare.json"), encoding="utf8"))
