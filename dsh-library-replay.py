@@ -25,19 +25,27 @@ D = os.path.expanduser('~/.dsh/cognitive-pipeline')
 AUDIT = os.path.join(D, 'retrieval-audit.jsonl')
 EXP = os.path.join(D, 'experiences.jsonl')
 BASE = os.path.join(D, 'library-replay-baseline.json')
+EXP_FRAMES = os.path.join(D, 'experiences-frames.jsonl')
 OUT = os.path.join(D, 'library-replay-result.json')
 
 
 def utility_map() -> dict:
+    """效用映照: **任务经验 + 帧层经验都要收**。
+    cl-200 实测: 39 条带得分记录里, 只查任务经验时只有 18 条"候选全有效用", 可排序集 5;
+    并入帧层经验(experiences-frames.jsonl)后 39/39 全覆盖, 可排序集 5→11。
+    少查一半经验库, 判据的样本就被凭空砍掉一半。"""
     out = {}
-    for line in open(EXP, encoding='utf8'):
-        if not line.strip():
+    for path in (EXP, EXP_FRAMES):
+        if not os.path.exists(path):
             continue
-        r = json.loads(line)
-        ou = (r.get('sar') or {}).get('outcomeUtility') or {}
-        g = ou.get('materialGain')
-        if isinstance(g, (int, float)):
-            out[r['expId']] = float(g)
+        for line in open(path, encoding='utf8'):
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            ou = (r.get('sar') or {}).get('outcomeUtility') or {}
+            g = ou.get('materialGain')
+            if isinstance(g, (int, float)):
+                out[r['expId']] = float(g)
     return out
 
 
@@ -84,7 +92,12 @@ def main() -> int:
 
     a, a1 = mrr('A')
     b, b1 = mrr('B')
+    # cl-200: 可排序集 = 候选数>=2 且效用已知的集。**这才是 MRR 的 n**；
+    # 之前把"带 candidateScores 的记录数"当成样本量打印(39/30), 而真正的可排序集只有 5 —— 口径错了整整一个数量级。
+    rankable = sum(1 for rec in records
+                   if len([c for c in rec['candidateScores'] if c.get('expId') in util]) >= 2)
     payload = {
+        'rankableSets': rankable,
         'sampleCount': len(records),
         'minSample': base['minSample'],
         'armA_mrr': a, 'armA_top1': a1,
@@ -93,17 +106,22 @@ def main() -> int:
         'lift': (round((b - a) / a, 4) if a and b is not None else None),
         'conclusion': None,
     }
-    if len(records) < base['minSample']:
-        payload['note'] = '样本不足(%d<%d): 只报计数, 不下结论' % (len(records), base['minSample'])
+    # 判据必须挂在**可排序集**上: 记录数够但可排序集不够时, MRR 是 5 个集上的估计(实测 lift 的
+    # bootstrap 95% 区间 [0.00, 0.33]、只有 41% 的重采样能达到 0.10 门槛) —— 那种"达标"不该接线。
+    if rankable < base['minSample']:
+        payload['conclusion'] = 'insufficient-rankable-sample'
+        payload['note'] = ('可排序集 %d < %d: 记录数 %d 看似够, 但每回合只落了一个候选(topK=1) ⇒ '
+                           '排名无从比较, 判据无法裁决; lift %s 仅供参考' % (rankable, base['minSample'], len(records), payload['lift']))
     else:
         payload['conclusion'] = ('wire-utility' if (payload['lift'] or 0) >= 0.10 else 'retire-utility')
+        payload['note'] = '可排序集 %d >= %d' % (rankable, base['minSample'])
     json.dump(payload, open(OUT, 'w', encoding='utf8'), ensure_ascii=False, indent=2)
     if '--json' in args:
         print(json.dumps(payload, ensure_ascii=False))
     else:
-        print('候选级样本 %d/%d | A档 MRR %s top1 %s | B档 MRR %s top1 %s | lift %s'
-              % (payload['sampleCount'], payload['minSample'], a, a1, b, b1, payload['lift']))
-        print('结论: %s | %s' % (payload['conclusion'], payload.get('note', '样本已足')))
+        print('带得分记录 %d | **可排序集 %d**/%d | A档 MRR %s top1 %s | B档 MRR %s top1 %s | lift %s'
+              % (payload['sampleCount'], rankable, payload['minSample'], a, a1, b, b1, payload['lift']))
+        print('结论: %s | %s' % (payload['conclusion'], payload.get('note', '')))
         print('C 档: %s' % payload['armC_status'])
     return 0
 
