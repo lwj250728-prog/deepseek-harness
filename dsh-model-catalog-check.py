@@ -45,8 +45,12 @@ def api_key() -> str | None:
 
 
 def profile_default_model() -> str | None:
-    """The profile's configured model — the fallback target when a wake can't
-    reuse the session model (cl-129: it turned out to be delisted too)."""
+    """**认知管线自身的 LLM 路由模型**(不是 agent 默认档 —— 这里曾是误标, cl-171)。
+
+    实测: 该字段来自 profile patch 的 cognitive-pipeline.config.model; 而 agent 默认档在
+    settings.yaml 的 agent-default-model.model。两者是**不同的**消费者, 混为一谈会误报
+    "默认档已下架"(实际是管线路由下架)。判据应分别报告。
+    """
     if not os.path.exists(PROFILE):
         return None
     for line in open(PROFILE, encoding='utf8'):
@@ -158,6 +162,13 @@ def main() -> int:
     args = parser.parse_args()
 
     in_use = configured_model() or model_in_use()
+    agent_default = None
+    try:
+        import yaml as _yaml
+        _s = _yaml.safe_load(open(SETTINGS, encoding='utf8')) or {}
+        agent_default = (_s.get('agent-default-model') or {}).get('model')
+    except Exception:
+        agent_default = None
     default_model = profile_default_model()
     key = api_key()
     result: dict = {
@@ -166,6 +177,8 @@ def main() -> int:
         'endpoint': ENDPOINT,
         'modelInUse': in_use,
         'profileDefault': default_model,
+        'pipelineModel': default_model,
+        'agentDefaultModel': agent_default,
         'catalog': None,
         'missingFromCatalog': None,
         'verdict': 'unknown',
