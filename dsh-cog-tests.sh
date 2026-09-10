@@ -10,6 +10,17 @@ set -uo pipefail
 DIR="$HOME/.dsh/cognitive-pipeline"
 PASS=0; FAIL=0; FAILED_TESTS=()
 
+# ── cl-175 规范日志落盘: 会话内跑的绿也必须进 .cog-tests.log ──
+# 复发实证(2026-09-11 03:42 核对): 规范日志 mtime 停在 00:19(442/3), 而我 03:30 会话内跑的是 465/1 ——
+# 两条证据链互不覆盖, 任何只读规范日志的核验者(包括下一个我)看到的是 3 红。故任何一次运行都落盘,
+# 并留来源标记(origin=cron/manual)以便按来源分段核验。DSH_COG_LOG_ACTIVE=1 供已自行重定向的调用方关闭。
+COG_LOG="${DSH_COG_LOG:-$HOME/.dsh/cognitive-pipeline/.cog-tests.log}"
+if [ -z "${DSH_COG_LOG_ACTIVE:-}" ]; then
+  export DSH_COG_LOG_ACTIVE=1
+  printf '\n── %s origin=%s pid=%s —— 套件运行开始 ──\n' "$(date '+%F %T')" "${DSH_COG_ORIGIN:-manual}" "$$" >> "$COG_LOG"
+  exec > >(tee -a "$COG_LOG") 2>&1
+fi
+
 # 断言helper: 通过/失败计数
 t() { # t <描述> <条件>
   local desc="$1"; shift
@@ -4950,6 +4961,10 @@ print("行数口径已被显式标注为错")
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
+# cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
+# 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
+sleep 0.5
+printf '═══ 累计裁决: %s 通过 / %s 失败 (origin=%s %s) ═══\n' "$PASS" "$FAIL" "${DSH_COG_ORIGIN:-manual}" "$(date '+%F %T')" >> "$COG_LOG"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
