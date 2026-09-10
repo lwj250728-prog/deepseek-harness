@@ -3772,7 +3772,8 @@ t "转化扫描须由排程驱动且日志新鲜" python3 -c '
 import os, subprocess, time
 out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30).stdout
 assert "dsh-experience-transform.py" in out, "转化扫描未挂排程 => 新缺口只在人工想起时才被发现"
-log = os.path.expanduser("~/.dsh/cognitive-pipeline/experience-transform.log")
+log = os.path.expanduser("~/.dsh/cognitive-pipeline/experience-transform.cron.log")
+# 只认 cron 写的那份: 套件自己也会跑这个脚本, 共用日志时排程新鲜度可被套件跑满足(cl-146)
 assert os.path.exists(log), "转化扫描日志不存在(排程从未产出痕迹)"
 age = time.time() - os.path.getmtime(log)
 assert age < 3 * 3600, "转化扫描日志 %.1f 小时未更新" % (age / 3600)
@@ -3844,7 +3845,8 @@ t "同改守门须由排程驱动且日志新鲜" python3 -c '
 import os, subprocess, time
 out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30).stdout
 assert "dsh-enum-consumer-check.py" in out, "同改守门未挂排程"
-log = os.path.expanduser("~/.dsh/cognitive-pipeline/enum-consumers.log")
+log = os.path.expanduser("~/.dsh/cognitive-pipeline/enum-consumers.cron.log")
+# 同 cl-146: 归属分离, 判据只认 cron 痕迹
 assert os.path.exists(log), "同改守门日志不存在(排程从未产出痕迹)"
 age = time.time() - os.path.getmtime(log)
 assert age < 3 * 3600, "同改守门日志 %.1f 小时未更新" % (age / 3600)
@@ -3919,7 +3921,8 @@ t "开火核验须由排程驱动且日志新鲜" python3 -c '
 import os, subprocess, time
 out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30).stdout
 assert "dsh-guard-fire-check.py" in out, "开火核验未挂排程"
-log = os.path.expanduser("~/.dsh/cognitive-pipeline/guard-fire.log")
+log = os.path.expanduser("~/.dsh/cognitive-pipeline/guard-fire.cron.log")
+# 同 cl-146: 归属分离
 assert os.path.exists(log), "开火核验日志不存在(排程从未产出痕迹)"
 age = time.time() - os.path.getmtime(log)
 assert age < 8 * 3600, "开火核验日志 %.1f 小时未更新" % (age / 3600)

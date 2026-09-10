@@ -27,6 +27,15 @@ DIR = os.environ.get('DSH_COG_DIR') or os.path.expanduser('~/.dsh/cognitive-pipe
 REPO = os.environ.get('DSH_REPO') or os.path.expanduser('~/dsh-fork')
 REGISTRY = os.path.join(DIR, 'enum-consumers.json')
 LOG = os.path.join(DIR, 'enum-consumers.log')
+
+
+def _log_path(default: str) -> str:
+    """归属分离(cl-146): cron 与套件跑同一脚本时日志必须分开, 否则'排程新鲜度'判据可被套件跑满足。"""
+    if '--log' in sys.argv:
+        idx = sys.argv.index('--log')
+        if idx + 1 < len(sys.argv):
+            return sys.argv[idx + 1]
+    return default
 # 套件路径可单独覆盖: 合成源测试需要把[扫哪份源码]与[拿哪份套件做覆盖率]解耦,
 # 否则 DSH_REPO 一改套件也找不到(实测踩过: 合成用例直接退出 1)。
 SUITE = os.environ.get('DSH_SUITE') or os.path.join(REPO, 'dsh-cog-tests.sh')
@@ -108,7 +117,7 @@ def main() -> int:
                  payload['declared'], payload['exempt'], payload['baselineCovered'], payload['uncoveredCount']))
         for value in uncovered[:8]:
             print('  未覆盖: %s' % value)
-    with open(LOG, 'a', encoding='utf8') as fh:
+    with open(_log_path(LOG), 'a', encoding='utf8') as fh:
         fh.write('%s 成员%d 已引用%d 新增未覆盖%d\n'
                  % (payload['scannedAt'][:16], payload['memberCount'], payload['coveredBySuite'],
                     payload['uncoveredCount']))

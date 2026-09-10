@@ -37,6 +37,17 @@ EXPERIENCES = [
 REGISTRY = os.path.join(DIR, 'experience-assertions.json')
 SUITE = os.path.join(REPO, 'dsh-cog-tests.sh')
 LOG = os.path.join(DIR, 'experience-transform.log')
+
+
+def _log_path(default: str) -> str:
+    """归属分离(cl-146): 套件断言也会跑本脚本, 若与 cron 共用一个日志,
+    '排程新鲜度'断言就无法区分[cron 真的跑了]与[套件顺手跑了一次] —— 同 cl-140 的观测通道污染家族。
+    cron 用 --log 指定带 cron 标记的日志, 判据只认那份。"""
+    if '--log' in sys.argv:
+        idx = sys.argv.index('--log')
+        if idx + 1 < len(sys.argv):
+            return sys.argv[idx + 1]
+    return default
 TZ = datetime.timezone(datetime.timedelta(hours=8))
 
 # "修复型"经验: 描述了根因/修复/证伪/回归的教训 —— 这类经验如果不落到断言上, 就会复发。
@@ -158,7 +169,7 @@ def main() -> int:
             print('  · %s -> %s' % (item['exptrId'] if False else item['expId'], item['assertion']))
         print('套件断言组 %d 个, 其中无经验绑定 %d 个(只报数, 历史断言无从回溯)'
               % (payload['suiteAssertionGroups'], payload['assertionGroupsWithoutExperience']))
-    with open(LOG, 'a', encoding='utf8') as fh:
+    with open(_log_path(LOG), 'a', encoding='utf8') as fh:
         fh.write('%s 修复型%d 已登记%d 新增缺口%d 腐烂%d\n'
                  % (payload['scannedAt'][:16], payload['fixTypeExperiences'], payload['linked'],
                     payload['uncoveredCount'], len(payload['rotten'])))
