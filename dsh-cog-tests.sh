@@ -2841,6 +2841,30 @@ grep -q 'noveltyMargin: z.number().min(0).max(1).default(0.05)' '$HOME/dsh-fork/
 grep -q 'sessionCounts' '$HOME/dsh-fork/packages/context/cognitive-inject/src/index.ts'
 "
 
+# ── T99 杠杆可用性监控(机制在、条件已死 的自动识别) ──
+echo "[T99] 杠杆可用性(轮换是否真的开火 / 惰性必须显式)"
+t "审计带 rotated 字段(轮换可用性见证)" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/src/index.ts"), encoding="utf8").read()
+assert "rotated" in src, "缺 rotated 见证"
+lib = open(os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js"), encoding="utf8").read()
+assert "rotated" in lib, "lib 未含 rotated(未重建)"
+'
+t "轮换惰性必须显式(24h 内 >=5 个决策点却从未轮换 => 红)" python3 -c '
+import json, os, time
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+cut = (time.time() - 24 * 3600) * 1000
+recent = [r for r in rows if (r.get("t") or 0) > cut and "rotated" in r]
+if len(recent) < 5:
+    print("样本不足(%d), 空过" % len(recent)); raise SystemExit(0)
+fired = [r for r in recent if r.get("rotated") is True]
+# 三个调度杠杆先后被判惰性(闸门 6h 上限/退避/轮换), 所以"从未开火"不能静默通过——
+# 它要么说明候选供给不足(供给侧问题), 要么说明机制坏了; 两者都必须被看见。
+assert fired, "24h 内 %d 个决策点轮换从未开火: 需显式判定是供给不足还是机制失效" % len(recent)
+print("24h 决策 %d, 轮换开火 %d" % (len(recent), len(fired)))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
