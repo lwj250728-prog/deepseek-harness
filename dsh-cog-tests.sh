@@ -3041,6 +3041,15 @@ print('前 %d 决策/%d 注入, 后 %d 决策/%d 注入'
          d['after']['decisions'], d['after']['injections']))
 \"
 "
+t "样本不足时对照必须自带判读(防把 4 条样本当结论)" python3 -c '
+import json, os
+d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/ab-compare.json"), encoding="utf8"))
+assert "verdict" in d and "minSample" in d, "对照缺样本充分性判读"
+n = min(d["before"]["decisions"], d["after"]["decisions"])
+want = "insufficient-sample" if n < d["minSample"] else "comparable"
+assert d["verdict"] == want, "判读与样本量不符: verdict=%s n=%d min=%d" % (d["verdict"], n, d["minSample"])
+print("判读 %s(前 %d / 后 %d, 阈值 %d)" % (d["verdict"], d["before"]["decisions"], d["after"]["decisions"], d["minSample"]))
+'
 t "成本基线的缺口被显式记录(改变前未埋点 => 不可比)" python3 -c '
 import json, os
 d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/ab-compare.json"), encoding="utf8"))

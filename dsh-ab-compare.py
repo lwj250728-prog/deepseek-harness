@@ -84,17 +84,26 @@ def main() -> int:
         print('缺 retrieval-audit.jsonl 记录: 无法对照', file=sys.stderr)
         return 1
 
+    # 样本充分性: 今天三次误判(n=1 / 3-of-3 / post-cover 计数)都源于"拿小样本当结论"。
+    # 对照结果必须自带这一判读, 否则 4 条样本的两栏表会被当成结论。
+    MIN_SAMPLE = 10
+    before_sum, after_sum = summarize(before), summarize(after)
+    verdict = ('insufficient-sample'
+               if before_sum['decisions'] < MIN_SAMPLE or after_sum['decisions'] < MIN_SAMPLE
+               else 'comparable')
     payload = {
+        'verdict': verdict,
+        'minSample': MIN_SAMPLE,
         'splitAt': split_iso,
         'splitReason': 'topK 1 -> 3 (cl-120 主杠杆)',
         'generatedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        'before': summarize(before),
-        'after': summarize(after),
+        'before': before_sum,
+        'after': after_sum,
     }
     with open(OUT, 'w', encoding='utf8') as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     if not args.quiet:
-        print('切换点 %s (%s)' % (split_iso, payload['splitReason']))
+        print('切换点 %s (%s) | 判读: %s' % (split_iso, payload['splitReason'], payload['verdict']))
         keys = ('decisions', 'injections', 'injectedCountDistribution', 'distinctExperiences',
                 'candidatesMedian', 'vetoJudgedTotal', 'vetoSilentTotal', 'injectedCharsMean')
         print('  %-28s %-22s %-22s' % ('指标', '加宽前', '加宽后'))
