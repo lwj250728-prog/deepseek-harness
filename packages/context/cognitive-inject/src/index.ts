@@ -914,6 +914,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     )
     if (vetoed.accepted.length === 0) {
       audit({ stage: 'veto-rejected', candidates: hits.length, overThreshold: cooled.length, rotated, rawHits, topHits, textChars,
+        vetoJudged: vetoed.judged, vetoSilent: vetoed.rejectedWithoutReason,
         vetoRejected: vetoed.rejectedNotes.length, topHit, triggerSource: verdict.triggerSource })
       return decision
     }
@@ -936,6 +937,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         strategyId: strategy.strategyId,
       })
       audit({ stage: 'injected', path: 'strategy', backoffDropped, backoffDetails, backoffAdmitted, rotated, rawHits, topHits, textChars,
+        vetoJudged: vetoed.judged, vetoSilent: vetoed.rejectedWithoutReason,
         injectedChars: vetoed.accepted.reduce((sum, hit) => sum + hit.text.length, 0), candidates: hits.length, overThreshold: cooled.length,
         vetoAccepted: vetoed.accepted.length, vetoRejected: vetoed.rejectedNotes.length,
         expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource,
@@ -993,6 +995,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     })
     markHitsReviewed(ctx.cognitivePipeline, vetoed.accepted)
     audit({ stage: 'injected', path: 'raw', backoffDropped, backoffDetails, backoffAdmitted, rotated, rawHits, topHits, textChars,
+      vetoJudged: vetoed.judged, vetoSilent: vetoed.rejectedWithoutReason,
       // 成本判据必须看"真正进了上下文的那几条"(veto 之后), 而不是候选池大小
       injectedChars: vetoed.accepted.reduce((sum, hit) => sum + hit.text.length, 0), candidates: hits.length, overThreshold: cooled.length,
       vetoAccepted: vetoed.accepted.length, vetoRejected: vetoed.rejectedNotes.length,
@@ -1187,9 +1190,12 @@ async function vetoTopCandidates(
   situation: string,
   hits: readonly ExperienceHit[],
   signal: AbortSignal | undefined,
-): Promise<{ accepted: readonly ExperienceHit[]; rejectedNotes: string[] }> {
+): Promise<{ accepted: readonly ExperienceHit[]; rejectedNotes: string[];
+  judged: number; rejectedWithoutReason: number }> {
   const accepted: ExperienceHit[] = []
   const notes: string[] = []
+  let judged = 0
+  let rejectedWithoutReason = 0
   for (let index = 0; index < Math.min(hits.length, INJECT_VETO_MAX + 1); index += 1) {
     const hit = hits[index]
     if (hit === undefined) break
@@ -1198,11 +1204,15 @@ async function vetoTopCandidates(
       text: hit.text,
       similarity: hit.similarity,
     }], { signal })
+    judged += 1
     if (decision.shouldKeep) {
       accepted.push(hit)
       continue
     }
+    // cl-124: 否决常常没有理由(reason 为空) => 无法审计"为什么这次没让模型看到"。
+    // 无理由的否决也计数, 让"静默否决"这条量可见。
     if (decision.reason !== null && decision.reason.length > 0) notes.push(decision.reason)
+    else rejectedWithoutReason += 1
   }
-  return { accepted, rejectedNotes: notes }
+  return { accepted, rejectedNotes: notes, judged, rejectedWithoutReason }
 }
