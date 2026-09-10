@@ -2679,6 +2679,14 @@ for r in inj:
 assert not bad, "漏斗数字不自洽(candidates/overThreshold/veto): %s" % bad[:3]
 '
 t "目标入池体检: 全部 active 目标三前提齐备" bash -c "python3 '$HOME/dsh-fork/dsh-goal-onboard-check.py' all"
+t "cl-116: 回合闸门默认关闭(立项依据被证伪)" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/src/index.ts"), encoding="utf8").read()
+assert "enableTurnGating: z.boolean().default(false)" in src, "闸门总开关默认值应为 false"
+assert "enableTurnGating: config.enableTurnGating ?? false" in src, "resolveConfig 未透传总开关"
+lib = open(os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js"), encoding="utf8").read()
+assert "enableTurnGating" in lib, "lib 未含总开关(未重建)"
+' 
 
 # ── T93 触发词归因(首命中标签会判死无辜的词) ──
 echo "[T93] 触发词归因(matched/score 落地 / 单测 / 审计带归因)"

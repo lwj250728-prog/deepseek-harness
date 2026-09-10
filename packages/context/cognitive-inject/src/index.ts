@@ -80,9 +80,10 @@ export interface Config {
    * embedding cosine (bge-m3) → 0.5 (business med 0.651, chitchat med 0.470,
    * business min 0.455). Lower than minSimilarity is meaningless. */
   directSimilarityThreshold?: number
+  /** cl-116: 回合类型闸门总开关(默认 false)。 */
+  enableTurnGating?: boolean
   /** cl-114: 会话回合数达到此值即视为"已建立"(上下文已稀释)——反思类帧不再注入。
-   *  实测: 1100 回合的主会话里反思类帧 0/501 采纳; 而同样帧在 1-3 回合的新会话
-   *  (子代理/旁路)采纳 ~17%。默认 20。 */
+   *  注意: cl-116 证伪了它的立项依据, 故总开关默认关闭。默认 20。 */
   establishedSessionTurns?: number
   /** cl-114: 行动帧(已建立会话内)的额外相似度余量——该类别采纳率 2.0%, 不该按
    *  用户回合的宽松度放行。默认 0.08。 */
@@ -133,6 +134,12 @@ export const Config: z<Config> = z.object({
   enabled: z.boolean().default(true),
   injectCooldownMs: z.number().min(0).default(10 * 60 * 1000),
   directSimilarityThreshold: z.number().min(0).max(1).default(0.5),
+  /** cl-116: 回合类型闸门总开关。默认**关闭**——cl-114 的立项依据(反思类帧 0/501)
+   *  出自 cl-100 修复(04:58)之前的结算账本, 而那段时间帧回合的引用从未被结算(全部
+   *  记为 false); 用修复后的干净窗口重测: 反思类帧 18 条注入 / 1 采纳 = 5.6%, 与用户
+   *  回合 5.2% 同级 => "关掉死重"的前提不成立, 闸门只会削减绝对采纳数。重新启用需要:
+   *  修复后窗口样本 >=100 且反思类帧采纳率显著低于其它类别。 */
+  enableTurnGating: z.boolean().default(false),
   /** cl-114: 会话回合数达到此值即视为"已建立"(上下文稀释): 反思类帧不再注入。 */
   establishedSessionTurns: z.number().step(1).min(1).default(20),
   /** cl-114: 行动帧(已建立会话内)的额外相似度余量, 只有更贴的经验才注入。 */
@@ -158,6 +165,8 @@ export interface ResolvedConfig {
   readonly enabled: boolean
   readonly injectCooldownMs: number
   readonly directSimilarityThreshold: number
+  /** cl-116: 回合类型闸门总开关(默认关闭, 详见 Config 注释)。 */
+  readonly enableTurnGating: boolean
   /** cl-114: 会话回合数达到此值即视为已建立(反思类帧不再注入)。 */
   readonly establishedSessionTurns: number
   /** cl-114: 行动帧的额外相似度余量。 */
@@ -191,6 +200,7 @@ export function resolveConfig(config: Config): ResolvedConfig {
     enabled: config.enabled ?? true,
     injectCooldownMs: config.injectCooldownMs ?? 10 * 60 * 1000,
     directSimilarityThreshold: config.directSimilarityThreshold ?? 0.5,
+    enableTurnGating: config.enableTurnGating ?? false,
     establishedSessionTurns: config.establishedSessionTurns ?? 20,
     actionFrameMarginBoost: config.actionFrameMarginBoost ?? 0.08,
     triggerBoost: config.triggerBoost ?? 0.15,
@@ -717,11 +727,14 @@ export function apply(ctx: Context, config: Config = {}): void {
     // 长会话"里对反思类帧静默; 行动帧收紧余量; 用户回合不变。
     const turnKind = classifyTurnKind(messages)
     const sessionTurns = agent.session.events.filter(ev => ev.type === 'turn/start').length
-    const gate = decideInjection({
-      kind: turnKind,
-      sessionTurns,
-      establishedSessionTurns: resolved.establishedSessionTurns,
-    })
+    // cl-116: 总开关默认关闭——立项依据被证伪, 先回到"照旧注入", 等干净窗口重测。
+    const gate = resolved.enableTurnGating
+      ? decideInjection({
+        kind: turnKind,
+        sessionTurns,
+        establishedSessionTurns: resolved.establishedSessionTurns,
+      })
+      : 'inject'
     const auditPath = join(ctx.cognitivePipeline.resolved.root, 'retrieval-audit.jsonl')
     const audit = (payload: Record<string, unknown>): void => {
       void appendFile(auditPath, JSON.stringify({

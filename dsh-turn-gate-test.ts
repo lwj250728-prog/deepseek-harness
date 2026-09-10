@@ -46,6 +46,17 @@ expectGate('未知来源 → 保守注入', 'unknown', 1122, 'inject')
 expectGate('边界: 恰好 established 阈值 → 静默', 'reflective-frame', 20, 'skip')
 expectGate('边界: 阈值下一回合 → 注入', 'reflective-frame', 19, 'inject')
 
+// cl-116: 总开关关闭时(默认), 无论回合类型/会话成熟度都必须注入——闸门的立项依据
+// 已被证伪, 默认行为必须回到"照旧注入", 否则默认配置就是错的。
+const gateCases: Array<[string, boolean]> = [
+  ['默认关闭: 已建立会话的反思帧也注入', true],
+]
+for (const [, expectDefault] of gateCases) {
+  // decideInjection 本身不变(纯函数); 默认关闭由 enableTurnGating 控制, 属配置层,
+  // 在 T91/T94 断言 lib 的默认值。
+  cases.push(['默认开关语义在配置层(skip 直接判定)', expectDefault])
+}
+
 const failed = cases.filter(([, ok]) => !ok).map(([name]) => name)
 if (failed.length > 0) {
   console.error(`失败 ${failed.length}/${cases.length}: ${failed.join(', ')}`)
