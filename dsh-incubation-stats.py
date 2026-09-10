@@ -103,6 +103,9 @@ def external_anchors():
         # 那是元层量, 我今天写 15 组守卫就等于让这个目标"推进"了 15 次(推进率恒 100%, 指标失效)。
         'digitalLifeArtifacts': digital_life_artifacts(),   # 数字生命专属文档字节数(身份/世界模型/孵化笔记)
         'digitalLifeChainMembers': digital_life_chain_members(),  # 带该目标链锚的经验条数(链在长吗)
+        'libraryCommits': git_count(['packages/cognition/cognitive-pipeline', 'packages/context/cognitive-inject']),
+        'libraryAudits': (len(open(os.path.join(D, 'library-health.jsonl'), encoding='utf8').readlines())
+                          if os.path.exists(os.path.join(D, 'library-health.jsonl')) else 0),
         'metaCommits': git_count_meta(),                    # 元层(守卫/判据)提交 —— 单列, 不计入任何目标
         'auditedPredictions': audited,   # 检索专属(精排 A/B 样本)
         # goal-adoption-rate 专属: 注入策略代码的提交数 + 四级漏斗审计条数
@@ -200,6 +203,8 @@ GOAL_WITNESS = {
     'goal-digital-life-incubation': ('incubationCommits', 'digitalLifeArtifacts', 'digitalLifeChainMembers'),
     # 采用率优化: 注入策略提交 + 四级漏斗审计条数(可度量化本身就是产物)
     'goal-adoption-rate': ('injectionCommits', 'adoptionAudits'),
+    # 经验库目标(cl-179): 专属见证 = 双库代码提交 + 库健康审计产物行数
+    'goal-experience-library': ('libraryCommits', 'libraryAudits'),
 }
 GLOBAL_WITNESS = ('draftsChars', 'gitCommits', 'suitePasses')
 
