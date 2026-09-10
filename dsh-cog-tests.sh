@@ -4906,7 +4906,7 @@ def body(src, name):
     m = re.search(r"function " + name + r"\([^)]*\)[^{]*\{(.*?)\n\}", src, re.S)
     assert m, "抽不到函数体: " + name
     b = m.group(1)
-    b = b.replace(name, "F")
+    b = b.replace(name, "F").replace("parseWaitingMomentLocal", "parseWaitingMoment")
     # 去掉注释行与行尾注释, 只比逻辑
     b = "\n".join(re.sub(r"//.*$", "", ln).strip() for ln in b.splitlines() if ln.strip() and not ln.strip().startswith("//"))
     return b

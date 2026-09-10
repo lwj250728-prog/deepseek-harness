@@ -29,7 +29,7 @@ const NOT_WAITING = /^(?:待办|待修|待补|待验证|待测试|待评估|待�
  * @returns true when the step waits for the user, an event, or a date.
  */
 export function isWaitingNextAction(nextAction: string, now: Date = new Date()): boolean {
-  const text = nextAction.trim()
+  const text = (nextAction ?? '').trim()
   if (text.length === 0) return false
   if (NOT_WAITING.test(text)) return false
   if (WAITING_PREFIX.test(text)) return true
