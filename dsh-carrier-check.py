@@ -45,6 +45,49 @@ def read_jsonl_tail(path: str, limit: int) -> list[dict]:
     return rows[-limit:]
 
 
+def response_models(session_id: str, limit: int = 400) -> dict:
+    """从会话日志里读**服务端实际返回的模型名**(效果证据)。
+
+    2026-09-10 21:1x 实证: 巡检(catalog/心跳, 请求侧+配置侧)一直报在用模型
+    `deepseek-v4.1-flash-expires-on-0910`, 而同一时刻载体身份行(响应侧)已是 `deepseek-v4-flash`
+    —— 响应侧日志显示切换发生在 21:10:36(OOM 重启 21:03:29 之后), PID 不变。
+    这正是 cl-014 警告的"模型切换不改 PID"漏检场景; 只看配置/目录的巡检看不见它。
+    流式读取(逐行), 只保留计数与最近若干条 —— 不把 163MB 解压结果读进内存(cl-155)。
+    """
+    import glob
+    import re
+    patterns = os.path.join(os.path.expanduser('~/.dsh/sessions'), '*', session_id, 'session.jsonl.zstd')
+    paths = glob.glob(patterns)
+    if not paths:
+        return {'error': '找不到会话日志: %s' % session_id}
+    model_re = re.compile(r'"model":"(deepseek[^"]*)"')
+    time_re = re.compile(r'"time":(\d{13})')
+    counts: dict[str, int] = {}
+    last: list[dict] = []
+    proc = subprocess.Popen(['zstd', '-dc', paths[0]], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        for raw in proc.stdout:
+            line = raw.decode('utf8', 'replace')
+            if '"model":"deepseek' not in line:
+                continue
+            match = model_re.search(line)
+            if not match:
+                continue
+            name = match.group(1)
+            counts[name] = counts.get(name, 0) + 1
+            stamp = time_re.search(line)
+            last.append({'model': name, 'time': int(stamp.group(1)) if stamp else None})
+            if len(last) > limit:
+                del last[:len(last) - limit]
+    finally:
+        try:
+            proc.stdout.close()
+        finally:
+            proc.wait(timeout=60)
+    latest = last[-1] if last else None
+    return {'counts': counts, 'latest': latest, 'sampled': len(last)}
+
+
 def process_facts() -> dict:
     facts: dict = {'pid': os.getpid()}
     try:
@@ -81,7 +124,16 @@ def main() -> int:
     catalog = json.load(open(CATALOG, encoding='utf8'))
     verdict = str(catalog.get('verdict') or '')
 
+    session_id = os.environ.get('DSH_CARRIER_SESSION', 'session-63251d85-ef77-4299-939d-9a6fe9b5bec6')
+    resp = response_models(session_id)
+
     degraded: list[str] = []
+    cfg_model = catalog.get('modelInUse')
+    if isinstance(resp, dict) and resp.get('latest'):
+        got = resp['latest'].get('model')
+        if got and cfg_model and got != cfg_model:
+            degraded.append('**响应侧模型与巡检不一致**: 服务端实际返回 %s, 而目录/配置侧报在用 %s'
+                            ' ⇒ 巡检看不见的隐性模型迁移(PID 不变)' % (got, cfg_model))
     if last_model and last_model.get('reason') == 'model-unavailable':
         degraded.append('最新 model-* 心跳为 model-unavailable(%s, %s)'
                         % (last_model.get('model'), last_model.get('source')))
@@ -101,6 +153,7 @@ def main() -> int:
                     'modelInUse': catalog.get('modelInUse'),
                     'profileDefault': catalog.get('profileDefault'),
                     'checkedAtLocal': catalog.get('checkedAtLocal')},
+        'responseModel': resp,
         'degraded': degraded,
         'verdict': 'degraded' if degraded else 'ok',
         'note': ('PID 不变不代表载体健康: 模型被下架时 PID 照样不变。'
@@ -115,6 +168,11 @@ def main() -> int:
                  proc.get('serviceStartedAt'), proc.get('serviceUptimeSec')))
         print('最近 model-* 心跳: %s'
               % ' | '.join('%s %s' % (b['reason'], (b['model'] or '')[:28]) for b in payload['lastModelBeats']))
+        if isinstance(resp, dict) and resp.get('latest'):
+            print('响应侧模型(最近 %d 条): %s | 计数 %s'
+                  % (resp.get('sampled', 0), resp['latest'].get('model'), resp.get('counts')))
+        elif isinstance(resp, dict):
+            print('响应侧模型: 读不到(%s)' % resp.get('error'))
         print('目录: %s | catalog=%s | 在用=%s | 默认=%s'
               % (verdict, catalog.get('catalog'), catalog.get('modelInUse'), catalog.get('profileDefault')))
         if degraded:

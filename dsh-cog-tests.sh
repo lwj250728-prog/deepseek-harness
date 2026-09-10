@@ -4289,6 +4289,24 @@ assert any("DSH_RUN_ORIGIN=cron" in l for l in hit), "哨兵排程缺 origin 标
 print("内存记录 %d 条, 字段完整, 排程在册" % len(recs))
 '
 
+t "响应侧模型与巡检不一致时必须判降级" python3 -c '
+import json, os, subprocess, sys
+r = subprocess.run([sys.executable, os.path.expanduser("~/dsh-fork/dsh-carrier-check.py"), "--json"],
+                   capture_output=True, text=True, timeout=600)
+assert r.returncode in (0, 2), "载体核对异常退出 %s" % r.returncode
+d = json.loads(r.stdout)
+resp = d.get("responseModel") or {}
+assert resp.get("latest"), "读不到响应侧模型(效果证据) —— 只看配置/目录会漏掉隐性模型迁移(cl-014)"
+got = resp["latest"].get("model"); cfg = (d.get("catalog") or {}).get("modelInUse")
+if got and cfg and got != cfg:
+    assert d["verdict"] == "degraded", "响应侧(%s)与配置侧(%s)不一致却判正常" % (got, cfg)
+    assert any("不一致" in x for x in d["degraded"]), "降级理由里没有点明响应侧/配置侧分歧"
+    assert r.returncode == 2, "分歧时退出码应为 2, 实为 %s" % r.returncode
+    print("分歧已报出: 响应侧 %s vs 配置侧 %s" % (got, cfg))
+else:
+    print("两侧一致(%s), 无需降级" % got)
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
