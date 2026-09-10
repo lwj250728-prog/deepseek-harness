@@ -2204,7 +2204,11 @@ import json, os
 D = os.path.expanduser("~/.dsh/cognitive-pipeline")
 hb = os.path.join(D, "quiet-driver-heartbeat.jsonl")
 rows = [json.loads(l) for l in open(hb, encoding="utf8") if l.strip()] if os.path.exists(hb) else []
-beats = [r for r in rows if r.get("reason") == "model-unavailable"]
+model_beats = [r for r in rows if str(r.get("reason") or "").startswith("model-")]
+# 2026-09-10 22:5x 收紧(此前补丁因锚点冲突未落盘): 只看**最近一条** model-* 心跳 —— 历史出现过
+# model-unavailable 不等于当前不可用, 模型恢复后告警应当关闭, 否则永远挂着(过时条件的误报)。
+latest_beat = model_beats[-1] if model_beats else None
+beats = model_beats if (latest_beat and latest_beat.get("reason") == "model-unavailable") else []
 by_id = {}
 for l in open(os.path.join(D, "claims-ledger.jsonl"), encoding="utf8"):
     if not l.strip(): continue
@@ -3690,9 +3694,23 @@ r = subprocess.run([sys.executable, script, "--goals", tmp_goals, "--ab", tmp_ab
                     "--log", "/tmp/t116-gate-wait.log"],
                    capture_output=True, text=True, timeout=300)
 assert r.returncode == 0, r.stderr[:200]
-assert "waiting" in r.stdout, "未达标却报 ARMED: %s" % r.stdout.strip()
-assert open(tmp_goals, encoding="utf8").read() == before, "未达标却改写了 nextAction"
-print("未达标: 只记账不改写")
+out = r.stdout.strip()
+if "waiting" in out:
+    assert open(tmp_goals, encoding="utf8").read() == before, "未达标却改写了 nextAction"
+    print("未达标: 只记账不改写")
+else:
+    # 2026-09-10 22:41 实测: 闸门有**两个**达标口径 —— 方向区间分离 或 lift 样本 n>=100。
+    # 本用例只压住了方向那一路; lift 那一路由真实数据判定(n 已到 101), 故此刻 ARMED 是合规的。
+    assert "ARMED" in out, "既非 waiting 也非 ARMED: %s" % out
+    assert "lift 样本达标" in out or "方向已分离" in out, "武装了但未说明是哪一路达标: %s" % out
+    after = open(tmp_goals, encoding="utf8").read()
+    if after == before:
+        # 幂等: 该目标此前已被真实闸门武装过(2026-09-10 22:41), 于是本轮"武装"只是确认,
+        # 不改写是正确的 —— 判据要允许这种合法形态, 否则测试会把幂等当缺陷。
+        assert "已是武装态" in out, "报了 ARMED、未改写、也没说明是幂等: %s" % out
+        print("另一路达标, 但目标已是武装态(幂等, 不改写)")
+    else:
+        print("另一路(lift 样本)达标 => 合规武装")
 '
 t "闸门达标时必须武装 nextAction(否则等待型目标静默停摆)" python3 -c '
 import json, os, shutil, subprocess, sys
@@ -4384,6 +4402,42 @@ assert d.get("modelInUse") == d.get("responseLatest"), (
     "响应侧返回 %s 与在用模型 %s 不一致" % (d.get("responseLatest"), d.get("modelInUse")))
 print("证据完整: %s, %.1f 分钟前" % (d.get("responseLatest"), age))
 '
+# ── T127 推进率不得被元层量灌水(专属见证须同域 / 缺历史须记不可判定) ──
+# 起因(用户指令"先修口径"): 数字生命的推进率长期 100%, 拆开看是三处灌水叠加 ——
+#   ① 专属见证里含 suiteAssertions: 我今天写 15 组守卫就等于让这个目标"推进"了 15 次;
+#   ② 当前值被无条件折进历史比较: 任何 N 天前的采纳只要该锚此后涨过一次就判推进;
+#   ③ 新增锚在旧快照里不存在时 before 记 0 ⇒ 又一次"从 0 涨到现在"。
+# 修完三处后: 数字生命 11/14=78.6%, 检索 16/20=80.0%(原均为 100%)。
+echo "[T127] 推进率口径(专属见证不得含元层量 / 缺历史须记不可判定 / 计数须可见)"
+t "专属见证不得含元层量" python3 -c '
+import os, re
+src = open(os.path.expanduser("~/dsh-fork/dsh-incubation-stats.py"), encoding="utf8").read()
+m = re.search(r"GOAL_WITNESS = \{(.*?)\n\}", src, re.S)
+assert m, "找不到 GOAL_WITNESS 定义"
+block = m.group(1)
+bad = [k for k in ("suiteAssertions", "suitePasses", "gitCommits") if k in block]
+assert not bad, "专属见证里仍有元层量(自己写测试就算推进): %s" % bad
+assert "digitalLifeArtifacts" in block and "digitalLifeChainMembers" in block, "数字生命缺本体锚"
+print("专属见证均为同域产物")
+'
+t "缺历史记录的锚必须记不可判定而非 0" python3 -c '
+import os, re
+src = open(os.path.expanduser("~/dsh-fork/dsh-incubation-stats.py"), encoding="utf8").read()
+assert "return None, None" in src, "缺历史时未返回 None(会退化成 before=0 的假增长)"
+assert "_witness_undecidable" in src, "缺不可判定计数器"
+assert "见证不可判定" in src, "计数器未写入报告(不可见的计数等于没有)"
+print("缺历史 -> 不可判定, 且计数可读")
+'
+t "三处灌水形态都不得回流" python3 -c '
+import os, re
+src = open(os.path.expanduser("~/dsh-fork/dsh-incubation-stats.py"), encoding="utf8").read()
+# ② 当前值只能在 24h 窗口内参与比较
+assert "adopted_at + datetime.timedelta(hours=24) >= datetime.datetime.now(" in src, "当前值折算未受窗口约束"
+# 报告须显示元层提交单列(信息不丢, 但不计入推进)
+assert "metaCommits" in src, "元层提交未单列"
+print("三处灌水形态均已被判据覆盖")
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──

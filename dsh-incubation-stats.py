@@ -99,12 +99,59 @@ def external_anchors():
         'suiteAssertions': suite_assertions,                 # 检索/数字生命共享(机制产出)
         'retrievalCommits': git_count(['packages/cognition/cognitive-pipeline']),   # 检索专属
         'incubationCommits': git_count(['packages/context/dormant-goal', 'packages/context/quiet-driver']),  # 数字生命专属
+        # cl-164 口径修正: 数字生命的"推进"必须量**它自己的产物**, 不能量 suiteAssertions ——
+        # 那是元层量, 我今天写 15 组守卫就等于让这个目标"推进"了 15 次(推进率恒 100%, 指标失效)。
+        'digitalLifeArtifacts': digital_life_artifacts(),   # 数字生命专属文档字节数(身份/世界模型/孵化笔记)
+        'digitalLifeChainMembers': digital_life_chain_members(),  # 带该目标链锚的经验条数(链在长吗)
+        'metaCommits': git_count_meta(),                    # 元层(守卫/判据)提交 —— 单列, 不计入任何目标
         'auditedPredictions': audited,   # 检索专属(精排 A/B 样本)
         # goal-adoption-rate 专属: 注入策略代码的提交数 + 四级漏斗审计条数
         # (审计条数是该目标第 1 步的直接产物, 也是"采纳率可被度量"的载体)
         'injectionCommits': git_count(['packages/context/cognitive-inject']),
         'adoptionAudits': audit_lines,
     }
+
+
+def digital_life_artifacts() -> int:
+    """数字生命专属产物的体量(字节): 身份叙事/世界模型/孵化笔记等文档。
+
+    这些是"生命本体"的可见产物 —— 与"测试套件长了多少"无关(cl-164)。
+    """
+    import glob
+    total = 0
+    # 只算**人工撰写的**本体文档; 排除生成物(incubation-stats.md 每次跑都被重写,
+    # 若把它算进产物, 锚会因'我自己跑了一次统计'而增长 —— 自我灌水的第二形态, 实测踩到)。
+    for pattern in ('north-star*', 'world-model*', 'identity*', 'framework-improvement*'):
+        for path in glob.glob(os.path.join(D, pattern)):
+            try:
+                total += os.path.getsize(path)
+            except Exception:
+                pass
+    return total
+
+
+def digital_life_chain_members() -> int:
+    """带 goal-digital-life-incubation 链锚的任务经验条数(链是否在生长)。"""
+    count = 0
+    path = os.path.join(D, 'experiences.jsonl')
+    if os.path.exists(path):
+        for line in open(path, encoding='utf8'):
+            if line.strip() and 'goal-digital-life-incubation' in line:
+                count += 1
+    return count
+
+
+def git_count_meta() -> int:
+    """元层提交数(守卫/判据/口径类) —— 单列展示, 明确不计入任何目标的推进。"""
+    import subprocess
+    keys = ('guard', 'T1', 'test', 'catalog', 'sentinel', 'provenance', 'inventory',
+            'enum', 'taxonomy', 'audit', 'carrier', 'memory', 'incubation-stats')
+    try:
+        out = subprocess.run(['git', '-C', REPO, 'log', '--since=24 hours ago', '--pretty=%s'],
+                             capture_output=True, text=True, timeout=60).stdout.splitlines()
+    except Exception:
+        return 0
+    return sum(1 for subject in out if any(k in subject for k in keys))
 
 
 anchors = external_anchors()
@@ -146,14 +193,18 @@ def parse(ts):
 
 
 # cl-077: 每个目标的专属见证。判据必须与它要回答的问题同域——全局锚只作背景。
+# cl-164: 专属见证里**不得**再出现 suiteAssertions —— 见 GOAL_WITNESS 上方的注释与 T127。
 GOAL_WITNESS = {
     'goal-novel-60w': ('draftsChars',),
-    'goal-retrieval-optimization': ('retrievalCommits', 'auditedPredictions', 'suiteAssertions'),
-    'goal-digital-life-incubation': ('incubationCommits', 'suiteAssertions'),
+    'goal-retrieval-optimization': ('retrievalCommits', 'auditedPredictions'),
+    'goal-digital-life-incubation': ('incubationCommits', 'digitalLifeArtifacts', 'digitalLifeChainMembers'),
     # 采用率优化: 注入策略提交 + 四级漏斗审计条数(可度量化本身就是产物)
-    'goal-adoption-rate': ('injectionCommits', 'adoptionAudits', 'suiteAssertions'),
+    'goal-adoption-rate': ('injectionCommits', 'adoptionAudits'),
 }
 GLOBAL_WITNESS = ('draftsChars', 'gitCommits', 'suitePasses')
+
+
+_witness_undecidable = {'n': 0}
 
 
 def _grew(fields, adopted_at):
@@ -164,7 +215,9 @@ def _grew(fields, adopted_at):
             if hts is not None and hts <= adopted_at and h.get(field) is not None:
                 before = h.get(field, 0)
         if before is None:
-            before = 0
+            # cl-164: 新增锚在旧快照里不存在时, 原来记 before=0 ⇒ 每次历史采纳都显示'从 0 涨到现在'
+            # ⇒ 又一片 100%。没有历史记录的字段不可比较, 返回 None 让上层计入不可判定。
+            return None, None
         best = before
         for h in anchor_history:
             hts = parse(h.get('ts'))
@@ -174,13 +227,18 @@ def _grew(fields, adopted_at):
                 continue
             if h.get(field) is not None:
                 best = max(best, h.get(field, 0))
-        best = max(best, anchors.get(field, 0) if field in anchors else best)
+        # cl-164 修第二处口径缺陷: 原写法把**当前值**无条件折进历史比较, 于是任何 N 天前的采纳,
+        # 只要该锚此后涨过一次就判'推进' —— 推进率结构性恒 100%(实测 14/14)。当前值只在
+        # '采纳后 24h 窗口仍开着'时参与比较。
+        if adopted_at + datetime.timedelta(hours=24) >= datetime.datetime.now(adopted_at.tzinfo):
+            best = max(best, anchors.get(field, 0) if field in anchors else best)
         return before, best
-    for field in fields:
-        before, after = value_at(field)
-        if after > before:
-            return True
-    return False
+    pairs = [value_at(field) for field in fields]
+    usable = [(b, a) for b, a in pairs if b is not None and a is not None]
+    if not usable:
+        _witness_undecidable['n'] += 1
+        return False
+    return any(a > b for b, a in usable)
 
 
 def advanced(goal_id, adopted_at):
@@ -207,7 +265,9 @@ def _legacy_advanced(goal_id, adopted_at):
             if hts is not None and hts <= adopted_at:
                 before = h.get(field, 0)
         if before is None:
-            before = 0
+            # cl-164: 新增锚在旧快照里不存在时, 原来记 before=0 ⇒ 每次历史采纳都显示'从 0 涨到现在'
+            # ⇒ 又一片 100%。没有历史记录的字段不可比较, 返回 None 让上层计入不可判定。
+            return None, None
         best = before
         for h in anchor_history:
             hts = parse(h.get('ts'))
@@ -217,7 +277,11 @@ def _legacy_advanced(goal_id, adopted_at):
                 continue
             best = max(best, h.get(field, 0))
         # 当前值也算一次观测(脚本刚写下的快照就在 anchor_history 里)
-        best = max(best, anchors.get(field, 0) if field in anchors else best)
+        # cl-164 修第二处口径缺陷: 原写法把**当前值**无条件折进历史比较, 于是任何 N 天前的采纳,
+        # 只要该锚此后涨过一次就判'推进' —— 推进率结构性恒 100%(实测 14/14)。当前值只在
+        # '采纳后 24h 窗口仍开着'时参与比较。
+        if adopted_at + datetime.timedelta(hours=24) >= datetime.datetime.now(adopted_at.tzinfo):
+            best = max(best, anchors.get(field, 0) if field in anchors else best)
         return before, best
     for field in ('draftsChars', 'gitCommits', 'suitePasses'):
         before, after = value_at(field)
@@ -291,6 +355,7 @@ else:
         '采纳率→injectionCommits/adoptionAudits/suiteAssertions',
         '- 推进率(全局锚对照) = 旧判据（draftsChars/gitCommits/suitePasses）——只回答"机器在动吗"，保留作对照，不作结论',
         '- 待观察 = 采纳未满 24h 或缺少监视记录',
+        '- **见证不可判定** = 采纳发生但该目标的专属锚在历史快照里没有记录, 无法比较(不得记 0): %d 次' % _witness_undecidable['n'],
         '- 不可判定 = 计数器 adoptedCount 与有据采纳的差额：基线前的存量采纳无时间戳，24h 窗口无从计算；单列，既不进分子也不进分母（incubation-baseline.json 固定该差额）',
     ]
     text = '\n'.join(lines) + '\n'
