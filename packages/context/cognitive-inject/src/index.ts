@@ -941,6 +941,9 @@ export function apply(ctx: Context, config: Config = {}): void {
         injectedChars: vetoed.accepted.reduce((sum, hit) => sum + hit.text.length, 0), candidates: hits.length, overThreshold: cooled.length,
         vetoAccepted: vetoed.accepted.length, vetoRejected: vetoed.rejectedNotes.length,
         expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource,
+      // 2026-09-11 01:5x (cl-183): 补**候选级得分**, 使"三档排序离线对照"可重建同一候选集——
+      // 此前审计只落 topHits(裸相似度)与最终 expIds, 没有候选身份与各项得分, 影子对照无从做起。
+      candidateScores: cooled.map(hit => ({ expId: hit.expId, similarity: hit.similarity })),
         triggerScore: verdict.score, matched: verdict.matched })
       return {
         kind: 'enter',
@@ -1000,6 +1003,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       injectedChars: vetoed.accepted.reduce((sum, hit) => sum + hit.text.length, 0), candidates: hits.length, overThreshold: cooled.length,
       vetoAccepted: vetoed.accepted.length, vetoRejected: vetoed.rejectedNotes.length,
       expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource,
+      // 2026-09-11 01:5x (cl-183): 补**候选级得分**, 使"三档排序离线对照"可重建同一候选集——
+      // 此前审计只落 topHits(裸相似度)与最终 expIds, 没有候选身份与各项得分, 影子对照无从做起。
+      candidateScores: cooled.map(hit => ({ expId: hit.expId, similarity: hit.similarity })),
       triggerScore: verdict.score, matched: verdict.matched })
     return {
       kind: 'enter',

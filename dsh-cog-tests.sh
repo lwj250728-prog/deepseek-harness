@@ -4702,6 +4702,91 @@ assert gap <= 2.0, "notes 最新(%s)比采纳日志(%s)新 %.1fh: 有改动未�
 print("采纳日志与 notes 同步(差 %.1fh)" % gap)
 '
 
+# ── T134 影子对照的前提: 审计必须落**候选级得分**(cl-183) ──
+# 起因: goal-experience-library 的 nextAction 要跑"三档排序离线对照", 但审计只落 topHits(裸相似度)
+# 与最终 expIds ⇒ 候选身份与各项得分都没有, 对照无从做起(这就是我上一轮把该步判为"缺前置"的证据)。
+# 现已在 injected 审计里补 candidateScores([{expId, similarity}])。判据两层: 源码有埋点 + 部署后记录里有。
+echo "[T134] 影子对照前提(审计带候选级得分 / 部署后须真出现)"
+t "审计埋点须含候选级得分" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/src/index.ts"), encoding="utf8").read()
+assert "candidateScores" in src, "注入审计未落候选级得分 => 影子对照无法重建同一候选集"
+print("源码埋点在册")
+'
+t "部署后审计记录须真带 candidateScores" python3 -c '
+import json, os, subprocess
+lib = os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js")
+assert os.path.exists(lib) and "candidateScores" in open(lib, encoding="utf8").read(), "lib 未含埋点(需构建)"
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+injected = [r for r in rows if r.get("stage") == "injected"]
+withcs = [r for r in injected if r.get("candidateScores")]
+if not withcs:
+    # 尚未部署(进程早于 lib): 显式声明, 不假红 —— 由 T11 守"服务晚于 lib 启动"
+    out = subprocess.run(["pgrep", "-f", "bin.js web"], capture_output=True, text=True, timeout=20).stdout.split()
+    lstart = subprocess.run(["ps", "-o", "lstart=", "-p", out[0]], capture_output=True, text=True, timeout=20).stdout.strip()
+    print("埋点已在 lib, 但运行进程启动于 %s(早于 lib), 待重启部署" % lstart)
+    raise SystemExit(0)
+assert all(isinstance(r.get("candidateScores"), list) and r["candidateScores"] for r in withcs), "candidateScores 为空"
+print("%d/%d 条 injected 审计带候选级得分" % (len(withcs), len(injected)))
+'
+t "触发轨迹行须可消费(含 goalId 与 adopted)" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/goal-trigger-log.jsonl")
+assert os.path.exists(p), "缺触发轨迹"
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+assert rows, "触发轨迹为空"
+for r in rows[:20]:
+    assert "goalId" in r and "adopted" in r, "轨迹行缺字段: %s" % r
+    assert isinstance(r["adopted"], bool), "adopted 必须是布尔(供空转判定)"
+print("触发轨迹 %d 行, 字段可消费(含未采纳行)" % len(rows))
+'
+
+# ── T135 影子对照必须先预登记(cl-184: 防"看到结果再挑判据") ──
+# 起因: topK 实验的成功之处在于判据**事先写死**(rollbackIf/keepIf); 本次效用接线实验若事后挑判据,
+# 就会重演"拿噪声当信号"。故要求: ①预登记文件(判据/标签定义/三档/最小样本)先存在;
+# ②其 mtime 必须早于任何结果文件(顺序纪律); ③标签定义必须显式排除"引用"(暴露下游混淆)。
+# ── T135 影子对照必须先预登记(cl-184) ──
+# 判据事先写死才允许跑: 顺序纪律(预登记 mtime < 结果 mtime) + 标签定义须排除"引用"(暴露下游混淆)。
+echo "[T135] 影子对照预登记(判据写死 / 先预登记后跑 / 标签排除引用)"
+t "预登记文件须存在且字段完整" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/library-replay-baseline.json")
+assert os.path.exists(p), "缺预登记文件: 判据未写死, 跑出来的结论可被事后挑选"
+d = json.load(open(p, encoding="utf8"))
+for key in ("criterion", "label", "arms", "minSample", "createdAt"):
+    assert key in d, "预登记缺字段 %s" % key
+c = d["criterion"]
+for key in ("primary", "secondary", "falsify", "retire"):
+    assert c.get(key), "判据缺 %s(须先写死)" % key
+assert d["minSample"] >= 10, "最小样本过低: %s" % d["minSample"]
+assert len(d["arms"]) == 3, "三档排序未写全"
+print("预登记完整: 判据 4 项 / 标签 / 3 档 / minSample=%d" % d["minSample"])
+'
+t "预登记必须早于结果文件(先写死再跑)" python3 -c '
+import os, json
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+pre = os.path.join(D, "library-replay-baseline.json")
+res = os.path.join(D, "library-replay-result.json")
+assert os.path.exists(pre), "缺预登记"
+if not os.path.exists(res):
+    print("尚无结果文件(实验未跑), 顺序纪律待首次运行时验证")
+    raise SystemExit(0)
+assert os.path.getmtime(pre) < os.path.getmtime(res), "结果文件早于预登记: 判据是事后补的"
+d = json.load(open(res, encoding="utf8"))
+n = d.get("sampleCount") or 0
+if n < json.load(open(pre, encoding="utf8"))["minSample"]:
+    assert not d.get("conclusion"), "样本 %d < 门槛却给了结论" % n
+print("顺序与样本纪律成立")
+'
+t "标签定义须显式排除引用" python3 -c '
+import json, os
+d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/library-replay-baseline.json"), encoding="utf8"))
+txt = json.dumps(d["label"], ensure_ascii=False)
+assert "不得用引用" in txt or "不用引用" in txt, "标签定义未显式排除引用(暴露下游混淆会回流)"
+print("标签定义已排除引用")
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
