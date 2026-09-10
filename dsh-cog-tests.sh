@@ -2630,19 +2630,38 @@ print("构建后决策 %d 条, 阶段分布 %s" % (len(rows), stages))
 
 # ── T92 采用率闸门效果见证 + 目标入池体检(cl-114 第1步 / tp-073,tp-074) ──
 echo "[T92] 闸门运行时效果(反思类帧必须被静默 / 漏斗单调) + 目标入池体检"
-t "闸门运行时效果: 构建后反思类帧不得出现 injected" python3 -c '
+t "闸门运行时效果: 已建立会话的反思类帧必须被静默" python3 -c '
 import json, os
 p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
 lib = os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js")
 assert os.path.exists(p), "retrieval-audit.jsonl 缺失(cl-114 第1步的产物)"
+ESTABLISHED = 20   # 与 cognitive-inject 的 establishedSessionTurns 默认一致
 cut = os.path.getmtime(lib) * 1000
 rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
 recent = [r for r in rows if (r.get("t") or 0) > cut]
 reflective = [r for r in recent if r.get("turnKind") == "reflective-frame"]
-bad = [r for r in reflective if r.get("decision") != "skip"]
-assert not bad, "反思类帧未被静默: %s" % [(r.get("sessionTurns"), r.get("decision"), r.get("stage")) for r in bad[:2]]
+# tp-076: 断言必须按"会话是否已建立"分档——旁路/子代理是 1 回合的新会话, 它们的
+# 反思帧按设计**应当**注入(实测采纳 ~17%, 是采纳数最大来源)。旧写法要求所有反思帧
+# 一律 skip, 会在第一个旁路帧注入时伪红。
+bad = [r for r in reflective
+       if (r.get("sessionTurns") or 0) >= ESTABLISHED and r.get("decision") == "inject"]
+assert not bad, "已建立会话的反思类帧未被静默: %s" % [(r.get("sessionTurns"), r.get("decision")) for r in bad[:2]]
 skipped = [r for r in reflective if r.get("stage") == "skipped-reflective-frame"]
-print("构建后审计 %d 条, 反思类 %d 条(其中跳过 %d 条)" % (len(recent), len(reflective), len(skipped)))
+print("构建后审计 %d 条, 反思类 %d 条(跳过 %d), 其中新会话反思帧 %d 条(应注入)"
+      % (len(recent), len(reflective), len(skipped),
+         len([r for r in reflective if (r.get("sessionTurns") or 0) < ESTABLISHED])))
+'
+t "审计活性: 构建后至少出现 2 个不同 stage" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+lib = os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js")
+cut = os.path.getmtime(lib) * 1000
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+stages = {r.get("stage") for r in rows if (r.get("t") or 0) > cut}
+# 只验"审计在多个分支上都活着"; 不要求某个具体 stage 出现——below-gate/cooldown
+# 天然稀疏, 强求会变成伪红(tp-076 的同类教训)。
+assert len(stages) >= 2, "构建后审计只覆盖 %d 个 stage: %s(可能断在某条 early return 前)" % (len(stages), sorted(stages))
+print("构建后 stage: %s" % sorted(stages))
 '
 t "漏斗单调自洽: candidates ≥ overThreshold ≥ veto合计 > 0" python3 -c '
 import json, os
