@@ -2832,6 +2832,15 @@ grep -q 'admitLeastBackedOff' '$HOME/dsh-fork/packages/context/cognitive-inject/
 grep -q 'backoffAdmitted' '$HOME/dsh-fork/packages/context/cognitive-inject/lib/index.js'
 "
 
+# ── T98 覆盖选择的新颖性偏好(cl-121: 轮换对照对成员, 而非闸门) ──
+echo "[T98] 覆盖选择新颖性(对照结构保持 / 相关性优先 / 可关闭)"
+t "coverViewpoints 新颖性单测(7 例)" bash -c "cd '$HOME/dsh-fork' && timeout 300 npx tsx dsh-novelty-pick-test.ts"
+t "新颖性偏好已部署且可配(noveltyMargin)" bash -c "
+grep -q 'noveltyMargin' '$HOME/dsh-fork/packages/context/cognitive-inject/lib/index.js' &&
+grep -q 'noveltyMargin: z.number().min(0).max(1).default(0.05)' '$HOME/dsh-fork/packages/context/cognitive-inject/src/index.ts' &&
+grep -q 'sessionCounts' '$HOME/dsh-fork/packages/context/cognitive-inject/src/index.ts'
+"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──

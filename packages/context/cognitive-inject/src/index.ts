@@ -82,6 +82,9 @@ export interface Config {
    * embedding cosine (bge-m3) → 0.5 (business med 0.651, chitchat med 0.470,
    * business min 0.455). Lower than minSimilarity is meaningless. */
   directSimilarityThreshold?: number
+  /** cl-121: 覆盖选择的新颖性 margin——分数差在此范围内的候选, 优先选本会话注入次数
+   *  更少的那个(保持"失败+成功"对照结构但轮换成员)。0 = 关闭(退回纯分数选择)。 */
+  noveltyMargin?: number
   /** cl-118: 经验退避的冷却上限(默认 2h; 6h 实测会把通道整体静默)。未引用连击越多冷却越长(×2^k), 到此封顶;
    *  观察期若发现"绝对采纳数归零", 需要回调的就是这个值——所以它必须是配置而非硬编码。 */
   backoffMaxMs?: number
@@ -144,6 +147,7 @@ export const Config: z<Config> = z.object({
    *  记为 false); 用修复后的干净窗口重测: 反思类帧 18 条注入 / 1 采纳 = 5.6%, 与用户
    *  回合 5.2% 同级 => "关掉死重"的前提不成立, 闸门只会削减绝对采纳数。重新启用需要:
    *  修复后窗口样本 >=100 且反思类帧采纳率显著低于其它类别。 */
+  noveltyMargin: z.number().min(0).max(1).default(0.05),
   backoffMaxMs: z.number().min(0).default(2 * 60 * 60 * 1000),
   enableTurnGating: z.boolean().default(false),
   /** cl-114: 会话回合数达到此值即视为"已建立"(上下文稀释): 反思类帧不再注入。 */
@@ -171,6 +175,8 @@ export interface ResolvedConfig {
   readonly enabled: boolean
   readonly injectCooldownMs: number
   readonly directSimilarityThreshold: number
+  /** cl-121: 覆盖选择的新颖性 margin。 */
+  readonly noveltyMargin: number
   /** cl-118: 经验退避的冷却上限。 */
   readonly backoffMaxMs: number
   /** cl-116: 回合类型闸门总开关(默认关闭, 详见 Config 注释)。 */
@@ -208,6 +214,7 @@ export function resolveConfig(config: Config): ResolvedConfig {
     enabled: config.enabled ?? true,
     injectCooldownMs: config.injectCooldownMs ?? 10 * 60 * 1000,
     directSimilarityThreshold: config.directSimilarityThreshold ?? 0.5,
+    noveltyMargin: config.noveltyMargin ?? 0.05,
     backoffMaxMs: config.backoffMaxMs ?? 2 * 60 * 60 * 1000,
     enableTurnGating: config.enableTurnGating ?? false,
     establishedSessionTurns: config.establishedSessionTurns ?? 20,
@@ -389,6 +396,8 @@ async function retrieve(
   situation: string,
   minSimilarity: number,
   topK: number,
+  novelty?: (expId: string) => number,
+  noveltyMargin = 0,
 ): Promise<readonly RankedHit[]> {
   const vector = actionVector(situation, [])
   const situationVec = situationVector(situation)
@@ -420,7 +429,7 @@ async function retrieve(
     })
     .filter(hit => hit.similarity >= minSimilarity)
     .sort((a, b) => b.similarity - a.similarity)
-  return coverViewpoints(hits, topK)
+  return coverViewpoints(hits, topK, novelty, noveltyMargin)
 }
 
 /**
@@ -433,13 +442,35 @@ async function retrieve(
  * @param topK - how many experiences to inject at most.
  * @returns the covered selection, best first.
  */
-function coverViewpoints(hits: readonly RankedHit[], topK: number): readonly RankedHit[] {
+export function coverViewpoints(
+  hits: readonly RankedHit[],
+  topK: number,
+  novelty?: (expId: string) => number,
+  noveltyMargin = 0,
+): readonly RankedHit[] {
   const failure = hits.find(hit => hit.polarity === 'negative')
   const success = hits.find(hit => hit.polarity === 'positive')
   if (failure === undefined || success === undefined) return hits.slice(0, topK)
+  // cl-121: 分数在 margin 内时改选"本会话注入次数更少"的那条——保持"失败对照组"
+  // 的结构, 但轮换成员。实测(干净窗口 19/25 双条注入恰为一负一正)表明: 面世的不是
+  // top-1 记忆, 而是 coverViewpoints 选出的失败/成功对照对; 浓度=同一对反复被选中。
+  const pick = (best: RankedHit): RankedHit => {
+    if (novelty === undefined || noveltyMargin <= 0) return best
+    const pool = hits.filter(hit => hit.polarity === best.polarity
+      && hit.similarity >= best.similarity - noveltyMargin)
+    let chosen = best
+    for (const candidate of pool) {
+      if (novelty(candidate.expId) < novelty(chosen.expId)) chosen = candidate
+      else if (novelty(candidate.expId) === novelty(chosen.expId)
+        && candidate.similarity > chosen.similarity) chosen = candidate
+    }
+    return chosen
+  }
   const selected = new Map<string, RankedHit>()
-  selected.set(failure.expId, failure)
-  selected.set(success.expId, success)
+  const chosenFailure = pick(failure)
+  const chosenSuccess = pick(success)
+  selected.set(chosenFailure.expId, chosenFailure)
+  selected.set(chosenSuccess.expId, chosenSuccess)
   for (const hit of hits) {
     if (selected.size >= Math.max(topK, 2)) break
     if (!selected.has(hit.expId)) selected.set(hit.expId, hit)
@@ -810,7 +841,13 @@ export function apply(ctx: Context, config: Config = {}): void {
       ? resolved.minSimilarity * resolved.failureThresholdFactor
       : resolved.minSimilarity
     const topK = afterFailure ? resolved.failureTopK : resolved.topK
-    const hits = await retrieve(ctx.cognitivePipeline, situation, threshold, topK)
+    const sessionCounts = new Map<string, number>()
+    for (const record of ctx.cognitivePipeline.store.injectionsSnapshot()) {
+      if (record.sessionId !== agent.session.id) continue
+      for (const expId of record.expIds) sessionCounts.set(expId, (sessionCounts.get(expId) ?? 0) + 1)
+    }
+    const hits = await retrieve(ctx.cognitivePipeline, situation, threshold, topK,
+      expId => sessionCounts.get(expId) ?? 0, resolved.noveltyMargin)
     if (hits.length === 0) {
       audit({ stage: 'no-candidates', threshold })
       return decision
