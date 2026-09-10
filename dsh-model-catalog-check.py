@@ -21,6 +21,7 @@ import argparse
 import datetime
 import json
 import os
+import subprocess
 import sys
 import urllib.request
 
@@ -30,6 +31,7 @@ PROFILE = os.path.expanduser('~/.dsh/profiles/web/cordis.patch.yml')
 HEARTBEAT = os.path.join(DIR, 'quiet-driver-heartbeat.jsonl')
 OUT = os.path.join(DIR, 'model-catalog.json')
 ENDPOINT = 'https://api.deepseek.com/v1/models'
+MAIN_SESSION = 'session-63251d85-ef77-4299-939d-9a6fe9b5bec6'
 
 
 def api_key() -> str | None:
@@ -81,6 +83,53 @@ def model_in_use() -> str | None:
     return None
 
 
+def response_evidence(minutes: int = 30) -> dict:
+    """响应侧证据: 服务端实际返回的模型名 + 最近一次成功回合时间。
+
+    2026-09-10 21:5x 的分歧: 插件目录说"在用 deepseek-v4-flash 在册"(它比的是**本地清单**),
+    供应商实时目录却查无此 id ⇒ 我原来的判定只有"missing"一个词, 于是把"**未登广告但正在服务**"
+    与"**真不可用**"混为一谈(cl-126 家族)。本函数提供分开两者所需的证据:
+      · latest: 会话日志里最后一条带 model 字段的记录(响应侧, 效果证据)
+      · serving: latest 的模型名 == 在用模型, 且其时间在 minutes 分钟内
+    流式读取, 只保留计数与最近若干条 —— 不把解压结果整份读进内存(cl-155)。
+    """
+    import glob
+    import re
+    pattern = os.path.join(os.path.expanduser('~/.dsh/sessions'), '*', '*', 'session.jsonl.zstd')
+    paths = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+    main = [p for p in paths if MAIN_SESSION in p]
+    if main:
+        paths = main + [p for p in paths if p not in main]
+    if not paths:
+        return {'error': 'no session log'}
+    model_re = re.compile(r'"model":"(deepseek[^"]*)"')
+    time_re = re.compile(r'"time":(\d{13})')
+    counts: dict[str, int] = {}
+    latest = None
+    proc = subprocess.Popen(['zstd', '-dc', paths[0]], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        for raw in proc.stdout:
+            line = raw.decode('utf8', 'replace')
+            if '"model":"deepseek' not in line:
+                continue
+            match = model_re.search(line)
+            if not match:
+                continue
+            counts[match.group(1)] = counts.get(match.group(1), 0) + 1
+            stamp = time_re.search(line)
+            latest = {'model': match.group(1), 'time': int(stamp.group(1)) if stamp else None}
+    finally:
+        try:
+            proc.stdout.close()
+        finally:
+            proc.wait(timeout=60)
+    age_min = None
+    if latest and latest.get('time'):
+        age_min = (datetime.datetime.now().timestamp() * 1000 - latest['time']) / 60000.0
+    return {'latest': latest, 'ageMinutes': round(age_min, 1) if age_min is not None else None,
+            'counts': counts}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--quiet', action='store_true')
@@ -112,7 +161,25 @@ def main() -> int:
             result['missingFromCatalog'] = in_use not in ids
             result['defaultMissingFromCatalog'] = (default_model not in ids) if default_model else None
             # 回退目标也在目录里才算"换模路径可用"; 只查在用模型会漏掉"回退也下架"(cl-129)。
-            if in_use not in ids and default_model is not None and default_model not in ids:
+            # 关键区分(cl-160): "不在广告目录" != "不可用"。供应商 /v1/models 只是**广告清单**,
+            # 未登广告但实际能服务的 id 依然能跑(实测: deepseek-v4-flash 未登广告, 响应侧正常返回该名)。
+            # 因此先取响应侧证据, 再决定 verdict —— 只有"既未登广告、又拿不到在用证据"才算缺失。
+            try:
+                evidence = response_evidence()
+            except Exception as _err:
+                evidence = {'error': '%s: %s' % (type(_err).__name__, str(_err)[:120])}
+            result['responseLatest'] = (evidence.get('latest') or {}).get('model')
+            result['responseAgeMinutes'] = evidence.get('ageMinutes')
+            default_missing = (default_model not in ids) if default_model else False
+            serving = (result['responseLatest'] == in_use
+                       and evidence.get('ageMinutes') is not None
+                       and evidence['ageMinutes'] <= 30)
+            result['servingEvidence'] = bool(serving)
+            if in_use not in ids and serving:
+                result['verdict'] = 'in-use-unadvertised-and-serving'
+                result['reason'] = ('在用模型未登广告目录, 但响应侧在 %.0f 分钟前仍在返回该模型 '
+                                    '⇒ 判定为"未登广告但可用", 不按缺失处理' % evidence['ageMinutes'])
+            elif in_use not in ids and default_missing:
                 result['verdict'] = 'in-use-and-default-missing'
             elif in_use not in ids:
                 result['verdict'] = 'missing'
@@ -127,7 +194,7 @@ def main() -> int:
     if not args.quiet:
         print('在用模型 %s | profile 默认 %s | 实时目录 %s | 判定 %s'
               % (result['modelInUse'], result.get('profileDefault'), result['catalog'], result['verdict']))
-        if result['verdict'] == 'missing':
+        if 'missing' in str(result['verdict']):
             print('差异: 在用模型已不在供应商目录中(巡检因真相源是硬编码清单而报 model-ok)——见 cl-105',
                   file=sys.stderr)
     return 1 if str(result['verdict']).endswith('missing') else 0

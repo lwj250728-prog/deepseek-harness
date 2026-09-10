@@ -322,27 +322,49 @@ assert all(v <= 20 for v in hourly.values()), f'超频: {hourly}'
 print('OK')
 "
 
-# ── T15 灰测模型目录(2026-09-08 16:5x 固化——tp-019: v4.1 灰测模型可选可见) ──
-echo "[T15] 灰测模型目录(v4.1-flash-expires-on-0910——到期09-10后须移除并更新本组)"
-# 15a. src DEFAULT_MODELS 含灰测模型
-t "src含灰测模型" bash -c "grep -q 'deepseek-v4.1-flash-expires-on-0910' '$HOME/dsh-fork/packages/llm/llm-deepseek/src/index.ts'"
-# 15b. lib 已重建含灰测模型(部署生效)
-t "lib含灰测模型(已部署)" bash -c "grep -q 'deepseek-v4.1-flash-expires-on-0910' '$HOME/dsh-fork/packages/llm/llm-deepseek/lib/index.js'"
-# 15c. 到期标注存在(清理锚点)
-t "到期标注(expires-on-0910)" bash -c "grep -q 'expires-on-0910' '$HOME/dsh-fork/packages/llm/llm-deepseek/src/index.ts'"
-# 15d. 时间闸(2026-09-09 09:5x 固化——三问帧 Q3: 到期日写进注释不构成约束, 状态变了断言仍停在旧状态)
-#      到期前: 模型必须在目录; 到期后: 模型必须已移除(否则本组转红, 强制清理)。
-t "灰测模型到期闸" python3 -c '
-import os, re, datetime
-expiry = datetime.date(2026, 9, 10)
-today = datetime.date.today()
-src = open(os.path.expanduser("~/dsh-fork/packages/llm/llm-deepseek/src/index.ts")).read()
-present = "deepseek-v4.1-flash-expires-on-0910" in src
-if today <= expiry:
-    assert present, "到期前模型应仍在目录"
-else:
-    assert not present, "灰测模型已于 %s 到期, 必须从目录移除并更新 T15 组" % expiry
-'  
+# ── T15 模型目录一致性(2026-09-10 21:4x 重写——原组只守"灰测模型在册", 到期后必须换成目录一致性判据) ──
+# 起因: 灰测 id `deepseek-v4.1-flash-expires-on-0910` 09-10 到期, 供应商目录已无此项(实查只剩
+# deepseek-flash / deepseek-v4-pro), 服务端响应侧自 21:10:36 起实际返回 deepseek-v4-flash(cl-156)。
+# 原 T15 组整个围绕"灰测模型在册"写, 属于"判据停在旧状态"; 现改为守**目录一致性**这个不变式:
+# 供应商实时目录里的每个 id 都必须在插件目录中; 已到期的灰测 id 必须不在目录中; lib 与 src 一致。
+echo "[T15] 模型目录一致性(供应商实时 id 须在册 / 到期灰测 id 须移除 / lib 与 src 一致)"
+t "已到期的灰测 id 必须已从目录移除" python3 -c '
+import os, re
+SRC = os.path.expanduser("~/dsh-fork/packages/llm/llm-deepseek/src/index.ts")
+src = open(SRC, encoding="utf8").read()
+expired = "deepseek-v4.1-flash-expires-on-0910"
+# 判据必须落在**目录条目**上, 不是全文出现: 首次写的版本用 `"id" not in src`, 被我自己的注释
+# (注释里逐字提到这个 id 说明为何移除)满足成"仍存在" => 假红(cl-159: 字面出现 != 条目在册)。
+entries = set(re.findall(r"id:\s*\x27(deepseek[^\x27]*)\x27", src))
+assert entries, "解析不到目录条目 —— 断言前提不成立"
+assert expired not in entries, "到期灰测 id 仍在 DEFAULT_MODELS 条目中: %s" % sorted(entries)
+print("到期灰测 id 不在目录条目中(共 %d 条)" % len(entries))
+'
+t "供应商实时目录里的 id 必须都在插件目录中" python3 -c '
+import json, os
+cat = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/model-catalog.json"), encoding="utf8"))
+live = cat.get("catalog") or []
+assert live, "缺供应商目录快照(断言前提不成立)"
+src = open(os.path.expanduser("~/dsh-fork/packages/llm/llm-deepseek/src/index.ts"), encoding="utf8").read()
+missing = [m for m in live if ("\x27%s\x27" % m) not in src]
+assert not missing, "供应商目录里有但插件目录缺: %s" % missing
+print("供应商 %d 个 id 全部在插件目录中" % len(live))
+'
+t "lib 与 src 的目录一致(已部署)" python3 -c '
+import os, re
+base = os.path.expanduser("~/dsh-fork/packages/llm/llm-deepseek")
+src = open(os.path.join(base, "src/index.ts"), encoding="utf8").read()
+lib_path = os.path.join(base, "lib/index.js")
+assert os.path.exists(lib_path), "lib 未构建"
+lib = open(lib_path, encoding="utf8").read()
+ids = set(re.findall(r"id: ?\x27(deepseek[^\x27]*)\x27", src)) | set(re.findall(r"id: ?\x22(deepseek[^\x22]*)\x22", src))
+ids |= set(re.findall(r"id: ?\x27(deepseek[^\x27]*)\x27", lib))
+expired = "deepseek-v4.1-flash-expires-on-0910"
+assert expired not in lib, "lib 仍含到期灰测 id: 未重建或未部署"
+for want in ("deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash"):
+    assert want in lib, "lib 缺 %s(重建后未部署?)" % want
+print("lib 目录与 src 一致")
+'
 
 # ── T16 经验写入字段名一致性(2026-09-08 18:0x 固化——tp-020: 驼峰字段防 80 条效用丢失) ──
 echo "[T16] 经验写入字段名(quiet-driver utility 须驼峰——下划线曾致 80 条效用读不到)"
@@ -2549,7 +2571,11 @@ assert os.path.exists(p), \"model-catalog.json 缺失\"
 d = json.load(open(p, encoding=\"utf8\"))
 assert time.time() - os.path.getmtime(p) < 300, \"目录检查结果陈旧\"
 # cl-129: verdict 新增 in-use-and-default-missing(在用与 profile 默认同时下架)
-assert d.get(\"verdict\") in (\"present\", \"missing\", \"unknown\", \"in-use-and-default-missing\"), d.get(\"verdict\")
+# cl-160: 新增 in-use-unadvertised-and-serving(未登广告但响应侧仍在服务) —— 白名单须同步扩,
+# 否则新增取值会被判红(今天第 N 次: 产出方扩值, 消费方判据没跟上)。
+assert d.get(\"verdict\") in (\"present\", \"missing\", \"unknown\",
+                            \"in-use-and-default-missing\",
+                            \"in-use-unadvertised-and-serving\"), d.get(\"verdict\")
 assert d.get(\"modelInUse\"), \"未记录在用模型\"
 "
 '
@@ -3263,10 +3289,16 @@ t "在用与默认双缺时必须显式判为换模路径不可用" python3 -c '
 import json, os
 d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/model-catalog.json"), encoding="utf8"))
 if d.get("missingFromCatalog") and d.get("defaultMissingFromCatalog"):
-    # cl-129 实测: 目录仅剩 [deepseek-flash, deepseek-v4-pro], 连 profile 默认
-    # deepseek-v4-flash 都下架 => "回退到默认"这条路也不通, 必须显式标出。
-    assert d["verdict"] == "in-use-and-default-missing", "双缺却未标出(verdict=%s)" % d["verdict"]
-    print("双缺已显式标记: 回退到 profile 默认同样不可行")
+    # cl-129: 连 profile 默认都下架 => "回退到默认"这条路也不通, 必须显式标出。
+    # cl-160 修订: 在用模型若"未登广告但响应侧仍在服务", 判定为 unadvertised-and-serving;
+    # 此时"回退不可用"依然成立(defaultMissingFromCatalog=True), 故两类都接受 —— 但不得落回 present/unknown。
+    assert d["verdict"] in ("in-use-and-default-missing", "in-use-unadvertised-and-serving"), \
+        "双缺却未标出(verdict=%s)" % d["verdict"]
+    if d["verdict"] == "in-use-unadvertised-and-serving":
+        assert d.get("servingEvidence") is True, "未登广告判定缺服务证据"
+        print("双缺已标出, 且在用模型有服务证据(未登广告但可用)")
+    else:
+        print("双缺已显式标记: 回退到 profile 默认同样不可行")
 else:
     print("非双缺状态, 空过")
 '
@@ -4322,6 +4354,34 @@ else:
     print("两侧一致(%s), 无需降级" % got)
 '
 
+# ── T126 目录判定分类(cl-160: "未登广告" != "不可用", 两类必须分开且与证据同向) ──
+# 起因: 插件目录(本地清单)说在用模型在册, 供应商实时目录查无此 id, 我原来的 verdict 只有 missing 一个词,
+# 把"未登广告但正在服务"与"真不可用"混为一谈。现在用响应侧证据(cl-156)把两者分开。
+echo "[T126] 目录判定分类(未登广告 != 不可用 / 服务证据须与判定同向)"
+t "缺失判定不得与服务证据共存" python3 -c '
+import json, os
+d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/model-catalog.json"), encoding="utf8"))
+verdict = str(d.get("verdict")); serving = d.get("servingEvidence")
+assert verdict != "unknown", "判定为 unknown(拿不到目录或凭据): 分类判据前提不成立"
+if "missing" in verdict:
+    assert serving is not True, "判为缺失却又说服务证据成立(自相矛盾): %s" % d
+else:
+    assert ("unadvertised" in verdict) == (serving is True), (
+        "未登广告判定必须与服务证据同向: verdict=%s serving=%s" % (verdict, serving))
+print("分类自洽: %s / serving=%s" % (verdict, serving))
+'
+t "未登广告但可用时必须给出响应侧证据" python3 -c '
+import json, os
+d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/model-catalog.json"), encoding="utf8"))
+if d.get("verdict") != "in-use-unadvertised-and-serving":
+    print("当前非该分类(%s), 空过" % d.get("verdict")); raise SystemExit(0)
+assert d.get("responseLatest"), "缺响应侧模型名"
+age = d.get("responseAgeMinutes")
+assert isinstance(age, (int, float)) and age <= 30, "响应侧证据过旧或缺失: %s" % age
+assert d.get("modelInUse") == d.get("responseLatest"), (
+    "响应侧返回 %s 与在用模型 %s 不一致" % (d.get("responseLatest"), d.get("modelInUse")))
+print("证据完整: %s, %.1f 分钟前" % (d.get("responseLatest"), age))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
