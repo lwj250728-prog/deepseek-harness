@@ -15,9 +15,12 @@ PASS=0; FAIL=0; FAILED_TESTS=()
 # 两条证据链互不覆盖, 任何只读规范日志的核验者(包括下一个我)看到的是 3 红。故任何一次运行都落盘,
 # 并留来源标记(origin=cron/manual)以便按来源分段核验。DSH_COG_LOG_ACTIVE=1 供已自行重定向的调用方关闭。
 COG_LOG="${DSH_COG_LOG:-$HOME/.dsh/cognitive-pipeline/.cog-tests.log}"
+export DSH_COG_RUN_PID="$$"   # T139(a): 断言"本进程已自注册"; t 直接 fork python, 父进程即套件本体
+# origin 行**无条件**写(cron 路径也写——它自己重定向了 stdout, 但同样需要"这次跑存在过"的证据);
+# 只有 tee 是有条件的。T139 断言(a) 正是靠这行判定"本进程已自注册", 故不能放进 if 里。
+printf '\n── %s origin=%s pid=%s —— 套件运行开始 ──\n' "$(date '+%F %T')" "${DSH_COG_ORIGIN:-manual}" "$$" >> "$COG_LOG"
 if [ -z "${DSH_COG_LOG_ACTIVE:-}" ]; then
   export DSH_COG_LOG_ACTIVE=1
-  printf '\n── %s origin=%s pid=%s —— 套件运行开始 ──\n' "$(date '+%F %T')" "${DSH_COG_ORIGIN:-manual}" "$$" >> "$COG_LOG"
   exec > >(tee -a "$COG_LOG") 2>&1
 fi
 
@@ -4960,6 +4963,63 @@ assert "last-wins" in out or "去重" in out, "工具未声明去重语义"
 print("行数口径已被显式标注为错")
 '
 
+# ── T139 套件自身的证据链(cl-175: 绿必须落进规范日志, 且每次运行须自注册) ──
+# 起因: 03:30 会话内跑出 465/1, 而规范日志 .cog-tests.log 仍是 00:19 的 442/3 —— "绿"只活在会话里,
+# 任何只读规范日志的核验者(含下一个我)看到的是红。修法: 每次运行无条件自注册 + 裁决行落盘。
+# 断言(a)不是自证: 它读的是磁盘日志里有没有本进程号, 写日志的代码与断言代码互不相干。
+echo "[T139] 套件证据链(本进程须自注册 / 裁决行须落盘且新鲜)"
+t "本进程必须已在规范日志自注册(落盘路径活着)" python3 -c '
+import os
+log = os.environ.get("DSH_COG_LOG") or os.path.join(os.path.expanduser("~"), ".dsh/cognitive-pipeline/.cog-tests.log")
+pid = os.environ.get("DSH_COG_RUN_PID", "")
+assert pid, "缺 DSH_COG_RUN_PID(套件未导出自身进程号)"
+txt = open(log, encoding="utf8", errors="replace").read()
+assert ("pid=" + pid) in txt, "规范日志里没有本进程的 origin 行: 落盘路径没生效(绿会只活在这次会话里)"
+print("本进程 pid=" + pid + " 已自注册于 " + log)
+'
+t "裁决行须落盘且新鲜(首次落地给 24h 宽限)" python3 -c '
+import os, re, time
+log = os.environ.get("DSH_COG_LOG") or os.path.join(os.path.expanduser("~"), ".dsh/cognitive-pipeline/.cog-tests.log")
+txt = open(log, encoding="utf8", errors="replace").read()
+hits = re.findall(r"累计裁决:.*?\(origin=(\S+) (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\)", txt)
+if hits:
+    origin, ts = hits[-1]
+    age = time.time() - time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S"))
+    assert age < 86400, "最新裁决行已 " + str(round(age / 3600.0, 1)) + " 小时未更新: 套件一整天没落盘运行"
+    print("最新裁决行 origin=" + origin + " " + ts)
+else:
+    grace = time.time() - os.path.getmtime(os.path.expanduser("~/dsh-fork/dsh-cog-tests.sh"))
+    assert grace < 86400, "接线后 24h 内规范日志仍无裁决行: 落盘判据没生效"
+    print("尚无裁决行(接线后 " + str(round(grace / 60.0, 1)) + " 分钟), 在 24h 宽限内")
+'
+
+# ── T140 追加式账本的写侧不变量(cl-190: 新行漏字段 = 删字段) ──
+# 起因: 04:0x 我自己补写 3 行(cl-175/cl-189/cl-test-…)都丢掉了前序行的 reviewBy, 直接让"非终态项
+# 均有处置位"转红。cl-041 讲的是读侧要带 last-wins 语义, 这里是写侧同型病: last-wins 之下,
+# 新行没写的字段就是被删掉的字段。修法不是"记得写全", 而是唯一追加入口 dsh-ledger-append.py(继承+覆盖)。
+echo "[T140] 追加式账本写侧(唯一追加入口在册 / 最新行不得丢前序处置位)"
+t "账本追加入口必须存在且能继承前序字段" python3 /home/ubuntu/dsh-fork/dsh-ledger-append.py cl-189 --set reviewBy=2026-09-12 --dry-run
+t "非终态最新行不得丢掉前序行的处置位(逐字段)" python3 -c '
+import json, os, collections
+p = os.environ.get("DSH_COG_LEDGER") or os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
+by = collections.defaultdict(list)
+for l in open(p, encoding="utf8"):
+    if l.strip():
+        r = json.loads(l)
+        if r.get("id"): by[r["id"]].append(r)
+TERMINAL = {"done", "retired", "closed"}
+DISP = ("reviewBy", "disposition", "unblockPlan", "nextAction", "blockedReason")
+bad = []
+for k, v in by.items():
+    last = v[-1]
+    if last.get("status") in TERMINAL: continue
+    seen = set()
+    for r in v[:-1]: seen |= {f for f in DISP if r.get(f)}
+    miss = sorted(seen - {f for f in DISP if last.get(f)})
+    if miss: bad.append(k + ":" + ",".join(miss))
+assert not bad, "最新行丢掉了前序行的处置位(last-wins 之下等于删字段): " + repr(bad[:5])
+print("非终态 " + str(sum(1 for v in by.values() if v[-1].get("status") not in TERMINAL)) + " 项均未丢处置位")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
