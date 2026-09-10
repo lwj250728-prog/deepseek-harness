@@ -30,6 +30,8 @@ import {
   situationVector,
   symptomOverlap,
 } from '@deepseek-ai/dsh-cognitive-pipeline'
+import { backoffState } from './inject-backoff.ts'
+import type { PriorInjection } from './inject-backoff.ts'
 import { classifyTurnKind, decideInjection } from './turn-kind.ts'
 import type { CognitivePipelineService } from '@deepseek-ai/dsh-cognitive-pipeline'
 import type { Experience, OutcomePolarity, SolidifiedStrategy } from '@deepseek-ai/dsh-cognitive-pipeline'
@@ -456,16 +458,32 @@ function coolDownInjected(
   sessionId: string,
   hits: readonly ExperienceHit[],
   cooldownMs: number,
-): readonly ExperienceHit[] {
-  if (cooldownMs <= 0 || hits.length === 0) return hits
-  const cutoff = Date.now() - cooldownMs
-  const recent = new Set<string>()
+  backoffMaxMs = 6 * 60 * 60 * 1000,
+): { kept: readonly ExperienceHit[], backoffDropped: number } {
+  if (cooldownMs <= 0 || hits.length === 0) return { kept: hits, backoffDropped: 0 }
+  // cl-118 修订版: 按经验退避——同一经验在本会话里未引用 k 次, 冷却 ×2^k(上限 6h)。
+  // 硬抑制会掐掉"第 68 次终于落地"的那次采纳(实测 exp_126 #68 / exp_264 #6), 退避不会。
+  const prior: PriorInjection[] = []
   for (const record of service.store.injectionsSnapshot()) {
-    if (record.sessionId !== sessionId || record.createdAt < cutoff) continue
-    for (const expId of record.expIds) recent.add(expId)
+    if (record.sessionId !== sessionId) continue
+    for (const expId of record.expIds) {
+      prior.push({ expId, injectedAt: record.createdAt, cited: record.cited })
+    }
   }
-  if (recent.size === 0) return hits
-  return hits.filter(hit => !recent.has(hit.expId))
+  const state = backoffState(prior, Date.now(), cooldownMs, backoffMaxMs)
+  if (state.size === 0) return { kept: hits, backoffDropped: 0 }
+  const now = Date.now()
+  let dropped = 0
+  const kept = hits.filter(hit => {
+    const entry = state.get(hit.expId)
+    if (entry === undefined) return true
+    if (now - entry.lastInjectedAt < entry.effectiveCooldownMs) {
+      dropped += 1
+      return false
+    }
+    return true
+  })
+  return { kept, backoffDropped: dropped }
 }
 
 /** Render one reference block from the retrieved hits. */
@@ -784,9 +802,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     // Cooldown filter: a memory injected into THIS session within the window
     // is not injected again — same-session repeats are noise (finding #3:
     // exp_1 13×, exp_303 9×). All recent → nothing new to say, stay silent.
-    const cooled = coolDownInjected(ctx.cognitivePipeline, agent.session.id, hits, resolved.injectCooldownMs)
+    const { kept: cooled, backoffDropped } = coolDownInjected(
+      ctx.cognitivePipeline, agent.session.id, hits, resolved.injectCooldownMs)
     if (cooled.length === 0) {
-      audit({ stage: 'cooldown', candidates: hits.length, topHit, triggerSource: verdict.triggerSource })
+      audit({ stage: 'cooldown', candidates: hits.length, topHit, backoffDropped,
+        triggerSource: verdict.triggerSource })
       return decision
     }
     // Prewarm enrichment for the veto gate: a short message ("重启") may match
@@ -833,7 +853,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         jumpWords: verdict.jumpWords,
         strategyId: strategy.strategyId,
       })
-      audit({ stage: 'injected', path: 'strategy', candidates: hits.length, overThreshold: cooled.length,
+      audit({ stage: 'injected', path: 'strategy', backoffDropped, candidates: hits.length, overThreshold: cooled.length,
         vetoAccepted: vetoed.accepted.length, vetoRejected: vetoed.rejectedNotes.length,
         expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource,
         triggerScore: verdict.score, matched: verdict.matched })
@@ -889,7 +909,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       jumpWords: verdict.jumpWords,
     })
     markHitsReviewed(ctx.cognitivePipeline, vetoed.accepted)
-    audit({ stage: 'injected', path: 'raw', candidates: hits.length, overThreshold: cooled.length,
+    audit({ stage: 'injected', path: 'raw', backoffDropped, candidates: hits.length, overThreshold: cooled.length,
       vetoAccepted: vetoed.accepted.length, vetoRejected: vetoed.rejectedNotes.length,
       expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource,
       triggerScore: verdict.score, matched: verdict.matched })

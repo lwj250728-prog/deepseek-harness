@@ -117,7 +117,22 @@ def main() -> int:
         if isinstance(record.get('injectionId'), str):
             injections[record['injectionId']] = record   # last-wins (cl-041)
 
+    # cl-118 修订版: 采纳率必须分两口径报——首次注入 vs 重复提醒。
+    # 一条提醒的价值是"终于落地的那一次"(实测 exp_126 第 68 次、exp_264 第 6 次),
+    # 按每次注入计会系统性低估提醒的价值, 也会把"体积大"误读成"质量差"。
+    session_records = sorted(
+        (r for r in injections.values() if str(r.get('sessionId')) == args.session_id),
+        key=lambda r: r.get('createdAt') or 0)
+    seen_exp: set[str] = set()
+    first_or_repeat: dict[str, str] = {}
+    for record in session_records:
+        ids = list(record.get('expIds') or [])
+        first_or_repeat[record['injectionId']] = (
+            'repeat' if any(e in seen_exp for e in ids) else 'first')
+        seen_exp.update(ids)
+
     stats: dict[str, list[int]] = collections.defaultdict(lambda: [0, 0, 0])
+    lenses: dict[str, list[int]] = collections.defaultdict(lambda: [0, 0, 0])
     for record in injections.values():
         if str(record.get('sessionId')) != args.session_id:
             continue
@@ -130,12 +145,20 @@ def main() -> int:
         turn = turns[index]
         kind = '用户回合' if turn['user'] else (
             '行动帧' if str(turn['frame'] or '').startswith('行动帧') else '反思类帧')
+        cited = record.get('cited') is True
+        unsettled = record.get('cited') is None
         bucket = stats[kind]
         bucket[0] += 1
-        if record.get('cited') is True:
+        if cited:
             bucket[1] += 1
-        elif record.get('cited') is None:
+        elif unsettled:
             bucket[2] += 1
+        lens = lenses[first_or_repeat.get(record['injectionId'], 'first')]
+        lens[0] += 1
+        if cited:
+            lens[1] += 1
+        elif unsettled:
+            lens[2] += 1
 
     total = [sum(v[i] for v in stats.values()) for i in range(3)]
     payload = {
@@ -148,6 +171,10 @@ def main() -> int:
                     for k, v in sorted(stats.items())},
         'total': {'injected': total[0], 'cited': total[1], 'unsettled': total[2],
                   'rate': round(total[1] / total[0], 4) if total[0] else None},
+        # 首次注入(该经验在本会话中第一次出现) / 重复提醒(出现过至少一次)
+        'firstVsRepeat': {k: {'injected': v[0], 'cited': v[1], 'unsettled': v[2],
+                              'rate': round(v[1] / v[0], 4) if v[0] else None}
+                          for k, v in sorted(lenses.items())},
     }
     with open(os.path.join(DIR, 'adoption-stats.json'), 'w', encoding='utf8') as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
@@ -159,6 +186,11 @@ def main() -> int:
     for kind, values in payload['classes'].items():
         print('  %-8s 注入 %3d 采纳 %2d 未结算 %d 采纳率 %s'
               % (kind, values['injected'], values['cited'], values['unsettled'],
+                 'n/a' if values['rate'] is None else '%.1f%%' % (values['rate'] * 100)))
+    for lens, values in payload['firstVsRepeat'].items():
+        label = '首次注入' if lens == 'first' else '重复提醒'
+        print('  %-8s 注入 %3d 采纳 %2d 未结算 %d 采纳率 %s'
+              % (label, values['injected'], values['cited'], values['unsettled'],
                  'n/a' if values['rate'] is None else '%.1f%%' % (values['rate'] * 100)))
     print('  合计     注入 %3d 采纳 %2d 未结算 %d 采纳率 %s'
           % (total[0], total[1], total[2],

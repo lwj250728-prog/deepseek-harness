@@ -2739,6 +2739,21 @@ for kind, v in d["classes"].items():
 '
 t "水位不可缺(cl-116: 没有来源的数不出)" bash -c "grep -q '缺水位' '$HOME/dsh-fork/dsh-adoption-stats.py' && grep -q 'SETTLEMENT_FIX_COMMIT' '$HOME/dsh-fork/dsh-adoption-stats.py'"
 
+# ── T95 经验退避 + 双口径采纳(cl-118 修订版) ──
+echo "[T95] 经验退避(连击加倍 / 审计可见 / 双口径)"
+t "退避调度单测(11 例)" bash -c "cd '$HOME/dsh-fork' && timeout 180 npx tsx dsh-inject-backoff-test.ts"
+t "退避已部署(lib 含 backoffDropped)" bash -c "grep -q 'backoffDropped' '$HOME/dsh-fork/packages/context/cognitive-inject/lib/index.js'"
+t "采纳统计分首次/重复两口径" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/adoption-stats.json")
+assert os.path.exists(p), "adoption-stats.json 缺失"
+d = json.load(open(p, encoding="utf8"))
+assert "firstVsRepeat" in d, "缺首次/重复口径(cl-118 修订版要求)"
+for k, v in d["firstVsRepeat"].items():
+    assert v["injected"] >= v["cited"], "口径 %s 数字不自洽" % k
+print("首次 %s / 重复 %s" % (d["firstVsRepeat"].get("first"), d["firstVsRepeat"].get("repeat")))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──

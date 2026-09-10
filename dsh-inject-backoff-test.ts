@@ -1,0 +1,56 @@
+/**
+ * 经验退避单测（tp-079 / T95）。
+ *
+ * cl-118 修订版：不是"未引用 3 次就停"，而是**按未引用连击加倍冷却**。
+ * 依据：记录里仅有的两次采纳发生在 exp_126 的**第 68 次**注入与 exp_264 的**第 6 次**
+ * ——硬抑制会把这两次掐掉（指标更好看，价值归零）。退避保留"某次终于落地"的通道，
+ * 只削体积；一旦被引用过，连击清零（证明这条提醒能落地，不该继续处罚它）。
+ *
+ * 用法：npx tsx dsh-inject-backoff-test.ts
+ * 退出码：0 = 通过；1 = 有失败。
+ */
+import { backoffDelayMs, backoffState } from './packages/context/cognitive-inject/src/inject-backoff.ts'
+
+const cases: Array<[string, boolean]> = []
+const BASE = 10 * 60 * 1000        // 10 分钟
+const MAX = 6 * 60 * 60 * 1000     // 6 小时
+
+// ① 连击 0 → 基础冷却
+cases.push(['连击 0 = 基础冷却', backoffDelayMs(0, BASE, MAX) === BASE])
+// ② 指数增长
+cases.push(['连击 1 = 2×', backoffDelayMs(1, BASE, MAX) === 2 * BASE])
+cases.push(['连击 3 = 8×', backoffDelayMs(3, BASE, MAX) === 8 * BASE])
+// ③ 上限封顶(连击 76 也不能溢出成 Infinity/巨大数)
+cases.push(['连击 76 封顶 6h', backoffDelayMs(76, BASE, MAX) === MAX])
+cases.push(['连击 1000 仍有限且等于上限', Number.isFinite(backoffDelayMs(1000, BASE, MAX)) && backoffDelayMs(1000, BASE, MAX) === MAX])
+// ④ base=0 → 不退避(可关闭)
+cases.push(['base=0 时退避关闭', backoffDelayMs(5, 0, MAX) === 0])
+// ⑤ 负数/小数连击按 0 处理
+cases.push(['负数连击按 0', backoffDelayMs(-3, BASE, MAX) === BASE])
+
+const now = Date.now()
+const state = backoffState([
+  // exp_a: 连续 3 次未引用 → 8× 冷却
+  { expId: 'exp_a', injectedAt: now - 3 * 3600_000, cited: false },
+  { expId: 'exp_a', injectedAt: now - 2 * 3600_000, cited: false },
+  { expId: 'exp_a', injectedAt: now - 1 * 3600_000, cited: false },
+  // exp_b: 最近一次被引用 → 连击清零 → 基础冷却
+  { expId: 'exp_b', injectedAt: now - 7200_000, cited: false },
+  { expId: 'exp_b', injectedAt: now - 3600_000, cited: true },
+  // exp_c: 只有一次未结算(待结) → 记为未引用连击 1
+  { expId: 'exp_c', injectedAt: now - 600_000, cited: null },
+], now, BASE, MAX)
+
+cases.push(['exp_a 连击 3 → 8×', state.get('exp_a')?.uncitedStreak === 3
+  && state.get('exp_a')?.effectiveCooldownMs === 8 * BASE])
+cases.push(['exp_b 被引用过 → 连击清零、基础冷却',
+  state.get('exp_b')?.uncitedStreak === 0 && state.get('exp_b')?.effectiveCooldownMs === BASE])
+cases.push(['exp_c 未结算计 1 次连击', state.get('exp_c')?.uncitedStreak === 1])
+cases.push(['lastInjectedAt 取最近一次', state.get('exp_a')?.lastInjectedAt === now - 1 * 3600_000])
+
+const failed = cases.filter(([, ok]) => !ok).map(([name]) => name)
+if (failed.length > 0) {
+  console.error(`失败 ${failed.length}/${cases.length}: ${failed.join(', ')}`)
+  process.exit(1)
+}
+console.log(`通过 ${cases.length}/${cases.length}`)
