@@ -12,7 +12,7 @@
 import { readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { isWaitingNextAction } from './packages/context/quiet-driver/src/waiting.ts'
+import { isWaitingNextAction, parseWaitingMoment } from './packages/context/quiet-driver/src/waiting.ts'
 
 const cases: Array<[string, string, boolean]> = [
   // [用例名, nextAction, 期望]
@@ -30,10 +30,40 @@ const cases: Array<[string, string, boolean]> = [
   ['空串', '   ', false],
 ]
 
+// cl-198: 判定改为**看时钟**之后, 用例必须注入固定参考时刻, 否则"09-11"的期望值会随当天时间漂移。
+const T0500 = new Date(2026, 8, 11, 5, 0, 0)   // 09-11 05:00 —— 所有日期型等待都还没到点
 const failed: string[] = []
 for (const [name, action, want] of cases) {
-  const got = isWaitingNextAction(action)
+  const got = isWaitingNextAction(action, T0500)
   if (got !== want) failed.push(`${name}(got=${got} want=${want})`)
+}
+
+// ── cl-198 到点即恢复可执行(原实现只看文本不看时钟, 唤醒侧因此永久跳过) ──
+const T0659 = new Date(2026, 8, 11, 6, 59, 0)  // 09-11 06:59 —— "待 09-11 06:5x 复核" 已经到点
+const T0700 = new Date(2026, 8, 11, 7, 0, 0)
+const dated = '待 09-11 06:5x 复核(等待型): ①cl-100 引用率 24h 重算'
+const lateCases: Array<[string, string, Date, boolean]> = [
+  ['到点前仍是等待', dated, T0500, true],
+  ['到点后恢复可执行', dated, T0659, false],
+  ['到点后(整点)恢复可执行', dated, T0700, false],
+  ['未来日期仍等待', '待 2026-09-17 复核跳词表', T0659, true],
+  ['未来日期(无年)仍等待', '待 09-17 复核跳词表', T0659, true],
+  ['中文月日到点后恢复', '待 9月11日 06:30 复核', T0659, false],
+  ['中文月日未到仍等待', '待 9月12日 06:30 复核', T0659, true],
+  ['只有钟点无日期 → 保守仍等待', '等 6 点后重算', T0700, true],
+  ['只有钟点(冒号) → 保守仍等待', '待 6:30 复核', T0700, true],
+  ['只有日期无钟点 → 当日结束前仍等待', '待 09-11 复核跳词表', T0659, true],
+  ['只有日期无钟点 → 次日恢复可执行', '待 09-11 复核跳词表', new Date(2026, 8, 12, 0, 30, 0), false],
+  ['事件型不受时钟影响', '待事件: 用户上线确认', T0700, true],
+  ['正文里的日期不算等待时刻', '待办 09-11 的复盘', T0700, false],
+]
+for (const [name, action, now, want] of lateCases) {
+  const got = isWaitingNextAction(action, now)
+  if (got !== want) failed.push(`${name}(got=${got} want=${want})`)
+}
+const parsed = parseWaitingMoment('待 09-11 06:5x 复核', T0500)
+if (parsed === null || parsed.getHours() !== 6) {
+  failed.push(`parseWaitingMoment 未解析出 06 点(got=${parsed === null ? 'null' : parsed.toString()})`)
 }
 
 // ── 效果见证: 修复之后不得再有"等待型目标被推行动帧" ──────────────────────────
@@ -59,8 +89,9 @@ try {
   failed.push(`行动帧审计无法执行: ${String(error)}`)
 }
 console.log(`效果见证: 构建后行动帧审计 ${audited} 条`)
+const TOTAL = cases.length + lateCases.length + 1
 if (failed.length > 0) {
-  console.error(`失败 ${failed.length}/${cases.length}: ${failed.join(', ')}`)
+  console.error(`失败 ${failed.length}/${TOTAL}: ${failed.join(', ')}`)
   process.exit(1)
 }
-console.log(`通过 ${cases.length}/${cases.length}`)
+console.log(`通过 ${TOTAL}/${TOTAL}`)

@@ -4898,6 +4898,24 @@ diff = [k for k in a if a[k] != b[k]]
 assert not diff, "两侧判据不一致(会各自漂移): %s" % diff
 print("三条正则逐字一致: %s" % ", ".join(a))
 '
+t "两侧等待态判据必须同构(函数体逐字一致, 不止正则)" python3 -c '
+import os, re
+qd = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/waiting.ts"), encoding="utf8").read()
+dg = open(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/src/index.ts"), encoding="utf8").read()
+def body(src, name):
+    m = re.search(r"function " + name + r"\([^)]*\)[^{]*\{(.*?)\n\}", src, re.S)
+    assert m, "抽不到函数体: " + name
+    b = m.group(1)
+    b = b.replace(name, "F")
+    # 去掉注释行与行尾注释, 只比逻辑
+    b = "\n".join(re.sub(r"//.*$", "", ln).strip() for ln in b.splitlines() if ln.strip() and not ln.strip().startswith("//"))
+    return b
+pairs = [("isWaitingNextAction", "isWaitingNextActionLocal"), ("parseWaitingMoment", "parseWaitingMomentLocal")]
+for a, b in pairs:
+    ba, bb = body(qd, a), body(dg, b)
+    assert ba == bb, "两侧 %s 逻辑已漂移: 行数 %d vs %d" % (a, len(ba.splitlines()), len(bb.splitlines()))
+print("两侧 %d 个函数体逐字一致(正则之外再守逻辑)" % len(pairs))
+'
 t "触发轨迹行须带 skipped 字段(供空转判定)" python3 -c '
 import json, os
 p = os.path.expanduser("~/.dsh/cognitive-pipeline/goal-trigger-log.jsonl")
