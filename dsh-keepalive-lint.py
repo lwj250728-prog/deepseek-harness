@@ -13,6 +13,7 @@ import collections
 import json
 import os
 import sys
+import time
 
 DEFAULT_AUDIT = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
 DEFAULT_LIB = os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js")
@@ -25,6 +26,8 @@ def main() -> int:
     ap.add_argument("--min-gap-min", type=float, default=55.0)
     ap.add_argument("--max-share", type=float, default=0.05)
     ap.add_argument("--min-rows", type=int, default=20)
+    ap.add_argument("--grace-h", type=float, default=2.0,
+                    help="样本不足的宽限时长(小时); 超过仍在不足即判红(豁免须自己到期)")
     args = ap.parse_args()
 
     if not os.path.exists(args.audit):
@@ -49,7 +52,15 @@ def main() -> int:
         rows.append(r)
 
     if len(rows) < args.min_rows:
-        print("[样本不足] 部署后带 backoff 遥测的审计 %d 条(< %d), 不判" % (len(rows), args.min_rows))
+        # 样本不足的豁免**必须自己到期**: 若 lib 已构建很久而遥测仍不增长, 那不是"还没到时候",
+        # 而是遥测链本身断了(顺序不能反: 先判"证据在不在长", 再判"证据说什么")。
+        age_h = (time.time() * 1000 - after) / 3600000.0
+        if age_h > args.grace_h:
+            print("红: lib 已构建 %.1f 小时而部署后遥测只有 %d 条(< %d)——遥测没有在增长, 判据永远判不了"
+                  % (age_h, len(rows), args.min_rows), file=sys.stderr)
+            return 1
+        print("[样本不足] 部署后带 backoff 遥测的审计 %d 条(< %d), 距构建 %.1f 小时(宽限 %.1f), 暂不判"
+              % (len(rows), args.min_rows, age_h, args.grace_h))
         return 0
 
     admitted = [r for r in rows if r.get("backoffAdmitted")]
