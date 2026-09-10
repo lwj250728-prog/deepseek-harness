@@ -9,7 +9,7 @@
  * 用法：npx tsx dsh-inject-backoff-test.ts
  * 退出码：0 = 通过；1 = 有失败。
  */
-import { backoffDelayMs, backoffState } from './packages/context/cognitive-inject/src/inject-backoff.ts'
+import { admitLeastBackedOff, backoffDelayMs, backoffState } from './packages/context/cognitive-inject/src/inject-backoff.ts'
 
 const cases: Array<[string, boolean]> = []
 const BASE = 10 * 60 * 1000        // 10 分钟
@@ -47,6 +47,26 @@ cases.push(['exp_b 被引用过 → 连击清零、基础冷却',
   state.get('exp_b')?.uncitedStreak === 0 && state.get('exp_b')?.effectiveCooldownMs === BASE])
 cases.push(['exp_c 未结算计 1 次连击', state.get('exp_c')?.uncitedStreak === 1])
 cases.push(['lastInjectedAt 取最近一次', state.get('exp_a')?.lastInjectedAt === now - 1 * 3600_000])
+
+// ── 通道保活守卫(cl-118 实测: 6h 上限把整条通道静默了 40 分钟) ──
+const MIN = 60 * 1000
+// ① 全部候选都在退避中, 但基础冷却已过 → 放行最接近到期的那个
+// a 距到期 70min(120-50), b 距到期 380min(480-100) => 应放行 a(最接近到期)
+cases.push(['保活: 放行最接近到期者', admitLeastBackedOff([
+  { expId: 'a', lastInjectedAt: now - 50 * MIN, effectiveCooldownMs: 120 * MIN },
+  { expId: 'b', lastInjectedAt: now - 100 * MIN, effectiveCooldownMs: 480 * MIN },
+], now, 10 * MIN) === 'a'])
+// ② 基础冷却都没过 → 就该静默(不能破坏"10 分钟内不重复"的不变式)
+cases.push(['保活: 基础冷却未过则静默', admitLeastBackedOff([
+  { expId: 'a', lastInjectedAt: now - 3 * MIN, effectiveCooldownMs: 120 * MIN },
+], now, 10 * MIN) === null])
+// ③ 空集合 → null
+cases.push(['保活: 无候选返回 null', admitLeastBackedOff([], now, 10 * MIN) === null])
+// ④ 部分候选基础冷却已过 → 只在合格者里挑
+cases.push(['保活: 只在不破坏基础冷却的候选里挑', admitLeastBackedOff([
+  { expId: 'fresh', lastInjectedAt: now - 2 * MIN, effectiveCooldownMs: 60 * MIN },
+  { expId: 'old', lastInjectedAt: now - 200 * MIN, effectiveCooldownMs: 240 * MIN },
+], now, 10 * MIN) === 'old'])
 
 const failed = cases.filter(([, ok]) => !ok).map(([name]) => name)
 if (failed.length > 0) {

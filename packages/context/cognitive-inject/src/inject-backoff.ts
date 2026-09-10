@@ -76,3 +76,29 @@ export function backoffState(
   void now
   return state
 }
+
+/** The candidate to admit when the backoff would silence the channel entirely.
+ *
+ * 实测(cl-118 上线 40 分钟后): 6h 上限 + "只有少数经验能匹配帧查询" => 所有候选都在
+ * 退避中, **注入数为 0**(退避前 5.7 条/小时)。通道全静默比"提醒早一点"更糟——所以
+ * 当全部候选都被退避挡下时, 放行"最接近到期"的那一个; 但仅当它的**基础冷却**已过,
+ * 否则会破坏"同经验不得在基础冷却内重复"的不变式(T96)。
+ * @param candidates - 被退避挡下的候选(含各自的基础冷却到期时间)。
+ * @param now - 参考时刻。
+ * @returns 应放行的 expId, 或 null(基础冷却都未过, 就该静默)。
+ */
+export function admitLeastBackedOff(
+  candidates: readonly { expId: string, lastInjectedAt: number, effectiveCooldownMs: number }[],
+  now: number,
+  baseMs: number,
+): string | null {
+  const eligible = candidates.filter(c => now - c.lastInjectedAt >= baseMs)
+  if (eligible.length === 0) return null
+  let best = eligible[0]!
+  let bestRemaining = best.lastInjectedAt + best.effectiveCooldownMs - now
+  for (const candidate of eligible.slice(1)) {
+    const remaining = candidate.lastInjectedAt + candidate.effectiveCooldownMs - now
+    if (remaining < bestRemaining) { best = candidate; bestRemaining = remaining }
+  }
+  return best.expId
+}
