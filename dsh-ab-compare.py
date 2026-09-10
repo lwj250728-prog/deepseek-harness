@@ -140,14 +140,36 @@ def adoption_comparison(split_ms: int, until_fix_ms: int | None, until_fix_iso: 
     # 快照会被子窗口运行改写, 拿它当水位等于把水位交给"最后一次谁跑过脚本"。
     clean_start_ms = clean + 2 * 60 * 1000
     clean_start = datetime.datetime.fromtimestamp(clean_start_ms / 1000).isoformat()
+    # cl-167: before 窗口起点 = **上一次切换点**(若基线记录了), 否则退回干净窗口起点。
+    # 否则回滚后的"加宽前"会把更早的 topK=1 时期也算进去, 两种处理混在一个窗口里。
+    baseline = json.load(open(BASELINES, encoding='utf8')) if os.path.exists(BASELINES) else {}
+    prev_split = _iso_ms(baseline.get('previousSplitAt'))
+    if prev_split and prev_split > clean_start_ms:
+        clean_start_ms = prev_split
+        clean_start = datetime.datetime.fromtimestamp(clean_start_ms / 1000).isoformat()
     split_iso = datetime.datetime.fromtimestamp(split_ms / 1000).isoformat()
-    segments = {
-        'before': adoption_window(clean_start, split_iso),
-        'afterOldLens': adoption_window(split_iso, until_fix_ms and
-                                        datetime.datetime.fromtimestamp(until_fix_ms / 1000).isoformat()),
-        'afterNewLens': (adoption_window(datetime.datetime.fromtimestamp(until_fix_ms / 1000).isoformat(), None)
-                         if until_fix_ms else None),
-    }
+    # cl-167: 口径变更点(15:50)只有在**落在 after 窗口内**时才切段。基线一改(splitAt 后移),
+    # 它就可能跑到 split 之前 —— 那时旧实现会生成 [split, 15:50) 这种**倒挂区间**(实测 hours=-7.26)
+    # 并与 before 重叠, 于是回合数被跨窗口重复相加(闸门因此报 lift 样本=143)。
+    lens_inside_after = bool(until_fix_ms) and until_fix_ms > split_ms
+    if lens_inside_after:
+        segments = {
+            'before': adoption_window(clean_start, split_iso),
+            'afterOldLens': adoption_window(
+                split_iso, datetime.datetime.fromtimestamp(until_fix_ms / 1000).isoformat()),
+            'afterNewLens': adoption_window(
+                datetime.datetime.fromtimestamp(until_fix_ms / 1000).isoformat(), None),
+        }
+    else:
+        segments = {
+            'before': adoption_window(clean_start, split_iso),
+            'afterNewLens': adoption_window(split_iso, None),
+        }
+    for _name, _seg in list(segments.items()):
+        if _seg is None:
+            continue
+        if _seg.get('hours') is not None and _seg['hours'] < 0:
+            return {'error': '窗口倒挂(%s hours=%s): 分段逻辑与基线不一致' % (_name, _seg['hours'])}
 
     def rate(seg: dict | None, path: str):
         cur = seg
@@ -189,6 +211,15 @@ def adoption_comparison(split_ms: int, until_fix_ms: int | None, until_fix_iso: 
         }
     # 后窗合体(账本口径跨了变更点 => 比例不可直接相加, 只给绝对条数与回合级文本率)
     after_union = None
+    # cl-167 消费方同步: 无口径切段时 after 只有一个片段, union 就是它本身 ——
+    # 原实现要求两段都在才计算 union, 于是回滚后 union=None、判据字段全部落空。
+    if rows.get('afterNewLens') and not rows.get('afterOldLens'):
+        a = rows['afterNewLens']
+        after_union = {'hours': a['hours'], 'injected': a['injected'], 'citedLedger': a['citedLedger'],
+                       'rateLedgerMixedLens': a['rateLedger'], 'lensWarning': None,
+                       'turnsWithInjection': a['turnsWithInjection'], 'textRate': a['textRate'],
+                       'textRateCI': a.get('textRateCI'), 'backgroundRate': a['backgroundRate'],
+                       'lift': a['lift']}
     if rows.get('afterOldLens') and rows.get('afterNewLens'):
         import math
         a, b = rows['afterOldLens'], rows['afterNewLens']

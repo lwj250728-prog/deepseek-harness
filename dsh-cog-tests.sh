@@ -4491,10 +4491,12 @@ after = [r for r in inj.values() if (r.get("createdAt") or 0) >= start_ms and r.
 if not after:
     print("重启后尚无注入样本(未到首样本), 不假装通过也不判红"); raise SystemExit(0)
 sizes = sorted({len(r["expIds"]) for r in after})
-assert all(s <= top for s in sizes), "运行时条目数 %s 超过 topK=%d => 配置未生效" % (sizes, top)
-if top == 1:
-    assert sizes == [1], "topK=1 却出现条目数 %s => 运行进程仍用旧配置" % sizes
-print("运行时证据通过: %d 条注入, 条目数 %s (topK=%d)" % (len(after), sizes, top))
+# 修正(cl-168): 不能再假设 "topK=1 ⇒ 条目数恒为 1" —— coverViewpoints 会因**新颖度/视角覆盖**多带一条,
+# 实测加宽前(topK=1)的分布就是 {1: 11, 2: 9}。故上界取 top+1, 并额外要求"不得超过加宽期的上界"。
+limit = top + 1
+assert all(s <= limit for s in sizes), "运行时条目数 %s 超过 topK=%d 的可解释上界 %d => 配置未生效" % (sizes, top, limit)
+assert any(s <= top for s in sizes), "没有任何注入落在 topK=%d 之内: 配置可能未生效" % top
+print("运行时证据通过: %d 条注入, 条目数 %s (topK=%d, 上界 %d)" % (len(after), sizes, top, limit))
 '
 
 # ── T129 已裁决的基线不得重复武装(cl-166: 同一步被重复提醒) ──
@@ -4524,6 +4526,53 @@ assert "waiting" in r.stdout, "已裁决基线却被武装: %s" % r.stdout.strip
 assert "已裁决" in r.stdout, "waiting 但未说明是因为已裁决: %s" % r.stdout.strip()
 assert open(tmp_goals, encoding="utf8").read() == before, "已裁决基线下仍改写了 nextAction"
 print("已裁决基线: 保持 waiting 且未改写")
+'
+
+# ── T130 A/B 窗口分段必须自洽(cl-167: 基线一改, 分段逻辑就生成倒挂区间并重复计数) ──
+# 实证: 回滚把 splitAt 从 14:07 移到 23:05 后, 旧的"按 15:50 口径点切段"逻辑产出
+# [23:05, 15:50) 这种**倒挂区间**(hours=-7.26), 并与 before 窗口重叠 ⇒ 闸门报 lift 样本=143。
+# 现判据: before=[previousSplitAt, splitAt), after=[splitAt, now); 口径点仅在落在 after 内时才切段;
+# 任何负时长/窗口不接续都判红。
+echo "[T130] A/B 窗口自洽(非负时长 / 与切换点接续 / 口径点仅在 after 内切段)"
+t "窗口时长必须非负且与切换点接续" python3 -c '
+import json, os, datetime
+d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/ab-compare.json"), encoding="utf8"))
+segs = (d.get("adoption") or {}).get("segments") or {}
+assert segs, "缺分段(断言前提不成立)"
+split = datetime.datetime.fromisoformat(d["splitAt"])
+def p(ts):
+    if not ts:
+        return None
+    d = datetime.datetime.fromisoformat(ts)
+    return d.replace(microsecond=0, tzinfo=None)      # 秒级且忽略时区表示差异(基线含微秒, 分段截到秒)
+before = segs.get("before")
+assert before, "缺 before 段"
+assert p(before["windowEnd"]) == p(d["splitAt"]), "before 段未在切换点结束: %s vs %s" % (before["windowEnd"], d["splitAt"])
+for name, seg in segs.items():
+    if seg.get("hours") is not None:
+        assert seg["hours"] >= 0, "%s 段出现负时长 %s(倒挂区间)" % (name, seg["hours"])
+for name in ("afterOldLens", "afterNewLens"):
+    seg = segs.get(name)
+    if seg:
+        assert p(seg["windowStart"]) >= p(d["splitAt"]), "%s 段起点早于切换点(与 before 重叠)" % name
+print("窗口自洽: before 止于切换点, 各段时长非负")
+'
+t "口径变更点只在落在 after 内时才切段" python3 -c '
+import json, os
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+d = json.load(open(os.path.join(D, "ab-compare.json"), encoding="utf8"))
+segs = (d.get("adoption") or {}).get("segments") or {}
+lens = (d.get("adoption") or {}).get("settlementLensChangedAt")
+assert lens, "缺口径变更点记录"
+import datetime
+lens_ms = datetime.datetime.fromisoformat(lens); split = datetime.datetime.fromisoformat(d["splitAt"])
+if lens_ms > split:
+    assert "afterOldLens" in segs and "afterNewLens" in segs, "口径点在 after 内却未切段"
+    print("口径点在 after 内: 已切段")
+else:
+    assert "afterOldLens" not in segs, "口径点在切换点之前, 不应出现 afterOldLens 段"
+    assert segs.get("afterNewLens"), "缺 after 段"
+    print("口径点在切换点之前: 未切段(单片 after)")
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
