@@ -134,9 +134,15 @@ def main() -> int:
         if got and cfg_model and got != cfg_model:
             degraded.append('**响应侧模型与巡检不一致**: 服务端实际返回 %s, 而目录/配置侧报在用 %s'
                             ' ⇒ 巡检看不见的隐性模型迁移(PID 不变)' % (got, cfg_model))
-    if last_model and last_model.get('reason') == 'model-unavailable':
-        degraded.append('最新 model-* 心跳为 model-unavailable(%s, %s)'
-                        % (last_model.get('model'), last_model.get('source')))
+    # 过期的心跳不构成"当前降级": 2026-09-10 22:0x 实测 —— 配置已切到广告目录内的 deepseek-flash,
+    # 但 30 分钟节拍的心跳还停在旧判(deepseek-v4-flash unavailable), 若不加新鲜度约束就会持续误报。
+    beat_age_min = None
+    if last_model and last_model.get('ts'):
+        beat_age_min = (time.time() * 1000 - last_model['ts']) / 60000.0
+    if (last_model and last_model.get('reason') == 'model-unavailable'
+            and (beat_age_min is None or beat_age_min <= 40)):
+        degraded.append('最新 model-* 心跳为 model-unavailable(%s, %s, %.0f 分钟前)'
+                        % (last_model.get('model'), last_model.get('source'), beat_age_min or 0))
     if 'missing' in verdict:
         degraded.append('目录判定 verdict=%s(在用 %s / profile 默认 %s)'
                         % (verdict, catalog.get('modelInUse'), catalog.get('profileDefault')))

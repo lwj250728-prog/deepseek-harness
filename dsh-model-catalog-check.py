@@ -56,6 +56,28 @@ def profile_default_model() -> str | None:
     return None
 
 
+SETTINGS = os.path.expanduser('~/.dsh/settings.yaml')
+
+
+def configured_model() -> str | None:
+    """配置现值: settings.yaml 的 agent-default-model.model(效果证据的一半)。
+
+    2026-09-10 22:0x 实证(cl-161): 原 model_in_use() 只读**心跳历史**最后一条 model-* 记录,
+    于是配置已改成 `deepseek-flash`(供应商广告清单内的 id)、响应侧也在返回该 id 时,
+    判定仍拿旧心跳报 `deepseek-v4-flash` → 得出"缺失/降级"的**过时结论**(巡检与响应侧互相打脸)。
+    判据应锚在"现在配的是什么 + 服务端现在返回什么", 历史心跳只作兜底。
+    """
+    try:
+        import yaml
+        data = yaml.safe_load(open(SETTINGS, encoding='utf8')) or {}
+    except Exception:
+        return None
+    node = data.get('agent-default-model') if isinstance(data, dict) else None
+    if isinstance(node, dict) and isinstance(node.get('model'), str):
+        return node['model']
+    return None
+
+
 def model_in_use() -> str | None:
     """Last model the patrol reported as available (the live carrier model)."""
     if os.path.exists(HEARTBEAT):
@@ -135,7 +157,7 @@ def main() -> int:
     parser.add_argument('--quiet', action='store_true')
     args = parser.parse_args()
 
-    in_use = model_in_use()
+    in_use = configured_model() or model_in_use()
     default_model = profile_default_model()
     key = api_key()
     result: dict = {

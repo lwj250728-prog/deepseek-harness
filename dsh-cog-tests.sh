@@ -4365,9 +4365,11 @@ verdict = str(d.get("verdict")); serving = d.get("servingEvidence")
 assert verdict != "unknown", "判定为 unknown(拿不到目录或凭据): 分类判据前提不成立"
 if "missing" in verdict:
     assert serving is not True, "判为缺失却又说服务证据成立(自相矛盾): %s" % d
+elif "unadvertised" in verdict:
+    assert serving is True, "判为未登广告却无服务证据: %s" % d
 else:
-    assert ("unadvertised" in verdict) == (serving is True), (
-        "未登广告判定必须与服务证据同向: verdict=%s serving=%s" % (verdict, serving))
+    # present/unknown: 对服务证据不作要求(在册就是在册, 有没有响应侧证据都不影响该判定)
+    pass
 print("分类自洽: %s / serving=%s" % (verdict, serving))
 '
 t "未登广告但可用时必须给出响应侧证据" python3 -c '
