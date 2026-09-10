@@ -3694,6 +3694,77 @@ assert os.path.exists("/tmp/t116b-gate.log"), "合成用例没有留下自己的
 print("生产日志未被写入, 合成痕迹隔离")
 '
 
+# ── T117 经验转化断言(cl-141: 教训必须机械地绑到能开火的断言上) ──
+# 实证依据: 今天的同族病复发 9 次, 而**唯一有效**的终止手段是把它翻译成断言(T112~T116 共 23 条),
+# 但这一步一直手动、逐次; 经验层别的通道都不在复发点开火(引用率 13.5%、hitCount 全 0、
+# taxonomy 卡在 09-09 且重建被拒 6×、链层按目标组织而同族病跨目标)。
+# 本组断言守两件事: ①每条新的修复型经验必须有断言登记或豁免理由 ②登记过的断言不得腐烂
+# (登记了却已从套件里消失 = 以为还有保护其实没有)。
+echo "[T117] 经验转化断言(新修复经验须登记 / 断言不得腐烂 / 排程驱动)"
+t "登记簿完整且登记的断言仍存在于套件" python3 -c '
+import json, os, re
+DIR = os.path.expanduser("~/.dsh/cognitive-pipeline")
+reg = json.load(open(os.path.join(DIR, "experience-assertions.json"), encoding="utf8"))
+suite = open(os.path.expanduser("~/dsh-fork/dsh-cog-tests.sh"), encoding="utf8").read()
+entries = reg.get("entries") or []
+assert entries, "登记簿为空 —— 断言前提不成立, 不得算通过"
+assert reg.get("baselineAt"), "缺基线时间戳(无法区分历史积压与新增缺口)"
+# 组头形式匹配(裸子串会被本用例自身的测试数据满足 —— cl-132 同型, 实测踩过)
+missing = [e["assertion"] for e in entries
+           if e.get("assertion") and ("[" + e["assertion"] + "]") not in suite]
+assert not missing, "登记过的断言已从套件消失(腐烂): %s" % missing
+print("登记 %d 条, 断言全部仍在套件中" % len(entries))
+'
+t "基线之后不得有新的未转化经验" python3 -c '
+import os, subprocess, sys
+r = subprocess.run([sys.executable, os.path.expanduser("~/dsh-fork/dsh-experience-transform.py"),
+                    "--scan", "--strict-new"], capture_output=True, text=True, timeout=300)
+assert r.returncode == 0, "出现新的未转化修复型经验(退出码 %s): %s" % (r.returncode, r.stdout[-300:])
+assert "新增缺口 0" in r.stdout, "扫描未报零缺口: %s" % r.stdout[:200]
+print("新增缺口 0")
+'
+t "新缺口必须能开火(合成账本, 不碰真账本)" python3 -c '
+import json, os, subprocess, sys, time
+tmp = "/tmp/t117-synth"
+os.makedirs(tmp, exist_ok=True)
+json.dump({"entries": [], "exemptions": [], "baselineUncovered": [], "baselineAt": None},
+          open(os.path.join(tmp, "experience-assertions.json"), "w", encoding="utf8"))
+with open(os.path.join(tmp, "experiences.jsonl"), "w", encoding="utf8") as fh:
+    fh.write(json.dumps({"expId": "exp_syn117", "timestamp": int(time.time() * 1000),
+                         "rawText": "修复: 根因是消费方判据没跟上; 教训: 同改两侧"}, ensure_ascii=False) + "\n")
+env = dict(os.environ, DSH_COG_DIR=tmp)
+r = subprocess.run([sys.executable, os.path.expanduser("~/dsh-fork/dsh-experience-transform.py"),
+                    "--scan", "--strict-new"], capture_output=True, text=True, timeout=300, env=env)
+assert r.returncode == 2, "合成的新缺口没有开火(退出码 %s) —— 守卫是死的" % r.returncode
+assert "新增缺口 1" in r.stdout, r.stdout[:200]
+print("合成新缺口: 开火(退出码 2)")
+'
+t "断言腐烂必须能被判出" python3 -c '
+import json, os, subprocess, sys
+tmp = "/tmp/t117-rot"
+os.makedirs(tmp, exist_ok=True)
+json.dump({"entries": [{"expId": "exp_x", "assertion": "T999"}], "exemptions": [],
+           "baselineUncovered": ["exp_x"], "baselineAt": "x"},
+          open(os.path.join(tmp, "experience-assertions.json"), "w", encoding="utf8"))
+open(os.path.join(tmp, "experiences.jsonl"), "w", encoding="utf8").write("")
+env = dict(os.environ, DSH_COG_DIR=tmp)
+r = subprocess.run([sys.executable, os.path.expanduser("~/dsh-fork/dsh-experience-transform.py"),
+                    "--scan", "--strict-new"], capture_output=True, text=True, timeout=300, env=env)
+assert r.returncode == 2, "腐烂断言未判红(退出码 %s)" % r.returncode
+assert "腐烂(登记过但套件里已不存在) 1" in r.stdout, r.stdout[:200]
+print("腐烂断言: 判出")
+'
+t "转化扫描须由排程驱动且日志新鲜" python3 -c '
+import os, subprocess, time
+out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30).stdout
+assert "dsh-experience-transform.py" in out, "转化扫描未挂排程 => 新缺口只在人工想起时才被发现"
+log = os.path.expanduser("~/.dsh/cognitive-pipeline/experience-transform.log")
+assert os.path.exists(log), "转化扫描日志不存在(排程从未产出痕迹)"
+age = time.time() - os.path.getmtime(log)
+assert age < 3 * 3600, "转化扫描日志 %.1f 小时未更新" % (age / 3600)
+print("排程在册且日志新鲜(%.0f 分钟前)" % (age / 60))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
