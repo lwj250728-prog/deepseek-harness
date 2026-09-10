@@ -3014,6 +3014,42 @@ grep -q 'injectedChars' '$HOME/dsh-fork/packages/context/cognitive-inject/src/in
 grep -q 'injectedChars' '$HOME/dsh-fork/packages/context/cognitive-inject/lib/index.js'
 "
 
+# ── T104 A/B 基线写死(cl-116 教训: 不许凭印象比较) ──
+echo "[T104] A/B 基线(切换点写死 / 两栏对照可复算)"
+t "A/B 基线文件齐备(切换点 + 前后配置值 + 判据)" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/ab-baselines.json")
+assert os.path.exists(p), "ab-baselines.json 缺失: A/B 没有写死的基线"
+d = json.load(open(p, encoding="utf8"))
+for k in ("splitAt", "splitReason", "beforeValue", "afterValue", "criterion"):
+    assert k in d, "基线缺 %s" % k
+assert d["beforeValue"].get("topK") != d["afterValue"].get("topK"), "前后配置值相同(不是一次改变)"
+'
+t "A/B 两栏可复算且新鲜" bash -c "
+python3 '$HOME/dsh-fork/dsh-ab-compare.py' --quiet >/dev/null 2>&1 || true
+python3 -c \"
+import json, os, time
+p = os.path.expanduser('~/.dsh/cognitive-pipeline/ab-compare.json')
+assert os.path.exists(p), 'ab-compare.json 缺失(未运行对照脚本)'
+assert time.time() - os.path.getmtime(p) < 900, '对照结果陈旧'
+d = json.load(open(p, encoding='utf8'))
+for side in ('before', 'after'):
+    assert 'decisions' in d[side] and 'injectedCountDistribution' in d[side], '%s 栏不完整' % side
+assert d['after']['decisions'] >= 1, '切换后尚无样本'
+print('前 %d 决策/%d 注入, 后 %d 决策/%d 注入'
+      % (d['before']['decisions'], d['before']['injections'],
+         d['after']['decisions'], d['after']['injections']))
+\"
+"
+t "成本基线的缺口被显式记录(改变前未埋点 => 不可比)" python3 -c '
+import json, os
+d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/ab-compare.json"), encoding="utf8"))
+print("加宽前 injectedCharsMean=%s, 加宽后=%s" % (d["before"]["injectedCharsMean"], d["after"]["injectedCharsMean"]))
+# 不对称是事实, 不是要断言通过的东西——把缺口打印出来, 防"用 None 假装没差"
+if d["before"]["injectedCharsMean"] is None:
+    print("诚实标注: 加宽前的成本未埋点(仪表是改变之后才加的), 成本对比暂不可比")
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──

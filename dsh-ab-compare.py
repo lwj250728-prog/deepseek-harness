@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""A/B 对照（tp-088 / T104）：加宽前后同一批指标，机械对比。
+
+今天的教训(cl-116)：我用"记忆里的数字"当基线，把 cl-100 修复前的坏账本读数当成了
+现状，据此立了一个错的闸门。所以任何 A/B 都必须在**改变发生的那一刻**把基线写死，
+之后每次都从同一个脚本出两栏对比——不允许再"凭印象比较"。
+
+数据源：retrieval-audit.jsonl（含 rawHits/candidates/vetoJudged/expIds/injectedChars）
+分组：以 --split（默认取 profile 里 topK 的当前值对应的切换时刻，见 ab-baselines.json）
+输出：ab-compare.json + 控制台两栏
+
+用法：dsh-ab-compare.py [--split ISO] [--quiet]
+退出码：0 = 出数；1 = 缺数据或基线。
+"""
+from __future__ import annotations
+
+import argparse
+import collections
+import datetime
+import json
+import os
+import sys
+
+DIR = os.path.expanduser('~/.dsh/cognitive-pipeline')
+AUDIT = os.path.join(DIR, 'retrieval-audit.jsonl')
+OUT = os.path.join(DIR, 'ab-compare.json')
+BASELINES = os.path.join(DIR, 'ab-baselines.json')
+DEFAULT_SPLIT = '2026-09-10T14:07:00+08:00'   # topK 1 -> 3 的重启时刻
+
+
+def load_rows() -> list[dict]:
+    rows = []
+    for line in open(AUDIT, encoding='utf8'):
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except Exception:
+            continue
+    return rows
+
+
+def summarize(rows: list[dict]) -> dict:
+    injected = [r for r in rows if r.get('stage') == 'injected' and r.get('expIds')]
+    counts = collections.Counter(len(r['expIds']) for r in injected)
+    distinct = {e for r in injected for e in r['expIds']}
+    chars = [r['injectedChars'] for r in injected if isinstance(r.get('injectedChars'), int)]
+    judged = [r['vetoJudged'] for r in injected if isinstance(r.get('vetoJudged'), int)]
+    silent = [r['vetoSilent'] for r in injected if isinstance(r.get('vetoSilent'), int)]
+    cands = [r['candidates'] for r in rows if isinstance(r.get('candidates'), int)]
+    return {
+        'decisions': len(rows),
+        'injections': len(injected),
+        'injectedPerDecision': round(len(injected) / len(rows), 3) if rows else None,
+        'injectedCountDistribution': {str(k): v for k, v in sorted(counts.items())},
+        'distinctExperiences': len(distinct),
+        'candidatesMedian': sorted(cands)[len(cands) // 2] if cands else None,
+        'vetoJudgedTotal': sum(judged) if judged else None,
+        'vetoSilentTotal': sum(silent) if silent else None,
+        'injectedCharsMean': round(sum(chars) / len(chars)) if chars else None,
+        'injectedCharsTotal': sum(chars) if chars else None,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--split', default=None)
+    parser.add_argument('--quiet', action='store_true')
+    args = parser.parse_args()
+
+    split_iso = args.split
+    if split_iso is None and os.path.exists(BASELINES):
+        try:
+            split_iso = json.load(open(BASELINES, encoding='utf8')).get('splitAt')
+        except Exception:
+            split_iso = None
+    split_iso = split_iso or DEFAULT_SPLIT
+    split_ms = int(datetime.datetime.fromisoformat(split_iso).timestamp() * 1000)
+
+    rows = load_rows()
+    before = [r for r in rows if (r.get('t') or 0) < split_ms]
+    after = [r for r in rows if (r.get('t') or 0) >= split_ms]
+    if not rows:
+        print('缺 retrieval-audit.jsonl 记录: 无法对照', file=sys.stderr)
+        return 1
+
+    payload = {
+        'splitAt': split_iso,
+        'splitReason': 'topK 1 -> 3 (cl-120 主杠杆)',
+        'generatedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'before': summarize(before),
+        'after': summarize(after),
+    }
+    with open(OUT, 'w', encoding='utf8') as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    if not args.quiet:
+        print('切换点 %s (%s)' % (split_iso, payload['splitReason']))
+        keys = ('decisions', 'injections', 'injectedCountDistribution', 'distinctExperiences',
+                'candidatesMedian', 'vetoJudgedTotal', 'vetoSilentTotal', 'injectedCharsMean')
+        print('  %-28s %-22s %-22s' % ('指标', '加宽前', '加宽后'))
+        for key in keys:
+            print('  %-28s %-22s %-22s' % (key, payload['before'].get(key), payload['after'].get(key)))
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
