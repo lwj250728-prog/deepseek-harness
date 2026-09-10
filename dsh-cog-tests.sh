@@ -4787,6 +4787,43 @@ assert "不得用引用" in txt or "不用引用" in txt, "标签定义未显式
 print("标签定义已排除引用")
 '
 
+# ── T136 影子对照可跑且不得越样本门槛下结论(cl-185) ──
+# 起因: 判据已预登记(T135), 但脚本必须 ①存在且可跑(否则预登记只是纸面) ②样本不足时**不得**给结论
+# ③C 档(效用+通道权重)在当前埋点下不可算 —— 必须显式报 unavailable, 不许拿 A 档冒充。
+echo "[T136] 影子对照可执行(脚本可跑 / 样本不足不下结论 / C 档不可算须显式)"
+t "影子对照脚本可跑并落盘结果" python3 -c '
+import json, os, subprocess, sys
+script = os.path.expanduser("~/dsh-fork/dsh-library-replay.py")
+assert os.path.exists(script), "缺影子对照脚本"
+r = subprocess.run([sys.executable, script, "--json"], capture_output=True, text=True, timeout=300)
+assert r.returncode == 0, "脚本异常: %s" % (r.stderr or "")[:200]
+d = json.loads(r.stdout)
+for key in ("sampleCount", "minSample", "armA_mrr", "armB_mrr", "armC_status"):
+    assert key in d, "结果缺字段 %s" % key
+assert d["minSample"] >= 10, "最小样本人为放宽: %s" % d["minSample"]
+print("脚本可跑, 样本 %d/%d" % (d["sampleCount"], d["minSample"]))
+'
+t "样本不足时不得给出结论" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/library-replay-result.json")
+assert os.path.exists(p), "缺结果文件(先跑脚本)"
+d = json.load(open(p, encoding="utf8"))
+if d["sampleCount"] < d["minSample"]:
+    assert d.get("conclusion") is None, "样本 %d<%d 却给了结论 %s" % (d["sampleCount"], d["minSample"], d["conclusion"])
+    assert d.get("note"), "样本不足须显式说明"
+    print("样本不足: 未给结论(合规)")
+else:
+    assert d.get("conclusion") in ("wire-utility", "retire-utility"), "样本已足但结论非法: %s" % d.get("conclusion")
+    print("样本已足, 结论 %s" % d["conclusion"])
+'
+t "C 档不可算时必须显式声明" python3 -c '
+import json, os
+d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/library-replay-result.json"), encoding="utf8"))
+assert isinstance(d.get("armC_status"), str) and d["armC_status"], "C 档状态未声明"
+assert "unavailable" in d["armC_status"] or d.get("armC_mrr") is not None, "C 档既未给出也未声明不可算"
+print("C 档状态: %s" % d["armC_status"][:60])
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
