@@ -3086,6 +3086,33 @@ if combined > 0.25:
 print("代理饱和已显式标记, 口径=显式(%.1f%%)" % ((d["explicitRate"] or 0) * 100))
 '
 
+# ── T106 cron 心跳(cl-126: 排程不等于完成, 静默的 cron 无法验证) ──
+echo "[T106] cron 心跳(定时任务必须留下可验证的痕迹)"
+t "cron 条目不带 --quiet(否则无输出时不留痕)" bash -c "
+crontab -l | grep -q 'dsh-lever-health.py >>' &&
+crontab -l | grep -q 'dsh-model-catalog-check.py >>' &&
+! crontab -l | grep -qE 'dsh-lever-health.py --quiet|dsh-model-catalog-check.py --quiet'
+"
+t "定时任务的日志新鲜度(2 个周期内)" python3 -c '
+import os, time
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+# (日志, 允许的最长静默秒数 = 2 个周期)
+checks = [("lever-health.log", 12 * 3600), ("model-catalog.log", 2 * 3600),
+          (".script-lint.log", 4 * 3600), ("freeze-wiki.log", 12 * 3600)]
+stale, pending = [], []
+for name, limit in checks:
+    path = os.path.join(D, name)
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        pending.append(name); continue
+    age = time.time() - os.path.getmtime(path)
+    if age > limit:
+        stale.append((name, round(age / 3600, 1)))
+# 关键: 静默的 cron 无法验证是否真的跑过(cl-126)。这里只判"有内容却过期"的,
+# 无内容的一律列为"尚未首跑(空过可见)", 不伪装成健康。
+assert not stale, "定时任务日志过期(可能已停跑): %s" % stale
+print("新鲜: %d 个; 尚未首跑/空: %s" % (len(checks) - len(pending), pending))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
