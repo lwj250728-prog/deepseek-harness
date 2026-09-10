@@ -864,9 +864,11 @@ assert line, "找不到提交 cron 行"
 assert "\\%H" in line[0] or "%" not in line[0], "提交行仍未转义: %s" % line[0][:80]
 '
 
-# ── T33 open 项到期裁决(2026-09-09 00:5x 固化——账本滞留 18 条一天无人裁决, 同 cl-037 家族) ──
-echo "[T33] open项到期裁决(每条 open/in-progress 须有 reviewBy; 过期未裁决即失败)"
-t "open项均有reviewBy" python3 -c '
+# ── T33 非终态项到期裁决(09-09 固化; 09-10 17:5x 按 cl-136 改为非终态判定) ──
+# 原判据是状态白名单 open/in-progress —— 新增状态取值后 14 条非终态成盲区(cl-132 家族)。
+# 现判据: 非终态(不含 done/retired/closed)即须有处置位; 合法阻塞项须有显式处置字段。
+echo "[T33] 非终态项到期裁决(每条非终态须有处置位; 过期未裁决即失败)"
+t "非终态项均有处置位" python3 -c '
 import json, os
 p = os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
 by_id = {}
@@ -874,11 +876,16 @@ for l in open(p, encoding="utf8"):
     if not l.strip(): continue
     r = json.loads(l)
     if r.get("id"): by_id[r["id"]] = r
-bad = [k for k, v in by_id.items()
-       if v.get("status") in ("open", "in-progress") and not v.get("reviewBy")]
-assert not bad, "无 reviewBy 的 open 项: %s" % bad[:3]
+# 终态 = 不必再裁决; 其余一律参与检查(不再用状态白名单, 否则新增取值即成盲区)。
+TERMINAL = {"done", "retired", "closed"}
+DISP = ("reviewBy", "disposition", "unblockPlan", "nextAction", "blockedReason")
+open_items = {k: v for k, v in by_id.items() if v.get("status") not in TERMINAL}
+assert open_items, "无非终态项 —— 本断言前提不成立, 不得算通过"
+naked = sorted(k for k, v in open_items.items() if not any(v.get(f) for f in DISP))
+assert not naked, "非终态项缺处置位(reviewBy/disposition/unblockPlan/nextAction/blockedReason): %s" % naked[:5]
+print("非终态 %d 项均有处置位" % len(open_items))
 '
-t "open项未过期" python3 -c '
+t "非终态项未过期" python3 -c '
 import json, os, datetime
 p = os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
 by_id = {}
@@ -886,11 +893,31 @@ for l in open(p, encoding="utf8"):
     if not l.strip(): continue
     r = json.loads(l)
     if r.get("id"): by_id[r["id"]] = r
+TERMINAL = {"done", "retired", "closed"}
 today = datetime.date.today().isoformat()
-overdue = [k for k, v in by_id.items()
-           if v.get("status") in ("open", "in-progress")
-           and isinstance(v.get("reviewBy"), str) and v["reviewBy"] < today]
-assert not overdue, "已过 reviewBy 未裁决: %s" % overdue[:3]
+open_items = {k: v for k, v in by_id.items() if v.get("status") not in TERMINAL}
+overdue = [k for k, v in open_items.items()
+           if isinstance(v.get("reviewBy"), str) and v["reviewBy"] < today]
+assert not overdue, "已过 reviewBy 未裁决: %s" % overdue[:5]
+print("非终态 %d 项无过期" % len(open_items))
+'
+t "盲区归零(新增状态取值必须被覆盖)" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
+by_id = {}
+for l in open(p, encoding="utf8"):
+    if not l.strip(): continue
+    r = json.loads(l)
+    if r.get("id"): by_id[r["id"]] = r
+TERMINAL = {"done", "retired", "closed"}
+LEGACY = {"open", "in-progress"}
+blind = sorted(k for k, v in by_id.items()
+               if v.get("status") not in TERMINAL and v.get("status") not in LEGACY)
+# 盲区被允许存在, 但必须是被判据覆盖到的: 逐条须有处置位, 否则即为"新增取值漏判"。
+naked = [k for k in blind
+         if not any(by_id[k].get(f) for f in ("reviewBy","disposition","unblockPlan","nextAction","blockedReason"))]
+assert not naked, "新增状态取值落在判据之外且无处置位: %s" % naked[:5]
+print("旧白名单之外的 %d 条已全部纳入判定" % len(blind))
 '
 
 # ── T34 目标池 nextAction 滞留(cl-054, 2026-09-09 01:1x——T33 只管账本, 目标池仍无滞留锚) ──
@@ -2162,10 +2189,15 @@ t "无增益即明确判读不上线" python3 -c '
 import subprocess, os, re
 out = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-learned-sparse.py")],
                      capture_output=True, text=True, timeout=600).stdout
-m = re.search(r"均匀 IDF\(现状\)\s+([0-9.]+)%", out)
-w = re.search(r"同链集中度加权\s+([0-9.]+)%", out)
-assert m and w, "缺读数: %s" % out[:200]
-gain = float(w.group(1)) - float(m.group(1))
+# 判据必须比较"同一对"读数: 生产者按**最大增益的变体**出判读, 而旧断言固定拿
+# "同链集中度加权"去比 —— 该变体增益为 0 而"引用反馈加权"有增益时, 断言就把
+# 生产者的正确判读判成错误(09-10 19:0x 实测首红)。改为通用解析: 基线 + 全部变体,
+# 取最大增益与生产者的判读对照(这样新增变体也不会让断言失配)。
+base = re.search(r"均匀 IDF\(现状\)\s+([0-9.]+)%", out)
+assert base, "缺基线读数: %s" % out[:200]
+variants = [(n, float(v)) for n, v in re.findall(r"^\s+(\S+?)\s+([0-9.]+)%\s+\(Δ", out, re.M)]
+assert variants, "缺变体读数: %s" % out[:200]
+gain = max(v - float(base.group(1)) for _, v in variants)
 if gain <= 0:
     assert "不上线" in out, "无增益却未判不上线"
 else:
@@ -2413,14 +2445,27 @@ assert stale == 0, "%d 条零证据跳词已过证据寿命仍驻留(前 5: %s)"
 
 # ── T83 跳词判据窗口健康度(tp-066/tp-067: 判据不得变成永不开火的死判据) ──
 echo "[T83] 跳词判据窗口健康(重建风暴防护 / 有证据变体跨重建存活)"
-t "判据窗口健康: 24h 内词表重建 ≤4 次" python3 -c '
-import json, os
+t "判据窗口健康: 重建次数须由重启与节流解释" python3 -c '
+import json, os, re, subprocess
 m = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/injection-noise.json"), encoding="utf8"))
 n = m.get("jumpRebuildCount24h")
 assert isinstance(n, int), "指标缺 jumpRebuildCount24h"
-# 跳词判死按"现世代"计, 世代起点每次重建前移: 重建过密 => 窗口永远攒不到样本,
-# T82 的跳词判死断言就退化成永不开火的死判据(机制在、条件已死 的又一种形态)。
-assert n <= 4, "24h 内重建 %d 次: 判据窗口被反复重置, 跳词判死断言已失效" % n
+# 旧判据是"24h 重建 <=4"这个魔数 —— 它把"重启"忘了: 节流戳是**内存态**
+# (service.ts:2840 注释自认 in-memory), 每次重启都会放行一次立即重建, 于是
+# 开发日(今日 24h 内 service 启动 45 次)必然超 4 而误报。改为按"重启 + 节流"
+# 可解释的上界判定: 重启各允许一次, 另加绝对风暴上限, 并额外要求判据真的攒到过样本。
+starts = 0
+try:
+    out = subprocess.run(["journalctl", "--user", "-u", "dsh-web.service", "--since", "24 hours ago"],
+                         capture_output=True, text=True, timeout=60).stdout
+    starts = len(re.findall(r"Started dsh-web", out))
+except Exception:
+    starts = 0
+allowed = max(4, starts + 2)
+assert n <= 24, "24h 内重建 %d 次超过绝对上限 24: 判据窗口被反复重置" % n
+assert n <= allowed, "重建 %d 次超出重启(%d)+节流可解释的上界 %d" % (n, starts, allowed)
+settled = m.get("jumpChannelSettled", 0)
+assert settled > 0, "跳词通道累计已结算 %s 条 => 判据从未攒到样本(死判据)" % settled
 '
 t "有证据的 LLM 变体跨重建必须 100% 存活" python3 -c '
 import json, os
@@ -3448,6 +3493,103 @@ assert os.path.exists(log), "观察日志不存在: 排程从未真正产出痕�
 age = time.time() - os.path.getmtime(log)
 assert age < 2 * 3600, "观察日志 %.1f 小时未更新(排程在跑但无产出, 或已失效)" % (age / 3600)
 print("观察排程在册且日志新鲜(%.0f 分钟前)" % (age / 60))
+'
+
+# ── T114 载体活体源核对(cl-136 家族 / exp_254: 状态证据会误报) ──
+# 实证: 09-10 17:48 的三问帧 Q1 只核了 PID 与模型名(状态证据), 没读心跳与目录(活体源),
+# 于是 17:47:55 首次上报的 model-unavailable 在 1 分钟内的核对里被漏掉 —— cl-014 伪饱足当场复现。
+# PID 不变 ≠ 载体健康: 模型被下架时 PID 照样是那个 PID。
+echo "[T114] 载体活体源核对(进程/心跳/目录三源; 降级时必须判降级)"
+t "载体核对脚本可运行且报三源" python3 -c '
+import json, os, subprocess, sys
+script = os.path.expanduser("~/dsh-fork/dsh-carrier-check.py")
+assert os.path.exists(script), "载体核对脚本不存在"
+r = subprocess.run([sys.executable, script, "--json"], capture_output=True, text=True, timeout=120)
+assert r.returncode in (0, 2), "脚本异常退出 %s: %s" % (r.returncode, (r.stderr or "")[:200])
+d = json.loads(r.stdout)
+for key in ("process", "lastModelBeats", "catalog", "verdict"):
+    assert key in d, "缺活体源字段: %s" % key
+assert d["lastModelBeats"], "心跳里没有任何 model-* 记录(活体源从未体检)"
+assert d["catalog"].get("verdict"), "目录判定缺失"
+print("三源齐备: 进程/心跳%d条/目录%s" % (len(d["lastModelBeats"]), d["catalog"]["verdict"]))
+'
+t "活体源降级时不得判正常(两痕迹一致)" python3 -c '
+import json, os, subprocess, sys
+script = os.path.expanduser("~/dsh-fork/dsh-carrier-check.py")
+r = subprocess.run([sys.executable, script, "--json"], capture_output=True, text=True, timeout=120)
+d = json.loads(r.stdout)
+beats = d["lastModelBeats"]; cat = d["catalog"]; verdict = str(cat.get("verdict"))
+last_unavail = beats[-1].get("reason") == "model-unavailable"
+cat_missing = "missing" in verdict
+if last_unavail or cat_missing:
+    assert d["verdict"] == "degraded" and d["degraded"], (
+        "活体源已降级(心跳=%s 目录=%s)却判 %s —— 只看名字的核对会漏掉它"
+        % (beats[-1].get("reason"), verdict, d["verdict"]))
+    assert r.returncode == 2, "降级时退出码应为 2, 实为 %s" % r.returncode
+    print("降级被如实报出(%d 条理由)" % len(d["degraded"]))
+else:
+    assert d["verdict"] == "ok", "活体源正常却判降级: %s" % d["degraded"]
+    print("活体源正常")
+'
+t "环境核对不得只凭 PID/模型名(脚本内须含活体源读点)" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/dsh-carrier-check.py"), encoding="utf8").read()
+for needle, why in (("quiet-driver-heartbeat.jsonl", "未读心跳账本"),
+                    ("model-catalog.json", "未读供应商目录"),
+                    ("model-unavailable", "未把心跳的不可用当作降级判据")):
+    assert needle in src, why
+print("活体源读点在册")
+'
+# ── T115 死信号登记(cl-135: 声明为"使用度"的字段必须真有写方) ──
+# 实证: 经验库 297 条里 hitCount / positiveCount 全常量 0 —— 声明是计数器, 却只被初始化,
+# 全仓没有累加点(唯一 hitCount++ 属于 quiet-driver 的诱导问题策略表, 另一套对象)。
+# 机制在、字段在、写方不在 = 同族病又一例。真实使用度信号是 citationCount 与 injections.cited。
+# 断言双向: 常量信号必须登记; 登记字段若恢复取值则登记过期(防登记簿腐烂, 同 reopenIf 纪律)。
+echo "[T115] 死信号登记(常量使用度字段须登记 / 登记不得过期)"
+t "常量使用度字段必须登记在册" python3 -c '
+import json, os, re
+DIR = os.path.expanduser("~/.dsh/cognitive-pipeline")
+reg_path = os.path.join(DIR, "dead-signals.json")
+assert os.path.exists(reg_path), "死信号登记簿不存在"
+reg = json.load(open(reg_path, encoding="utf8"))
+registered = {(e["file"], e["field"]) for e in reg["signals"]}
+PAT = re.compile(r"count|hit|used|adopt", re.I)
+unregistered = []
+for fname in ("experiences.jsonl", "experiences-frames.jsonl"):
+    rows = [json.loads(l) for l in open(os.path.join(DIR, fname), encoding="utf8") if l.strip()]
+    assert rows, "经验库为空, 断言前提不成立: %s" % fname
+    keys = set()
+    for r in rows: keys |= set(r.keys())
+    for key in sorted(keys):
+        if not PAT.search(key): continue
+        vals = [r.get(key) for r in rows if key in r]
+        if not vals or len(set(map(str, vals))) != 1: continue
+        if (fname, key) not in registered:
+            unregistered.append("%s:%s(常量 %s)" % (fname, key, vals[0]))
+assert not unregistered, "常量使用度字段未登记(声明的写方不存在): %s" % unregistered
+print("常量字段均已登记: %d 项" % len(reg["signals"]))
+'
+t "登记的字段若恢复取值即登记过期(防登记簿腐烂)" python3 -c '
+import json, os
+DIR = os.path.expanduser("~/.dsh/cognitive-pipeline")
+reg = json.load(open(os.path.join(DIR, "dead-signals.json"), encoding="utf8"))
+stale = []
+for e in reg["signals"]:
+    rows = [json.loads(l) for l in open(os.path.join(DIR, e["file"]), encoding="utf8") if l.strip()]
+    vals = [r.get(e["field"]) for r in rows if e["field"] in r]
+    if vals and len(set(map(str, vals))) != 1:
+        stale.append("%s:%s 已开始变化 => 应从登记簿移除" % (e["file"], e["field"]))
+assert not stale, "登记过期: %s" % stale
+print("登记簿未腐烂(%d 项仍为常量)" % len(reg["signals"]))
+'
+t "活的使用度信号不得是全常量" python3 -c '
+import json, os
+DIR = os.path.expanduser("~/.dsh/cognitive-pipeline")
+rows = [json.loads(l) for l in open(os.path.join(DIR, "experiences.jsonl"), encoding="utf8") if l.strip()]
+vals = [r.get("citationCount") for r in rows if "citationCount" in r]
+assert vals, "缺 citationCount 字段, 断言前提不成立"
+assert len(set(map(str, vals))) > 1, "citationCount 全常量(%s) => 使用度信号实际是死的" % vals[0]
+print("citationCount 取值多样(%d 种), 使用度信号活着" % len(set(map(str, vals))))
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
