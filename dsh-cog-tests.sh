@@ -2628,6 +2628,39 @@ assert not bad, "注入记录缺少过阈/否决计数: %s" % bad[:2]
 print("构建后决策 %d 条, 阶段分布 %s" % (len(rows), stages))
 '
 
+# ── T92 采用率闸门效果见证 + 目标入池体检(cl-114 第1步 / tp-073,tp-074) ──
+echo "[T92] 闸门运行时效果(反思类帧必须被静默 / 漏斗单调) + 目标入池体检"
+t "闸门运行时效果: 构建后反思类帧不得出现 injected" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+lib = os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js")
+assert os.path.exists(p), "retrieval-audit.jsonl 缺失(cl-114 第1步的产物)"
+cut = os.path.getmtime(lib) * 1000
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+recent = [r for r in rows if (r.get("t") or 0) > cut]
+reflective = [r for r in recent if r.get("turnKind") == "reflective-frame"]
+bad = [r for r in reflective if r.get("decision") != "skip"]
+assert not bad, "反思类帧未被静默: %s" % [(r.get("sessionTurns"), r.get("decision"), r.get("stage")) for r in bad[:2]]
+skipped = [r for r in reflective if r.get("stage") == "skipped-reflective-frame"]
+print("构建后审计 %d 条, 反思类 %d 条(其中跳过 %d 条)" % (len(recent), len(reflective), len(skipped)))
+'
+t "漏斗单调自洽: candidates ≥ overThreshold ≥ veto合计 > 0" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+inj = [r for r in rows if r.get("stage") == "injected"]
+assert inj, "尚无注入记录, 无法判定漏斗"
+bad = []
+for r in inj:
+    c = r.get("candidates") or 0
+    o = r.get("overThreshold") or 0
+    v = (r.get("vetoAccepted") or 0) + (r.get("vetoRejected") or 0)
+    if not (c >= o >= v > 0):
+        bad.append((c, o, v))
+assert not bad, "漏斗数字不自洽(candidates/overThreshold/veto): %s" % bad[:3]
+'
+t "目标入池体检: 全部 active 目标三前提齐备" bash -c "python3 '$HOME/dsh-fork/dsh-goal-onboard-check.py' all"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
