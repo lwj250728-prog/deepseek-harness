@@ -4095,6 +4095,66 @@ assert not problems, "基线被事后扩: %s" % problems
 print("%d 份基线与其首次入库版本一致" % checked)
 '
 
+# ── T123 消音面审计(每个登记簿都有一条"加一行就消音"的入口) ──
+# 反事实探索的结论: 守卫可被"消音"而不被解决 —— T122 只守了基线这一类, 但同类入口还有:
+#   · enum-consumers.exemptions / mechanism-inventory.exemptions(豁免)
+#   · dead-signals.signals(把任意字段登记为死信号)
+#   · experience-assertions.entries(把任意经验登记为已转化)
+#   · guard-fire.guards(把任意守卫登记为"能开火")
+# 判据: 每个消音型条目必须带**非空理由字段**; 豁免清单增长必须伴随理由(裸字符串一律红)。
+echo "[T123] 消音面审计(条目须带理由 / 不得裸白名单 / 覆盖全部登记簿)"
+t "消音型条目必须带非空理由" python3 -c '
+import json, os
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+LISTS = (("enum-consumers.json", "exemptions"), ("mechanism-inventory.json", "exemptions"),
+         ("dead-signals.json", "signals"), ("experience-assertions.json", "entries"),
+         ("guard-fire.json", "guards"))
+REASON = ("reason", "note", "disposition", "why")
+problems, total = [], 0
+for fname, key in LISTS:
+    d = json.load(open(os.path.join(D, fname), encoding="utf8"))
+    items = d.get(key) or []
+    assert items, "%s.%s 为空 —— 本断言前提不成立" % (fname, key)
+    for it in items:
+        total += 1
+        if isinstance(it, str):
+            problems.append("%s.%s 有裸字符串条目(无理由): %s" % (fname, key, it)); continue
+        inside = it.get("mustFire") if key == "guards" else None
+        if inside is not None:
+            for f in inside:
+                if not any(f.get(k) for k in REASON):
+                    problems.append("%s.%s 的开火路径缺理由: %s" % (fname, key, f.get("assertion")))
+        elif not any(it.get(k) for k in REASON):
+            problems.append("%s.%s 条目缺理由: %s" % (fname, key, str(it)[:40]))
+assert not problems, "消音面缺理由: %s" % problems[:5]
+print("%d 个消音型条目全部带理由" % total)
+'
+t "豁免清单不得在首次入库版本之外无记录增长" python3 -c '
+import json, os, subprocess
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+REPO = os.path.expanduser("~/.dsh")
+FILES = {"enum-consumers.json": "exemptions", "mechanism-inventory.json": "exemptions"}
+checked = 0
+for fname, key in FILES.items():
+    rel = "cognitive-pipeline/" + fname
+    revs = subprocess.run(["git", "-C", REPO, "log", "--format=%h", "--", rel],
+                          capture_output=True, text=True, timeout=60).stdout.split()
+    assert revs, "%s 尚无 git 版本" % fname
+    cur = json.load(open(os.path.join(D, fname), encoding="utf8")).get(key) or []
+    first_raw = subprocess.run(["git", "-C", REPO, "show", "%s:%s" % (revs[-1], rel)],
+                               capture_output=True, text=True, timeout=60).stdout
+    try:
+        first = (json.loads(first_raw).get(key) or [])
+    except Exception:
+        continue
+    # 增长是允许的, 但每一份增长都必须是"带理由的对象"(裸字符串会被上一条断言抓住);
+    # 这里只核对**数量方向**: 只许增不许悄悄换掉(换掉=把违规项移出白名单以外的位置)。
+    assert len(cur) >= len(first), "%s.%s 数量减少(%d -> %d): 疑似被改写" % (fname, key, len(first), len(cur))
+    checked += 1
+assert checked >= 2, "可比对的豁免清单不足, 断言前提不成立"
+print("%d 份豁免清单版本可比" % checked)
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──

@@ -81,7 +81,10 @@ def main() -> int:
             reg = json.load(open(REGISTRY, encoding='utf8'))
         except Exception:
             pass
-    exempt = {str(x) for x in (reg.get('exemptions') or [])}
+    # 豁免既可能是裸字符串, 也可能是带理由的对象(2026-09-10 20:1x 改): 两种都要解出取值 ——
+    # 改完格式忘了改消费方, 当场被 T118 的'基线后不得有新增未覆盖'抓住(同族第 N 例)。
+    exempt = {str(x.get('value')) for x in (reg.get('exemptions') or []) if isinstance(x, dict) and x.get('value')}
+    exempt |= {str(x) for x in (reg.get('exemptions') or []) if isinstance(x, str)}
     exempt |= {str(e.get('value')) for e in (reg.get('entries') or []) if e.get('exempt')}
     covered = {str(e.get('value')) for e in (reg.get('entries') or [])}
     baseline = set(reg.get('baselineUncovered') or [])
