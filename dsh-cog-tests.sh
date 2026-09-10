@@ -2770,6 +2770,41 @@ for k, v in d["firstVsRepeat"].items():
 print("首次 %s / 重复 %s" % (d["firstVsRepeat"].get("first"), d["firstVsRepeat"].get("repeat")))
 '
 
+# ── T96 冷却/退避不变式(从账本反查机制是否真的挡住了快速重复) ──
+echo "[T96] 冷却不变式(同经验重复间隔 / 退避确实拉开间距)"
+t "干净窗口内同经验连续注入间隔 ≥ 基础冷却(10min)" python3 -c '
+import json, os, datetime
+TZ = datetime.timezone(datetime.timedelta(hours=8))
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+MAIN = "session-63251d85-ef77-4299-939d-9a6fe9b5bec6"
+WATER = datetime.datetime(2026, 9, 10, 4, 59, tzinfo=TZ).timestamp() * 1000   # cl-100 修复水位
+BASE_MIN = 10.0
+inj = {}
+for line in open(os.path.join(D, "injections.jsonl"), encoding="utf8"):
+    if not line.strip(): continue
+    r = json.loads(line)
+    if r.get("injectionId"): inj[r["injectionId"]] = r
+seq = {}
+for r in inj.values():
+    if str(r.get("sessionId")) != MAIN or (r.get("createdAt") or 0) < WATER: continue
+    for e in r.get("expIds") or []: seq.setdefault(e, []).append(r["createdAt"])
+gaps = []
+violations = []
+for e, ts in seq.items():
+    ts.sort()
+    for a, b in zip(ts, ts[1:]):
+        gap = (b - a) / 60000
+        gaps.append(gap)
+        if gap < BASE_MIN: violations.append((e, round(gap, 1)))
+if len(gaps) < 5:
+    print("间隔样本不足(%d), 空过" % len(gaps)); raise SystemExit(0)
+assert not violations, "同经验在基础冷却内被重复注入(冷却/退避失效): %s" % violations[:3]
+median = sorted(gaps)[len(gaps) // 2]
+# 退避若只是"挡在 10 分钟线上", 中位数会贴近 10; 实测应显著更大(实测 ~39 分钟)。
+assert median > BASE_MIN, "间隔中位 %.1f 分钟未超过基础冷却, 退避可能未生效" % median
+print("间隔样本 %d, 中位 %.1f 分钟, 违规 0" % (len(gaps), median))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
