@@ -2538,6 +2538,45 @@ alerts = [r for r in by_id.values()
 assert alerts, "实时目录已无在用模型, 但账本没有未关闭的 cl-model-expired-* 告警"
 '
 
+# ── T88 到期告警的日期与幂等(cl-107 本地日 / cl-108 条件型开单) ──
+echo "[T88] 到期告警日期与幂等(本地日历日 / 同一条件只开一单)"
+t "告警日期用本地日历日(reviewBy 不得早于创建日)" python3 -c '
+import json, os, datetime
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
+by_id = {}
+for l in open(p, encoding="utf8"):
+    if not l.strip(): continue
+    r = json.loads(l)
+    if r.get("id"): by_id[r["id"]] = r
+bad = []
+for k, v in by_id.items():
+    if not k.startswith("cl-model-expired"): continue
+    ts = v.get("ts")
+    if not isinstance(ts, str): continue
+    try:
+        created = datetime.datetime.fromisoformat(ts).date().isoformat()
+    except Exception:
+        continue
+    # cl-107: toISOString() 是 UTC, 本地 07:40 会写成前一天的 reviewBy
+    # => 告警一落地就被 T33 判"已过 reviewBy 未裁决"。
+    if isinstance(v.get("reviewBy"), str) and v["reviewBy"] < created:
+        bad.append((k, ts[:10], v["reviewBy"]))
+assert not bad, "reviewBy 早于创建日的告警: %s" % bad
+'
+t "同一条件至多一个未关闭到期告警(cl-108 条件型开单)" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
+by_id = {}
+for l in open(p, encoding="utf8"):
+    if not l.strip(): continue
+    r = json.loads(l)
+    if r.get("id"): by_id[r["id"]] = r
+open_alerts = [k for k, v in by_id.items()
+               if k.startswith("cl-model-expired") and v.get("status") == "open"]
+assert len(open_alerts) <= 1, "存在 %d 条未关闭到期告警(跨日重复开单): %s" % (len(open_alerts), open_alerts)
+'
+t "巡检复用已有未关闭告警(不按日期重复开单)" bash -c "grep -q 'findOpenModelAlertId' '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts'"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──

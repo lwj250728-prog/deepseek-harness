@@ -1248,6 +1248,30 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     }
   }
 
+  /** cl-108: 到期告警是"条件型"而非"日期型"——同一条件只允许一个未关闭告警。
+   *  旧实现把 id 绑在日期上且 modelAlertId 只在内存里, 跨日/重启都会再开一单,
+   *  于是"模型一直没换"会堆出多条 open 告警。这里读账本(last-wins)找出已有的
+   *  未关闭告警并复用其 id。 */
+  const findOpenModelAlertId = async (): Promise<string | null> => {
+    try {
+      const { readFile } = await import('node:fs/promises')
+      const raw = await readFile(join(dirname(config.thinkLogPath), 'claims-ledger.jsonl'), 'utf8')
+      const statusById = new Map<string, string>()
+      for (const line of raw.split('\n')) {
+        if (line.trim().length === 0) continue
+        try {
+          const record = JSON.parse(line) as { id?: unknown, status?: unknown }
+          if (typeof record.id !== 'string' || !record.id.startsWith('cl-model-expired')) continue
+          statusById.set(record.id, String(record.status ?? ''))
+        } catch { /* 坏行跳过 */ }
+      }
+      for (const [id, status] of statusById) if (status === 'open') return id
+      return null
+    } catch {
+      return null
+    }
+  }
+
   const wakeTargetAgent = async (): Promise<void> => {
     try {
       const { presets, presetId } = await resolveStoredPreset()
@@ -1340,6 +1364,12 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       source: availability === 'missing' ? 'plugin-catalog' : 'live-catalog',
     })
     if (modelAlertId !== null) return
+    // cl-108: 条件型幂等——已有未关闭告警就复用, 不按日期重复开单。
+    const existingAlert = await findOpenModelAlertId()
+    if (existingAlert !== null) {
+      modelAlertId = existingAlert
+      return
+    }
     // cl-107: 日期一律用**本地日历日**——toISOString() 是 UTC, 本地 07:40 会写成前一天的
     // reviewBy, 于是告警一落地就"已过期"(套件 T33 当场红)。reviewBy 给 3 天决策窗口:
     // 用户未拍板时告警持续可见, 但不会当天就把套件打红。
