@@ -82,6 +82,9 @@ export interface Config {
    * embedding cosine (bge-m3) → 0.5 (business med 0.651, chitchat med 0.470,
    * business min 0.455). Lower than minSimilarity is meaningless. */
   directSimilarityThreshold?: number
+  /** cl-118: 经验退避的冷却上限(默认 6h)。未引用连击越多冷却越长(×2^k), 到此封顶;
+   *  观察期若发现"绝对采纳数归零", 需要回调的就是这个值——所以它必须是配置而非硬编码。 */
+  backoffMaxMs?: number
   /** cl-116: 回合类型闸门总开关(默认 false)。 */
   enableTurnGating?: boolean
   /** cl-114: 会话回合数达到此值即视为"已建立"(上下文已稀释)——反思类帧不再注入。
@@ -141,6 +144,7 @@ export const Config: z<Config> = z.object({
    *  记为 false); 用修复后的干净窗口重测: 反思类帧 18 条注入 / 1 采纳 = 5.6%, 与用户
    *  回合 5.2% 同级 => "关掉死重"的前提不成立, 闸门只会削减绝对采纳数。重新启用需要:
    *  修复后窗口样本 >=100 且反思类帧采纳率显著低于其它类别。 */
+  backoffMaxMs: z.number().min(0).default(6 * 60 * 60 * 1000),
   enableTurnGating: z.boolean().default(false),
   /** cl-114: 会话回合数达到此值即视为"已建立"(上下文稀释): 反思类帧不再注入。 */
   establishedSessionTurns: z.number().step(1).min(1).default(20),
@@ -167,6 +171,8 @@ export interface ResolvedConfig {
   readonly enabled: boolean
   readonly injectCooldownMs: number
   readonly directSimilarityThreshold: number
+  /** cl-118: 经验退避的冷却上限。 */
+  readonly backoffMaxMs: number
   /** cl-116: 回合类型闸门总开关(默认关闭, 详见 Config 注释)。 */
   readonly enableTurnGating: boolean
   /** cl-114: 会话回合数达到此值即视为已建立(反思类帧不再注入)。 */
@@ -202,6 +208,7 @@ export function resolveConfig(config: Config): ResolvedConfig {
     enabled: config.enabled ?? true,
     injectCooldownMs: config.injectCooldownMs ?? 10 * 60 * 1000,
     directSimilarityThreshold: config.directSimilarityThreshold ?? 0.5,
+    backoffMaxMs: config.backoffMaxMs ?? 6 * 60 * 60 * 1000,
     enableTurnGating: config.enableTurnGating ?? false,
     establishedSessionTurns: config.establishedSessionTurns ?? 20,
     actionFrameMarginBoost: config.actionFrameMarginBoost ?? 0.08,
@@ -459,8 +466,9 @@ function coolDownInjected(
   hits: readonly ExperienceHit[],
   cooldownMs: number,
   backoffMaxMs = 6 * 60 * 60 * 1000,
-): { kept: readonly ExperienceHit[], backoffDropped: number } {
-  if (cooldownMs <= 0 || hits.length === 0) return { kept: hits, backoffDropped: 0 }
+): { kept: readonly ExperienceHit[], backoffDropped: number,
+  details: readonly { expId: string, uncitedStreak: number, effectiveCooldownMs: number }[] } {
+  if (cooldownMs <= 0 || hits.length === 0) return { kept: hits, backoffDropped: 0, details: [] }
   // cl-118 修订版: 按经验退避——同一经验在本会话里未引用 k 次, 冷却 ×2^k(上限 6h)。
   // 硬抑制会掐掉"第 68 次终于落地"的那次采纳(实测 exp_126 #68 / exp_264 #6), 退避不会。
   const prior: PriorInjection[] = []
@@ -471,19 +479,23 @@ function coolDownInjected(
     }
   }
   const state = backoffState(prior, Date.now(), cooldownMs, backoffMaxMs)
-  if (state.size === 0) return { kept: hits, backoffDropped: 0 }
+  if (state.size === 0) return { kept: hits, backoffDropped: 0, details: [] }
   const now = Date.now()
   let dropped = 0
+  const details: { expId: string, uncitedStreak: number, effectiveCooldownMs: number }[] = []
   const kept = hits.filter(hit => {
     const entry = state.get(hit.expId)
     if (entry === undefined) return true
     if (now - entry.lastInjectedAt < entry.effectiveCooldownMs) {
       dropped += 1
+      // 退避挡下时把"为什么"一并记下: 哪个经验、连击多少、当时有效冷却多长。
+      details.push({ expId: hit.expId, uncitedStreak: entry.uncitedStreak,
+        effectiveCooldownMs: entry.effectiveCooldownMs })
       return false
     }
     return true
   })
-  return { kept, backoffDropped: dropped }
+  return { kept, backoffDropped: dropped, details }
 }
 
 /** Render one reference block from the retrieved hits. */
@@ -802,11 +814,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     // Cooldown filter: a memory injected into THIS session within the window
     // is not injected again — same-session repeats are noise (finding #3:
     // exp_1 13×, exp_303 9×). All recent → nothing new to say, stay silent.
-    const { kept: cooled, backoffDropped } = coolDownInjected(
-      ctx.cognitivePipeline, agent.session.id, hits, resolved.injectCooldownMs)
+    const { kept: cooled, backoffDropped, details: backoffDetails } = coolDownInjected(
+      ctx.cognitivePipeline, agent.session.id, hits, resolved.injectCooldownMs, resolved.backoffMaxMs)
     if (cooled.length === 0) {
       audit({ stage: 'cooldown', candidates: hits.length, topHit, backoffDropped,
-        triggerSource: verdict.triggerSource })
+        backoffDetails, triggerSource: verdict.triggerSource })
       return decision
     }
     // Prewarm enrichment for the veto gate: a short message ("重启") may match
@@ -853,7 +865,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         jumpWords: verdict.jumpWords,
         strategyId: strategy.strategyId,
       })
-      audit({ stage: 'injected', path: 'strategy', backoffDropped, candidates: hits.length, overThreshold: cooled.length,
+      audit({ stage: 'injected', path: 'strategy', backoffDropped, backoffDetails, candidates: hits.length, overThreshold: cooled.length,
         vetoAccepted: vetoed.accepted.length, vetoRejected: vetoed.rejectedNotes.length,
         expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource,
         triggerScore: verdict.score, matched: verdict.matched })
@@ -909,7 +921,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       jumpWords: verdict.jumpWords,
     })
     markHitsReviewed(ctx.cognitivePipeline, vetoed.accepted)
-    audit({ stage: 'injected', path: 'raw', backoffDropped, candidates: hits.length, overThreshold: cooled.length,
+    audit({ stage: 'injected', path: 'raw', backoffDropped, backoffDetails, candidates: hits.length, overThreshold: cooled.length,
       vetoAccepted: vetoed.accepted.length, vetoRejected: vetoed.rejectedNotes.length,
       expIds: vetoed.accepted.map(hit => hit.expId), triggerSource: verdict.triggerSource,
       triggerScore: verdict.score, matched: verdict.matched })

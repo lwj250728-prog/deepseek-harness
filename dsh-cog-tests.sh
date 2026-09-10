@@ -2743,6 +2743,22 @@ t "水位不可缺(cl-116: 没有来源的数不出)" bash -c "grep -q '缺水�
 echo "[T95] 经验退避(连击加倍 / 审计可见 / 双口径)"
 t "退避调度单测(11 例)" bash -c "cd '$HOME/dsh-fork' && timeout 180 npx tsx dsh-inject-backoff-test.ts"
 t "退避已部署(lib 含 backoffDropped)" bash -c "grep -q 'backoffDropped' '$HOME/dsh-fork/packages/context/cognitive-inject/lib/index.js'"
+t "退避上限可配置(cl-118 计划里的回调路径)" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/src/index.ts"), encoding="utf8").read()
+assert "backoffMaxMs?: number" in src, "缺 backoffMaxMs 配置项"
+assert "backoffMaxMs: z.number().min(0).default(6 * 60 * 60 * 1000)" in src, "缺默认值(6h)"
+assert "backoffMaxMs: config.backoffMaxMs ?? 6 * 60 * 60 * 1000" in src, "resolveConfig 未透传"
+assert "resolved.backoffMaxMs" in src, "调用点未用配置值(仍是硬编码)"
+'
+t "退避挡下时审计带"为什么"(expId/连击/有效冷却)" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/src/index.ts"), encoding="utf8").read()
+assert "backoffDetails" in src, "缺退避详情"
+assert "uncitedStreak" in src and "effectiveCooldownMs" in src, "详情字段不全"
+lib = open(os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js"), encoding="utf8").read()
+assert "backoffDetails" in lib, "lib 未含退避详情(未重建)"
+'
 t "采纳统计分首次/重复两口径" python3 -c '
 import json, os
 p = os.path.expanduser("~/.dsh/cognitive-pipeline/adoption-stats.json")
