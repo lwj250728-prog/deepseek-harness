@@ -2865,6 +2865,44 @@ assert fired, "24h 内 %d 个决策点轮换从未开火: 需显式判定是供�
 print("24h 决策 %d, 轮换开火 %d" % (len(recent), len(fired)))
 '
 
+# ── T100 杠杆健康度(cl-119: 不留从不生效的机制) ──
+echo "[T100] 杠杆健康度(退避惰性标记 / 轮换开火 / 惰性必须显式)"
+t "杠杆健康度已落盘并刷新" bash -c "
+python3 '$HOME/dsh-fork/dsh-lever-health.py' --quiet >/dev/null 2>&1 || true
+python3 -c \"
+import json, os, time
+p = os.path.expanduser('~/.dsh/cognitive-pipeline/lever-health.json')
+assert os.path.exists(p), 'lever-health.json 缺失'
+d = json.load(open(p, encoding='utf8'))
+assert time.time() - os.path.getmtime(p) < 600, 'lever-health.json 陈旧'
+for k in ('backoff', 'rotation', 'turnGate'):
+    assert k in d['levers'], '缺杠杆 %s' % k
+assert 'inertLevers' in d, '缺惰性清单'
+assert d['decisions'] >= 1, '窗口内无决策点'
+\"
+"
+t "惰性判定与重算一致(cl-119: 不许静默留着一个不生效的机制)" python3 -c '
+import json, os, time
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+d = json.load(open(os.path.join(D, "lever-health.json"), encoding="utf8"))
+cut = (time.time() - d["windowHours"] * 3600) * 1000
+rows = [json.loads(l) for l in open(os.path.join(D, "retrieval-audit.jsonl"), encoding="utf8") if l.strip()]
+rows = [r for r in rows if (r.get("t") or 0) > cut]
+blocked = [r for r in rows if (r.get("backoffDropped") or 0) > 0]
+admitted = [r for r in blocked if r.get("backoffAdmitted") is not None]
+rate = (len(admitted) / len(blocked)) if blocked else None
+expect_backoff_inert = rate is not None and rate >= 0.8 and len(blocked) >= 5
+expect_rotation_inert = len(rows) >= 5 and not any(r.get("rotated") is True for r in rows)
+assert d["levers"]["backoff"]["inert"] == expect_backoff_inert, "backoff 惰性标记与重算不一致"
+assert d["levers"]["rotation"]["inert"] == expect_rotation_inert, "rotation 惰性标记与重算不一致"
+# 惰性必须出现在显式清单里——"静默留着一个从不生效的机制"是本项目反复出现的病
+for name, info in d["levers"].items():
+    if info.get("inert"):
+        assert name in d["inertLevers"], "%s 已判惰性却未进入 inertLevers" % name
+print("决策 %d, 注入 %d, 不同经验 %d, 惰性 %s"
+      % (d["decisions"], d["injected"], d["distinctExperiencesInjected"], d["inertLevers"]))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
