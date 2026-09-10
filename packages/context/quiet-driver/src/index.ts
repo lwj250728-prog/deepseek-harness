@@ -20,6 +20,7 @@ import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
+import { findOpenAlertId, localDay } from './alert-ledger.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -1060,7 +1061,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     void (async (): Promise<void> => {
       // cl-109: 与到期告警同一类修复——先复用已有的未关闭停摆告警(重启期间停摆
       // 持续时不再重复开单), 否则才用本地日历日 + 时间戳开新单。
-      const existing = await findOpenAlertId('cl-stall-')
+      const existing = await findOpenAlert('cl-stall-')
       stallAlertId = existing ?? `cl-stall-${now.toISOString().slice(0, 16).replace(/[-:T]/g, '')}`
       if (existing !== null) return
       await appendFile(ledgerPath, JSON.stringify({
@@ -1227,30 +1228,11 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     }
   }
 
-  /** cl-107: 本地日历日(YYYY-MM-DD); 可加天数偏移。toISOString 是 UTC, 会造成跨日错位。 */
-  const localDay = (plusDays = 0): string => {
-    const shifted = new Date(Date.now() + plusDays * 24 * 60 * 60 * 1000)
-    return new Date(shifted.getTime() - shifted.getTimezoneOffset() * 60000).toISOString().slice(0, 10)
-  }
-
-  /** cl-108/cl-109: 告警是"条件型"而非"日期型"——同一前缀只允许一个未关闭告警。
-   *  旧实现把 id 绑在时间戳上且句柄只在内存里, 跨日/重启都会再开一单, 于是
-   *  "条件一直没解除"会堆出多条 open 告警。读账本(last-wins)复用已有的未关闭 id。 */
-  const findOpenAlertId = async (prefix: string): Promise<string | null> => {
+  /** cl-109: 告警是"条件型"——读账本(last-wins)复用已有的未关闭单, 见 alert-ledger.ts。 */
+  const findOpenAlert = async (prefix: string): Promise<string | null> => {
     try {
       const { readFile } = await import('node:fs/promises')
-      const raw = await readFile(ledgerPath, 'utf8')
-      const statusById = new Map<string, string>()
-      for (const line of raw.split('\n')) {
-        if (line.trim().length === 0) continue
-        try {
-          const record = JSON.parse(line) as { id?: unknown, status?: unknown }
-          if (typeof record.id !== 'string' || !record.id.startsWith(prefix)) continue
-          statusById.set(record.id, String(record.status ?? ''))
-        } catch { /* 坏行跳过 */ }
-      }
-      for (const [id, status] of statusById) if (status === 'open') return id
-      return null
+      return findOpenAlertId(await readFile(ledgerPath, 'utf8'), prefix)
     } catch {
       return null
     }
@@ -1371,7 +1353,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     })
     if (modelAlertId !== null) return
     // cl-108: 条件型幂等——已有未关闭告警就复用, 不按日期重复开单。
-    const existingAlert = await findOpenAlertId('cl-model-expired')
+    const existingAlert = await findOpenAlert('cl-model-expired')
     if (existingAlert !== null) {
       modelAlertId = existingAlert
       return

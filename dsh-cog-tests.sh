@@ -2581,9 +2581,13 @@ for prefix in ("cl-model-expired", "cl-stall-"):
         prefix, len(open_alerts), open_alerts)
 '
 t "两族告警都复用已有未关闭单(cl-109 通用助手)" bash -c "
-grep -q 'findOpenAlertId' '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts' &&
-grep -c \"findOpenAlertId('cl-\" '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts' | grep -qE '^[2-9]'
+grep -q 'findOpenAlertId' '$HOME/dsh-fork/packages/context/quiet-driver/src/alert-ledger.ts' &&
+test \$(grep -c \"findOpenAlert('cl-\" '$HOME/dsh-fork/packages/context/quiet-driver/src/index.ts') -ge 2
 "
+
+# ── T89 告警账本纯函数单测(cl-109 的复用/日期语义, 不需要真实停摆即可验证) ──
+echo "[T89] 告警账本纯函数(findOpenAlertId/localDay 语义)"
+t "findOpenAlertId/localDay 语义单测(6 例)" bash -c "cd '$HOME/dsh-fork' && timeout 180 npx tsx dsh-alert-ledger-test.ts"
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
