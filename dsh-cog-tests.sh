@@ -5227,6 +5227,20 @@ for k in ("ts", "origin", "script"):
     assert rows[0].get(k), "记录缺字段 " + k
 print("持久记录 %d 条: %s" % (len(rows), phases))
 '
+# ── T146 等待判据的"到点恢复"必须真在跑(cl-198 / tp-124) ──
+# 起因: cl-198 的缺陷是"只看文本不看时钟 ⇒ 永久跳过"; 修好之后还得守"修复真的在跑"——
+# 单测只跑 src(tsx), 不证明部署后的行为。本组两条: ①已部署 lib 里确有解析+比较;
+# ②部署后的 skipped:waiting 唤醒, 逐条按**唯一实现**复核(不写第三份判据副本, 调 tsx 加载 TS 实现)。
+echo "[T146] 等待判据到点恢复(已部署 lib 须含时钟逻辑 / 唤醒跳过须逐条复核)"
+t "已部署 lib 的等待判据须含时钟逻辑(不只看文本)" python3 -c '
+import os, re
+lib = os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/lib/index.js")
+src = open(lib, encoding="utf8").read()
+assert "parseWaitingMoment" in src, "lib 里没有时刻解析函数(可能未重建/未部署)"
+assert re.search(r"at\.getTime\(\)\s*<=\s*now\.getTime\(\)", src), "缺少\"已到点即不再等待\"的比较"
+print("lib 含时刻解析 + 到点比较")
+'
+t "部署后 skipped:waiting 的唤醒须逐条复核(已到点仍跳过即红)" python3 /home/ubuntu/dsh-fork/dsh-waiting-expiry-lint.py
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
