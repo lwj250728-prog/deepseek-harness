@@ -3206,6 +3206,30 @@ else:
     print("非双缺状态, 空过")
 '
 
+# ── T110 A/B 混杂因素必须自动列出(cl-130: 不许事后凭记忆补注) ──
+echo "[T110] A/B 混杂因素(账本化 / 区间型 / 自动呈现)"
+t "对照结果带 confounders 与其说明" bash -c "
+python3 '$HOME/dsh-fork/dsh-ab-compare.py' --quiet >/dev/null 2>&1 || true
+python3 -c \"
+import json, os
+p = os.path.expanduser('~/.dsh/cognitive-pipeline/ab-compare.json')
+d = json.load(open(p, encoding='utf8'))
+assert 'confounders' in d and 'confoundNote' in d, '对照缺混杂因素栏'
+print('%s; 窗口内混杂 %d 条' % (d['confoundNote'], len(d['confounders'])))
+\"
+"
+t "区间型混杂(until)不得漏掉(cl-130 改名是区间事件)" python3 -c '
+import json, os
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+rows = [json.loads(l) for l in open(os.path.join(D, "ab-confounders.jsonl"), encoding="utf8") if l.strip()]
+assert rows, "无混杂账本"
+assert any(r.get("until") for r in rows), "缺区间型(until)条目: 边界模糊的变更会被时间戳漏掉"
+d = json.load(open(os.path.join(D, "ab-compare.json"), encoding="utf8"))
+kinds = {c["kind"] for c in d["confounders"]}
+assert "provider-rename-possible" in kinds, "供应商改名(区间型)未被列出: %s" % sorted(kinds)
+print("已列出混杂: %s" % sorted(kinds))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──

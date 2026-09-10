@@ -1253,8 +1253,12 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
         verdict?: unknown, modelInUse?: unknown
       }
       if (parsed.modelInUse !== model) return 'unknown'
-      if (parsed.verdict === 'missing') return 'missing'
-      if (parsed.verdict === 'present') return 'present'
+      // cl-131: 判定值必须按"语义"匹配而不是按字面枚举 —— cl-129 把 verdict 扩成
+      // 'in-use-and-default-missing' 后, 旧的 === 'missing' 不再命中, 于是巡检退回
+      // model-ok(tp-060 的双痕迹一致性断言当场抓出)。凡含 'missing' 即视为不在目录。
+      const verdict = typeof parsed.verdict === 'string' ? parsed.verdict : ''
+      if (verdict.includes('missing')) return 'missing'
+      if (verdict === 'present') return 'present'
       return 'unknown'
     } catch {
       return 'unknown'

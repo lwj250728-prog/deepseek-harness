@@ -25,6 +25,7 @@ DIR = os.path.expanduser('~/.dsh/cognitive-pipeline')
 AUDIT = os.path.join(DIR, 'retrieval-audit.jsonl')
 OUT = os.path.join(DIR, 'ab-compare.json')
 BASELINES = os.path.join(DIR, 'ab-baselines.json')
+CONFOUNDERS = os.path.join(DIR, 'ab-confounders.jsonl')
 DEFAULT_SPLIT = '2026-09-10T14:07:00+08:00'   # topK 1 -> 3 的重启时刻
 
 
@@ -60,6 +61,39 @@ def summarize(rows: list[dict]) -> dict:
         'injectedCharsMean': round(sum(chars) / len(chars)) if chars else None,
         'injectedCharsTotal': sum(chars) if chars else None,
     }
+
+
+def confounders_in_window(before_start_ms: int) -> list[dict]:
+    """窗口内的环境变更(混杂因素): 供应商改名/结算口径变化/受控重启等。
+
+    cl-130 的教训: A/B 两侧可能被"模型其实换了""口径改了"这类**与实验变量无关**的变化
+    污染。把这类变更记成账本并在对照里自动列出——不允许之后再凭记忆补注。
+    """
+    if not os.path.exists(CONFOUNDERS):
+        return []
+    items = []
+    for line in open(CONFOUNDERS, encoding='utf8'):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except Exception:
+            continue
+        try:
+            stamp = int(datetime.datetime.fromisoformat(record['ts']).timestamp() * 1000)
+        except Exception:
+            continue
+        # 区间型混杂(如"供应商改名发生在 09:00~15:18 之间"): 只要窗口与之有交集就算命中,
+        # 否则一个边界模糊的变更会因为时间戳恰好落在窗口外而被静默漏掉(cl-130 的形态)。
+        until_ms = None
+        if record.get('until'):
+            try:
+                until_ms = int(datetime.datetime.fromisoformat(record['until']).timestamp() * 1000)
+            except Exception:
+                until_ms = None
+        if (until_ms is None and stamp >= before_start_ms) or (until_ms is not None and until_ms >= before_start_ms):
+            items.append({**record, 'tsMs': stamp})
+    return sorted(items, key=lambda r: r['tsMs'])
 
 
 def novelty_stats(split_ms: int) -> dict:
@@ -131,8 +165,13 @@ def main() -> int:
     verdict = ('insufficient-sample'
                if before_sum['decisions'] < MIN_SAMPLE or after_sum['decisions'] < MIN_SAMPLE
                else 'comparable')
+    all_times = [r.get('t') or 0 for r in rows if r.get('t')]
+    confounds = confounders_in_window(min(all_times) if all_times else 0)
     payload = {
         'verdict': verdict,
+        'confounders': confounds,
+        'confoundNote': ('窗口内存在与实验变量无关的环境变更, 结论须带此保留'
+                         if confounds else '窗口内无已登记的混杂因素'),
         'novelty': novelty_stats(split_ms),
         'minSample': MIN_SAMPLE,
         'splitAt': split_iso,
@@ -145,6 +184,10 @@ def main() -> int:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     if not args.quiet:
         print('切换点 %s (%s) | 判读: %s' % (split_iso, payload['splitReason'], payload['verdict']))
+        if confounds:
+            print('混杂因素 %d 条(窗口内):' % len(confounds))
+            for item in confounds:
+                print('  [%s] %s — %s' % (item['ts'][:16], item['kind'], item['note'][:60]))
         keys = ('decisions', 'injections', 'injectedCountDistribution', 'distinctExperiences',
                 'candidatesMedian', 'vetoJudgedTotal', 'vetoSilentTotal', 'injectedCharsMean')
         print('  %-28s %-22s %-22s' % ('指标', '加宽前', '加宽后'))
