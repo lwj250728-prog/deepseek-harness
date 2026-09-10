@@ -196,6 +196,7 @@ export function reconstructTurn(session: Session, endEvent: SessionEvent<'turn/e
     situation: texts.reverse().join(' ').slice(0, 800),
     action: actions.reverse().join('；').slice(0, 800) || outcome.slice(0, 300),
     outcome: outcome.slice(0, 800),
+    outcomeFull: outcome,
     toolCallCount,
     failed,
     turnId: turn,

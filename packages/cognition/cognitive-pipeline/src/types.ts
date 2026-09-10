@@ -495,6 +495,10 @@ export interface TurnEpisode {
   readonly action: string
   /** Outcome material: the turn end reason and any error/final text. */
   readonly outcome: string
+  /** cl-128: 未截断的 outcome, **仅供引用结算使用**。`outcome` 被截到 800 字符
+   *  (accumulation 需要限长), 而结算要在全文里找 expId——实测 7 个回合的提及位置在
+   *  1052~1557 字符处, 全被 800 截断吃掉, 导致引用被系统性漏记(账本 14.5% vs 文本 32.3%)。 */
+  readonly outcomeFull?: string
   /** How many tool calls the turn made (the deterministic cost pre-filter uses it). */
   readonly toolCallCount: number
   /** Whether any tool result in the turn failed. */

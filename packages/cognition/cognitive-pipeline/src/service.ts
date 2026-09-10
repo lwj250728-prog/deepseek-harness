@@ -1264,7 +1264,9 @@ export class CognitivePipelineService extends Service {
    * @returns the summary, or null when nothing happened.
    */
   async summarizeTurn(sessionId: string, episode: TurnEpisode, options: { accumulate?: boolean } = {}): Promise<TurnCognitionSummary | null> {
-    const citation = await this.settleInjectionCitations(sessionId, episode.outcome)
+    // cl-128: 结算必须用**未截断**的回合文本——episode.outcome 被截到 800 字符,
+    // 而实测提及位置常在 1000+ 字符处, 于是"文本里明明写了 expId"却被记成未引用。
+    const citation = await this.settleInjectionCitations(sessionId, episode.outcomeFull ?? episode.outcome)
     let newExperiences: TurnCognitionSummary['newExperiences'] = []
     if (this.resolved.autoAccumulate && options.accumulate !== false) {
       const expId = await this.accumulateTurn(episode)

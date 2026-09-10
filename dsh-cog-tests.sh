@@ -3129,6 +3129,36 @@ assert not stale, "定时任务日志过期(可能已停跑): %s" % stale
 print("新鲜: %d 个; 尚未首跑/空: %s" % (len(checks) - len(pending), pending))
 '
 
+# ── T107 采纳率必须有对照(cl-128): 背景率/lift + 结算不再截断 ──
+echo "[T107] 采纳率口径(背景率/lift / 结算用全文)"
+t "adoption-stats 带背景率与 lift" bash -c "
+python3 '$HOME/dsh-fork/dsh-adoption-stats.py' --quiet >/dev/null 2>&1 || true
+python3 -c \"
+import json, os
+p = os.path.expanduser('~/.dsh/cognitive-pipeline/adoption-stats.json')
+d = json.load(open(p, encoding='utf8'))
+for k in ('turnsWithInjection', 'textMentionAdoptionRate', 'backgroundRate', 'lift', 'liftNote'):
+    assert k in d, '缺字段 %s' % k
+print('回合 %d | 文本口径 %s | 背景 %s | lift %s'
+      % (d['turnsWithInjection'], d['textMentionAdoptionRate'], d['backgroundRate'], d['lift']))
+\"
+"
+t "结算不得用 800 字符截断的文本(cl-128 根因)" python3 -c '
+import os
+D = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline")
+svc = open(os.path.join(D, "src/service.ts"), encoding="utf8").read()
+idx = open(os.path.join(D, "src/index.ts"), encoding="utf8").read()
+typ = open(os.path.join(D, "src/types.ts"), encoding="utf8").read()
+assert "outcomeFull" in typ, "TurnEpisode 缺 outcomeFull"
+assert "outcomeFull: outcome," in idx, "reconstructTurn 未填 outcomeFull"
+assert "episode.outcomeFull ?? episode.outcome" in svc, "结算未改用全文"
+lib = open(os.path.join(D, "lib/index.js"), encoding="utf8").read()
+assert "outcomeFull" in lib, "lib 未含 outcomeFull(未重建)"
+'
+t "lift 判据已入目标池(lift>=2 且 n>=100)" bash -c "
+grep -q 'lift' '$HOME/.dsh/cognitive-pipeline/dormant-goals.jsonl'
+"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──

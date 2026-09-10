@@ -160,6 +160,78 @@ def main() -> int:
         elif unsettled:
             lens[2] += 1
 
+    # cl-128: 采纳率必须有对照才有意义。背景 = 同期"文本提到**未被注入**的 expId"的回合占比
+    # (本会话是元认知回路, 我常自发写 expId, 底噪 ~18%)。lift = 注入项被引用的比例 / 背景率。
+    import re as _re
+    EXP_RE = _re.compile(r'exp_\d+')
+    log_path2 = session_log_path(args.session_id)
+    mentioned_injected = []      # 回合: 文本提到注入项
+    mentioned_background = []    # 回合: 文本提到非注入项
+    if log_path2 is not None:
+        raw = subprocess.run(['zstd', '-dc', log_path2], capture_output=True, timeout=300).stdout
+        cur_turn = None
+        by_turn_text: dict[int, list[str]] = {}
+        for line in raw.decode('utf8', 'replace').splitlines():
+            if '"turn/start"' not in line and '"assistant/message"' not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            data = event.get('data') or {}
+            if event.get('type') == 'turn/start':
+                cur_turn = data.get('turn')
+            elif event.get('type') == 'assistant/message' and isinstance(cur_turn, int):
+                message = data.get('message') or {}
+                text = ' '.join(block.get('text', '') for block in (message.get('content') or [])
+                                if isinstance(block, dict) and block.get('type') == 'text')
+                if text:
+                    by_turn_text.setdefault(cur_turn, []).append(text)
+        turn_starts = {}
+        for line in raw.decode('utf8', 'replace').splitlines():
+            if '"turn/start"' not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            data = event.get('data') or {}
+            if isinstance(data.get('turn'), int) and isinstance(event.get('time'), int):
+                turn_starts.setdefault(data['turn'], event['time'])
+        ordered = sorted((stamp, turn) for turn, stamp in turn_starts.items())
+        start_ms = [s for s, _ in ordered]
+        turn_nos = [x for _, x in ordered]
+        for record in session_records:
+            created = record.get('createdAt') or 0
+            if created < since:
+                continue
+            index = bisect.bisect_right(start_ms, created) - 1
+            if index < 0:
+                continue
+            turn = turn_nos[index]
+            mentioned = set(EXP_RE.findall(' '.join(by_turn_text.get(turn, []))))
+            injected = set(record.get('expIds') or [])
+            if mentioned & injected:
+                mentioned_injected.append(turn)
+            if mentioned - injected:
+                mentioned_background.append(turn)
+    turns_with_injection = len({turn_nos[bisect.bisect_right(start_ms, r.get('createdAt') or 0) - 1]
+                                for r in session_records if (r.get('createdAt') or 0) >= since
+                                and bisect.bisect_right(start_ms, r.get('createdAt') or 0) - 1 >= 0}) \
+        if log_path2 is not None else 0
+    adoption_turns = len(set(mentioned_injected))
+    background_turns = len(set(mentioned_background))
+    payload_extra = {
+        'turnsWithInjection': turns_with_injection,
+        'textMentionAdoptionTurns': adoption_turns,
+        'textMentionAdoptionRate': round(adoption_turns / turns_with_injection, 4) if turns_with_injection else None,
+        'backgroundTurns': background_turns,
+        'backgroundRate': round(background_turns / turns_with_injection, 4) if turns_with_injection else None,
+        'lift': (round((adoption_turns / turns_with_injection) / (background_turns / turns_with_injection), 3)
+                 if turns_with_injection and background_turns else None),
+        'liftNote': 'lift = 文本提到注入项的回合占比 / 同期背景(提到未注入项)占比; n<100 时 CI 很宽, 不可据单点判定',
+    }
+
     total = [sum(v[i] for v in stats.values()) for i in range(3)]
     payload = {
         'windowStart': datetime.datetime.fromtimestamp(since / 1000).isoformat(),
@@ -171,6 +243,7 @@ def main() -> int:
                     for k, v in sorted(stats.items())},
         'total': {'injected': total[0], 'cited': total[1], 'unsettled': total[2],
                   'rate': round(total[1] / total[0], 4) if total[0] else None},
+        **payload_extra,
         # 首次注入(该经验在本会话中第一次出现) / 重复提醒(出现过至少一次)
         'firstVsRepeat': {k: {'injected': v[0], 'cited': v[1], 'unsettled': v[2],
                               'rate': round(v[1] / v[0], 4) if v[0] else None}
@@ -192,6 +265,10 @@ def main() -> int:
         print('  %-8s 注入 %3d 采纳 %2d 未结算 %d 采纳率 %s'
               % (label, values['injected'], values['cited'], values['unsettled'],
                  'n/a' if values['rate'] is None else '%.1f%%' % (values['rate'] * 100)))
+    if payload['turnsWithInjection']:
+        print('  文本口径: 提到注入项 %d/%d 回合, 背景(提到未注入项) %d 回合 => lift %s'
+              % (payload['textMentionAdoptionTurns'], payload['turnsWithInjection'],
+                 payload['backgroundTurns'], payload['lift']))
     print('  合计     注入 %3d 采纳 %2d 未结算 %d 采纳率 %s'
           % (total[0], total[1], total[2],
              'n/a' if payload['total']['rate'] is None else '%.1f%%' % (payload['total']['rate'] * 100)))
