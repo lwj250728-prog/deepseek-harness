@@ -3502,11 +3502,19 @@ import os, subprocess, time
 # 这条守卫要求: cron 条目存在 + 观察日志在 2h 内被写过(裸时间戳, 不静默)。
 out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30).stdout
 assert "dsh-adoption-observe.py" in out, "采纳观察未挂排程(观察型目标会退化成靠记性)"
-log = os.path.expanduser("~/.dsh/cognitive-pipeline/adoption-observe.log")
-assert os.path.exists(log), "观察日志不存在: 排程从未真正产出痕迹"
-age = time.time() - os.path.getmtime(log)
-assert age < 2 * 3600, "观察日志 %.1f 小时未更新(排程在跑但无产出, 或已失效)" % (age / 3600)
-print("观察排程在册且日志新鲜(%.0f 分钟前)" % (age / 60))
+snap = os.path.expanduser("~/.dsh/cognitive-pipeline/adoption-observations.jsonl")
+assert os.path.exists(snap), "观察快照不存在: 排程从未真正产出痕迹"
+# 只认 origin=cron 的快照(cl-147 的第二层): 手工/套件跑出来的快照不算排程证据。
+import json as _json, datetime as _dt
+recs = [_json.loads(l) for l in open(snap, encoding="utf8") if l.strip()]
+cron_recs = [r for r in recs if r.get("origin") == "cron"]
+if cron_recs:
+    age = time.time() - _dt.datetime.fromisoformat(cron_recs[-1]["ts"]).timestamp()
+    assert age < 2 * 3600, "最近的 cron 快照已 %.1f 小时未更新" % (age / 3600)
+    print("cron 快照新鲜(%.0f 分钟前)" % (age / 60))
+else:
+    assert "DSH_RUN_ORIGIN=cron" in out, "观察排程未带 origin=cron 标记: 首班到了也留不下可判读的痕迹"
+    print("首班未到(尚无 origin=cron 快照), 排程已带 origin 标记")
 '
 
 # ── T114 载体活体源核对(cl-136 家族 / exp_254: 状态证据会误报) ──
@@ -3682,9 +3690,17 @@ out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=
 assert "dsh-adoption-gate-arm.py" in out, "闸门未挂排程 => 达标了也没人翻 nextAction"
 log = os.path.expanduser("~/.dsh/cognitive-pipeline/adoption-gate.log")
 assert os.path.exists(log), "闸门日志不存在(排程从未产出痕迹)"
-age = time.time() - os.path.getmtime(log)
-assert age < 90 * 60, "闸门日志 %.1f 小时未更新" % (age / 3600)
-print("闸门在册且日志新鲜(%.0f 分钟前)" % (age / 60))
+# 只认 origin=cron 的行(cl-147): 否则我手工跑一次就能让"排程驱动"判据变绿。
+_cron = [l for l in open(log, encoding="utf8") if "origin=cron" in l]
+if _cron:
+    import datetime as _dt
+    stamp = sorted(l[:16] for l in _cron)[-1]
+    age = time.time() - _dt.datetime.strptime(stamp, "%Y-%m-%d %H:%M").timestamp()
+    assert age < 90 * 60, "最近的 cron 闸门记录已 %.1f 小时未更新" % (age / 3600)
+    print("cron 闸门记录新鲜(%.0f 分钟前)" % (age / 60))
+else:
+    assert "DSH_RUN_ORIGIN=cron" in out, "闸门排程未带 origin=cron 标记"
+    print("首班未到(尚无 origin=cron 闸门记录), 排程已带 origin 标记")
 '
 
 t "合成测试不得写进生产闸门日志" python3 -c '
