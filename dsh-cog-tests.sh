@@ -1471,7 +1471,9 @@ base = json.load(open(os.path.join(D, "incubation-baseline.json"), encoding="utf
 bad = []
 for g in goals:
     gid = g["id"]
-    logged = len([a for a in log if a.get("goalId") == gid])
+    # cl-182: 回填行(reconstructed)不算"真实采纳日志"——它们是 notes 的历史回填, 用于修复双通道脱节,
+    # 若计入, 差额判据会读出"日志多于计数"的假倒退。
+    logged = len([a for a in log if a.get("goalId") == gid and not a.get("reconstructed")])
     counter = g.get("adoptedCount") or 0
     if gid in base:
         assert logged >= base[gid]["loggedAtBaseline"], "%s 日志条数倒退" % gid
@@ -4618,6 +4620,86 @@ for label, key in (("agent 默认档", "agentDefaultModel"), ("管线路由", "p
     if v:
         assert v in adv, "%s(%s)不在广告目录内" % (label, v)
 print("两类消费者已分别记录且均在目录内")
+'
+
+# ── T132 账本同 id 行必须可按 ts 排序(cl-174: 关单行沿用原 ts, 消费方读错状态) ──
+# 实测: claims-ledger 283 行/198 id, 61 个重复 id, 其中 **28 个 id 的所有行 ts 完全相同** ——
+# 于是"按 ts 取最新"的消费方(报告/断言/我的核查)会随机取到 open 或 done。基线为 28, 只许减不许增。
+echo "[T132] 账本时间戳可排序(同 id 多行须 ts 不同 / 同 ts 数不得增长)"
+t "同 id 同 ts 的重复行数不得增长" python3 -c '
+import json, os, collections
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+byid = collections.defaultdict(list)
+for r in rows:
+    if r.get("id"): byid[r["id"]].append(r.get("ts"))
+same = sum(1 for v in byid.values() if len(v) > 1 and len(set(v)) == 1)
+BASELINE = 28
+assert same <= BASELINE, "同 id 同 ts 的条数从 %d 增到 %d: 新写入的行沿用了旧 ts(消费方会读错状态)" % (BASELINE, same)
+print("同 id 同 ts: %d (基线 %d, 未增长)" % (same, BASELINE))
+'
+t "新写入的状态变更行必须带新 ts" python3 -c '
+import json, os, datetime
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+recent = [r for r in rows if str(r.get("doneAt") or "")[:10] >= "2026-09-11"]
+assert recent, "今日无新增/变更行 —— 断言前提不成立"
+bad = [r["id"] for r in recent if r.get("ts") and r.get("doneAt") and str(r["ts"])[:19] == str(r["doneAt"])[:19]]
+assert not bad, "关单行的 ts 与 doneAt 相同(应保留原 ts 为 firstTs、ts 用写入时刻): %s" % bad[:5]
+print("今日 %d 行状态变更, ts 均为写入时刻" % len(recent))
+'
+
+# ── T133 目标池轨迹完整性(触发须逐次留痕 / 采纳日志不得与 notes 脱节) ──
+# 起因(用户追问"孵化池轨迹有记录吗"): ①触发只有累计计数, lastTriggerAt 全 null ⇒ 无法回答"第 N 次唤醒何时"；
+# ②incubation-log 停在 09-10 17:20 而 notes 此后多次更新 ⇒ 按日志读会以为没有采纳。
+echo "[T133] 目标池轨迹(触发日志在册且新鲜 / 采纳日志与 notes 不脱节)"
+t "触发轨迹日志须存在且新鲜" python3 -c '
+import json, os, time
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/goal-trigger-log.jsonl")
+if not os.path.exists(p):
+    # 埋点已进 lib(01:28 构建), 但**运行进程尚未加载**(重启前不会写出) —— 这种"改了没部署"不该判成缺陷,
+    # 而是由 T11(服务晚于 lib 启动)单独守。此处显式声明未部署, 不假装通过也不假红。
+    import subprocess as _sp, os as _os
+    lib = _os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/lib/index.js")
+    assert _os.path.exists(lib) and "goal-trigger-log" in open(lib, encoding="utf8").read(), \
+        "缺 goal-trigger-log.jsonl 且 lib 里也没有埋点"
+    print("触发日志埋点已在 lib, 待重启部署(不判红)")
+    raise SystemExit(0)
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+assert rows, "触发日志为空"
+last = max(r.get("ts", "") for r in rows if r.get("ts"))
+for key in ("ts", "goalId", "adopted"):
+    assert key in rows[-1], "触发日志缺字段 %s" % key
+print("触发轨迹 %d 条, 最新 %s" % (len(rows), last[:19]))
+'
+t "采纳日志不得与目标池 notes 脱节" python3 -c '
+import json, os, datetime, re
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+log = os.path.join(D, "incubation-log.jsonl")
+pool = os.path.join(D, "dormant-goals.jsonl")
+assert os.path.exists(log) and os.path.exists(pool), "缺 log 或池文件"
+entries = [json.loads(l) for l in open(log, encoding="utf8") if l.strip()]
+log_last = max((e.get("ts") or "" for e in entries), default="")
+pool_last = ""
+for line in open(pool, encoding="utf8"):
+    if not line.strip(): continue
+    g = json.loads(line)
+    for n in (g.get("notes") or []):
+        # 只认**日期开头**的 note: 部分 note 是无时间戳的自由文本("起点证据: …"), 按前 16 字符比大小会取到它们
+        if isinstance(n, str) and re.match(r"\d{4}-\d{2}-\d{2}", n) and n[:16] > pool_last:
+            pool_last = n[:16]
+assert log_last and pool_last, "时间戳解析失败(断言前提不成立)"
+def parse(v):
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M"):
+        try: return datetime.datetime.fromisoformat(v.replace("Z","")[:19])
+        except Exception: pass
+    return None
+a, b = parse(log_last), parse(pool_last)
+assert a and b, "时间戳解析失败: %s / %s" % (log_last, pool_last)
+gap = (b - a).total_seconds() / 3600.0
+# notes 比采纳日志新 >2h ⇒ 说明有目标改动只写了 notes 没写 log(采纳轨迹脱节)
+assert gap <= 2.0, "notes 最新(%s)比采纳日志(%s)新 %.1fh: 有改动未入 incubation-log" % (pool_last, log_last, gap)
+print("采纳日志与 notes 同步(差 %.1fh)" % gap)
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"

@@ -217,8 +217,24 @@ export function apply(ctx: Context, config: Config): void {
   // 2026-09-09 15:3x (cl-079): 原实现每个目标各做一次"读-改-写", 同一回合多个目标被采纳时
   // 两次读-改-写并发跑在同一文件上, 后写覆盖先写 → adoptedCount 少记(实测差额从基线 2 漂到 1)。
   // 现在把一回合内所有需要 bump 的目标合并成**一次**读-改-写。
+  // 2026-09-11 01:3x (cl-181): 逐次触发/采纳轨迹。此前只有累计 triggerCount 与全为 null 的
+  // lastTriggerAt —— 无法回答"第 N 次唤醒发生在何时、命中的是哪一层、相似度多少"，
+  // 于是"等待型目标照涨触发数(空转被读成活跃, cl-178)"这类判断只能靠猜。
+  const triggerLogPath = join(homedir(), '.dsh', 'cognitive-pipeline', 'goal-trigger-log.jsonl')
+  const logTriggers = (deltas: Map<string, boolean>, stamps: Map<string, number>): void => {
+    const rows = [...deltas.entries()].map(([goalId, adopted]) => JSON.stringify({
+      ts: new Date().toISOString(),
+      goalId,
+      adopted: adopted === true,
+      kernelScore: stamps.get(goalId) ?? null,
+    }))
+    if (rows.length === 0) return
+    void appendFile(triggerLogPath, rows.join('\n') + '\n').catch(() => undefined)
+  }
+
   const bumpMany = (deltas: Map<string, boolean>): void => {
     if (deltas.size === 0) return
+    logTriggers(deltas, new Map())
     void readFile(poolPath, 'utf8').then(raw => {
       const lines = raw.split('\n').filter(Boolean)
       const out = lines.map(line => {
@@ -226,6 +242,7 @@ export function apply(ctx: Context, config: Config): void {
         const adopt = deltas.get(g.id)
         if (adopt !== undefined) {
           g.triggerCount = (g.triggerCount ?? 0) + 1
+          ;(g as PoolGoal & { lastTriggerAt?: string }).lastTriggerAt = new Date().toISOString()
           if (adopt) g.adoptedCount = (g.adoptedCount ?? 0) + 1
         }
         return JSON.stringify(g)

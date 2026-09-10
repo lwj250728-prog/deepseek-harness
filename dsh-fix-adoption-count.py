@@ -20,7 +20,11 @@ logged = {}
 for line in open(log_path, encoding='utf8'):
     line = line.strip()
     if line:
-        gid = json.loads(line).get('goalId')
+        entry = json.loads(line)
+        # cl-182: 回填行(reconstructed)是 notes 的历史回填, 不计入真实采纳计数比对
+        if entry.get('reconstructed'):
+            continue
+        gid = entry.get('goalId')
         logged[gid] = logged.get(gid, 0) + 1
 
 rows = []
