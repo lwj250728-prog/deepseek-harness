@@ -4622,31 +4622,53 @@ for label, key in (("agent 默认档", "agentDefaultModel"), ("管线路由", "p
 print("两类消费者已分别记录且均在目录内")
 '
 
-# ── T132 账本同 id 行必须可按 ts 排序(cl-174: 关单行沿用原 ts, 消费方读错状态) ──
-# 实测: claims-ledger 283 行/198 id, 61 个重复 id, 其中 **28 个 id 的所有行 ts 完全相同** ——
-# 于是"按 ts 取最新"的消费方(报告/断言/我的核查)会随机取到 open 或 done。基线为 28, 只许减不许增。
-echo "[T132] 账本时间戳可排序(同 id 多行须 ts 不同 / 同 ts 数不得增长)"
-t "同 id 同 ts 的重复行数不得增长" python3 -c '
+# ── T132 账本行必须可按 ts 排序(cl-174 起始 / cl-188 修正判据) ──
+# 起因: claims-ledger 有 28 个 id 的所有行 ts 完全相同 ⇒ "按 ts 取最新"的消费方(报告/断言/我的核查)
+# 随机读到 open 或 done。2026-09-11 03:2x 一次性回填(74 行命中, 42 行可判定并标 tsBackfilled,
+# 留痕 claims-ledger-repair.jsonl, 备份 .bak-frame0910), 实测违例归零。
+# ⚠ 原断言 B 是"关单行 ts 不得等于 doneAt"——实现细节的替身, 且与"状态在 doneAt 时刻变更,
+#   故状态变更行的 ts 就该取 doneAt"直接冲突: 回填后 3 行合法地 ts==doneAt, 替身断言假红。
+#   已改为直测不变量本身(严格递增), 另补模板断言——cl-174 在代码里的同型残留:
+#   quiet-driver 两处 status:'done' 自动关单行整个没有 ts 字段, 数据断言碰不到, 需查写入模板。
+echo "[T132] 账本可按 ts 排序(每行须有 ts / 同 id 行严格递增 / 关闭行模板须带 ts)"
+t "账本每行必须有 ts 且同 id 行按文件顺序严格递增" python3 -c '
 import json, os, collections
 p = os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
 rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+assert rows, "账本为空"
+nots = [r.get("id") for r in rows if not r.get("ts")]
+assert not nots, "行缺 ts(按 ts 取最新的消费方读到 undefined, 等价于 ts 相同): " + repr(nots[:5])
 byid = collections.defaultdict(list)
 for r in rows:
-    if r.get("id"): byid[r["id"]].append(r.get("ts"))
-same = sum(1 for v in byid.values() if len(v) > 1 and len(set(v)) == 1)
-BASELINE = 28
-assert same <= BASELINE, "同 id 同 ts 的条数从 %d 增到 %d: 新写入的行沿用了旧 ts(消费方会读错状态)" % (BASELINE, same)
-print("同 id 同 ts: %d (基线 %d, 未增长)" % (same, BASELINE))
+    if r.get("id"): byid[r["id"]].append(str(r["ts"]))
+bad = [k for k, v in byid.items() if any(a >= b for a, b in zip(v, v[1:]))]
+assert not bad, "同一 id 的行 ts 未严格递增(消费方会读错状态): " + repr(bad[:5])
+multi = sum(1 for v in byid.values() if len(v) > 1)
+print("账本 " + str(len(rows)) + " 行 / " + str(len(byid)) + " id(多行 " + str(multi) + "), ts 递增违例 0")
 '
-t "新写入的状态变更行必须带新 ts" python3 -c '
-import json, os, datetime
-p = os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
-rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
-recent = [r for r in rows if str(r.get("doneAt") or "")[:10] >= "2026-09-11"]
-assert recent, "今日无新增/变更行 —— 断言前提不成立"
-bad = [r["id"] for r in recent if r.get("ts") and r.get("doneAt") and str(r["ts"])[:19] == str(r["doneAt"])[:19]]
-assert not bad, "关单行的 ts 与 doneAt 相同(应保留原 ts 为 firstTs、ts 用写入时刻): %s" % bad[:5]
-print("今日 %d 行状态变更, ts 均为写入时刻" % len(recent))
+t "ts 回填必须留痕(标记须有原值 / 备份须在 / 标记数不得缩水)" python3 -c '
+import json, os
+d = os.path.expanduser("~/.dsh/cognitive-pipeline")
+rows = [json.loads(l) for l in open(d + "/claims-ledger.jsonl", encoding="utf8") if l.strip()]
+recs = [json.loads(l) for l in open(d + "/claims-ledger-repair.jsonl", encoding="utf8") if l.strip()]
+assert recs, "缺回填留痕记录 claims-ledger-repair.jsonl"
+rec = recs[-1]
+assert os.path.exists(os.path.join(d, str(rec.get("backup")))), "留痕指向的备份不存在"
+marked = [r for r in rows if "tsBackfilled" in r]
+assert len(marked) >= int(rec["markedRows"]), "带 tsBackfilled 的行从 " + str(rec["markedRows"]) + " 减到 " + str(len(marked))
+noop = [r.get("id") for r in marked if str(r.get("tsBackfilled")) == str(r.get("ts"))]
+assert not noop, "tsBackfilled 与原 ts 相同(空标记): " + repr(noop[:5])
+print("回填留痕 " + str(len(marked)) + " 行(记录 " + str(rec["markedRows"]) + "), 备份在册")
+'
+t "账本关闭行的写入模板必须带 ts" python3 -c '
+import os, re
+p = os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts")
+src = open(p, encoding="utf8").read()
+hits = [m.start() for m in re.finditer(r"status: .done.,", src)]
+assert hits, "没找到 status done 的写入模板(断言前提不成立)"
+bad = [i for i in hits if "ts:" not in src[i:i + 260]]
+assert not bad, "关闭行模板缺 ts(cl-174 同型残留, 数据断言碰不到): " + repr(len(bad)) + " 处"
+print("关闭行模板 " + str(len(hits)) + " 处, 均带 ts")
 '
 
 # ── T133 目标池轨迹完整性(触发须逐次留痕 / 采纳日志不得与 notes 脱节) ──
@@ -4884,6 +4906,47 @@ recent = [r for r in rows if r.get("ts") and r["ts"] >= boundary
 unmarked = [r for r in recent if waiting(pool.get(r["goalId"], {}).get("nextAction")) and r.get("skipped") != "waiting"]
 assert not unmarked, "近 1h 有 %d 条等待型唤醒未标 skipped: %s" % (len(unmarked), [(r["goalId"], r["ts"]) for r in unmarked][:3])
 print("近 1h 等待型唤醒 %d 条, 全部已标 skipped" % len([r for r in recent if waiting(pool.get(r["goalId"], {}).get("nextAction"))]))
+'
+
+# ── T138 账本计数必须走单一入口(cl-187: 我为坑建了守卫, 却在自己的快速核对里又踩一次) ──
+# 实证: 2026-09-11 03:1x 我随手按**行数**报"未关单 137", 去重后是 58 —— 套件里早有 last-wins 守卫,
+# 但"看一眼账本"没有走那套判据。修法 = 把纪律变成工具默认: dsh-ledger-status.py 默认去重;
+# 本组交叉验证"工具的去重结果 == 测试内独立实现的结果"(两套实现必须一致, 否则必有一处错)。
+echo "[T138] 账本计数单一入口(工具默认去重 / 与独立实现一致 / 行数口径须显式标注为错)"
+t "账本状态工具可跑且输出去重口径" python3 -c '
+import json, os, subprocess, sys
+tool = os.path.expanduser("~/dsh-fork/dsh-ledger-status.py")
+assert os.path.exists(tool), "缺账本状态单一入口"
+r = subprocess.run([sys.executable, tool, "--json"], capture_output=True, text=True, timeout=120)
+assert r.returncode == 0, "工具异常: %s" % (r.stderr or "")[:200]
+d = json.loads(r.stdout)
+assert d["claims"]["unique"] < d["claims"]["lines"], "唯一数不小于行数, 去重没生效?"
+assert d["claims"]["openCount"] >= 0 and "byStatus" in d["claims"]
+print("工具: %d 行 → 唯一 %d, 未关单 %d" % (d["claims"]["lines"], d["claims"]["unique"], d["claims"]["openCount"]))
+'
+t "工具结果须与独立实现一致(两套实现互证)" python3 -c '
+import json, os, subprocess, sys
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+by = {}
+for line in open(os.path.join(D, "claims-ledger.jsonl"), encoding="utf8"):
+    if not line.strip(): continue
+    rec = json.loads(line)
+    if isinstance(rec.get("id"), str): by[rec["id"]] = rec
+mine = len({k for k, v in by.items() if v.get("status") not in ("done", "retired", "closed")})
+r = subprocess.run([sys.executable, os.path.expanduser("~/dsh-fork/dsh-ledger-status.py"), "--json"],
+                   capture_output=True, text=True, timeout=120)
+theirs = json.loads(r.stdout)["claims"]["openCount"]
+assert mine == theirs, "两套实现不一致: 独立 %d vs 工具 %d" % (mine, theirs)
+print("独立实现与工具一致: 未关单 %d" % mine)
+'
+t "按行数统计的口径必须被判据标错" python3 -c '
+import json, os, subprocess, sys
+r = subprocess.run([sys.executable, os.path.expanduser("~/dsh-fork/dsh-ledger-status.py")],
+                   capture_output=True, text=True, timeout=120)
+out = r.stdout
+assert "按行数统计未关单会得到" in out and "(错)" in out, "工具未显式标注行数口径是错的"
+assert "last-wins" in out or "去重" in out, "工具未声明去重语义"
+print("行数口径已被显式标注为错")
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"

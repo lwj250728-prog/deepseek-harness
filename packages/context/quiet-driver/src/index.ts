@@ -1082,6 +1082,9 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     if (stallAlertId === null) return
     void appendFile(ledgerPath, JSON.stringify({
       id: stallAlertId, status: 'done', closedAt: new Date().toISOString(),
+      // cl-188(T132): 关闭记录同样必须带 ts——cl-174 的同型残留: 缺 ts 的行让"按 ts 取最新"
+      // 的消费方读到 undefined(等价于 ts 相同), 于是 open/done 又一次不可判。
+      ts: new Date().toISOString(),
       // cl-104: 关闭记录同样必须带 claim——套件 10c 断言"账本每行都有 id 和 claim"。
       claim: '帧产出已恢复, 停摆告警自动关闭',
       doneNote: '已恢复产出帧, 停摆告警自动关闭',
@@ -1343,6 +1346,8 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
       if (modelAlertId !== null) {
         void appendFile(join(dirname(config.thinkLogPath), 'claims-ledger.jsonl'), JSON.stringify({
           id: modelAlertId, status: 'done', closedAt: new Date().toISOString(),
+          // cl-188(T132): 同上, 关闭行缺 ts 会让"按 ts 取最新"的消费方读到 undefined。
+          ts: new Date().toISOString(),
           // cl-104: 关闭记录也必须带 claim 字段——套件 10c 断言"账本每行都有 id 和 claim",
           // 旧版关闭记录缺 claim, 首次关闭就会把套件打红(伪红)。
           claim: `载体模型 ${selection.model} 恢复可用, 到期告警自动关闭`,
