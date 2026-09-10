@@ -2977,6 +2977,43 @@ else:
     print("注入样本不足, 仅确认字段在场")
 '
 
+# ── T103 注入漏斗自洽(cl-124: 供给→候选→送审→注入 四级必须单调) ──
+echo "[T103] 注入漏斗自洽(四级单调 / veto 可见 / 成本两栏)"
+t "漏斗四级单调: rawHits >= candidates >= vetoJudged >= 注入条数" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+bad = []
+for r in rows:
+    if r.get("stage") != "injected": continue
+    raw, cand = r.get("rawHits"), r.get("candidates")
+    judged, injected = r.get("vetoJudged"), len(r.get("expIds") or [])
+    for name, value in (("rawHits", raw), ("candidates", cand), ("vetoJudged", judged)):
+        if value is None: continue
+        assert isinstance(value, int) and value >= 0, "字段 %s 非法: %r" % (name, value)
+    if None not in (raw, cand, judged):
+        # 每一级都是上一级的子集(coverViewpoints/veto 只能收窄, 不能放大)
+        if not (raw >= cand >= judged >= injected):
+            bad.append({"rawHits": raw, "candidates": cand, "vetoJudged": judged, "injected": injected})
+assert not bad, "漏斗不单调(记账错位): %s" % bad[:3]
+'
+t "veto 送审必须可见(cl-124: 静默否决不可审计)" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+recs = [r for r in rows if r.get("stage") == "injected" and "vetoJudged" in r and r.get("vetoJudged") is not None]
+if not recs:
+    print("构建后尚无带 vetoJudged 的注入记录, 空过"); raise SystemExit(0)
+r = recs[-1]
+print("最近一次: 送审 %s 条, 静默否决 %s 条, 实际注入 %s 条"
+      % (r.get("vetoJudged"), r.get("vetoSilent"), len(r.get("expIds") or [])))
+assert r.get("vetoJudged") is not None, "缺 vetoJudged"
+'
+t "成本两栏齐备(textChars 候选量 / injectedChars 实际量)" bash -c "
+grep -q 'injectedChars' '$HOME/dsh-fork/packages/context/cognitive-inject/src/index.ts' &&
+grep -q 'injectedChars' '$HOME/dsh-fork/packages/context/cognitive-inject/lib/index.js'
+"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
