@@ -3765,6 +3765,91 @@ assert age < 3 * 3600, "转化扫描日志 %.1f 小时未更新" % (age / 3600)
 print("排程在册且日志新鲜(%.0f 分钟前)" % (age / 60))
 '
 
+# ── T118 枚举取值→消费方判据 同改守门(cl-135 族级 meta 断言 / tp-102) ──
+# 今天的同族病(9 次)形状固定: 给产出方新增/改取值, 消费方判据没跟上。
+# 先实测过两种朴素判据都不可行: "源码字面量全要被套件引用"(67 候选/40 未引用, 且多是事件名与配置键)、
+# 只取联合类型成员(42 成员/19 未引用)。故总体限定为**声明式联合类型成员**, 并采用基线纪律:
+# 历史未覆盖不追溯, 只对基线之后新增的成员开火 —— 否则判据一上线就是狼来了。
+echo "[T118] 枚举取值同改守门(新成员须被断言引用或登记豁免 / 只对新增开火)"
+t "登记簿存在且结构完整" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/enum-consumers.json")
+assert os.path.exists(p), "同改登记簿不存在"
+reg = json.load(open(p, encoding="utf8"))
+assert reg.get("baselineAt"), "缺基线时间戳(无法区分历史积压与新增成员)"
+assert "baselineUncovered" in reg and "exemptions" in reg, "结构不完整"
+assert reg.get("entries"), "无任何登记项 —— 断言前提不成立"
+print("登记 %d 项 / 豁免 %d / 基线 %d" % (len(reg["entries"]), len(reg["exemptions"]),
+      len(reg["baselineUncovered"])))
+'
+t "登记的断言必须真实存在于套件(防腐烂)" python3 -c '
+import json, os
+reg = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/enum-consumers.json"), encoding="utf8"))
+suite = open(os.path.expanduser("~/dsh-fork/dsh-cog-tests.sh"), encoding="utf8").read()
+missing = [e["assertion"] for e in reg["entries"]
+           if e.get("assertion") and ("[" + e["assertion"] + "]") not in suite]
+assert not missing, "登记的断言组已不存在: %s" % missing
+print("登记的断言组全部在册")
+'
+t "基线之后不得有新增未覆盖取值" python3 -c '
+import os, subprocess, sys
+r = subprocess.run([sys.executable, os.path.expanduser("~/dsh-fork/dsh-enum-consumer-check.py"),
+                    "--scan", "--strict-new"], capture_output=True, text=True, timeout=300)
+assert r.returncode == 0, "出现新增未覆盖取值(退出码 %s): %s" % (r.returncode, r.stdout[-300:])
+assert "新增未覆盖 0" in r.stdout, r.stdout[:200]
+print("新增未覆盖 0")
+'
+t "新增取值必须能开火(合成源, 不碰真仓库)" python3 -c '
+import json, os, subprocess, sys
+root = "/tmp/t118-synth"
+src = os.path.join(root, "packages/cognition/cognitive-pipeline/src")
+os.makedirs(os.path.join(root, "d"), exist_ok=True)
+os.makedirs(src, exist_ok=True)
+# 合成取值必须**动态生成**: 写死的字面量会被本用例自己写进套件文本,
+# 于是覆盖率检查在同源文本里找到它 => 判据自满足(今天第三次踩, 前两次是 T999 与裸子串)。
+tag = "syn" + str(os.getpid())
+# 注意: 这段 body 跑在 bash 单引号里, 写**单引号字符**会把 bash 的引号提前闭合,
+# 源码被吞掉引号后仍能求值(写出的文件缺引号) => 脚本扫不到联合类型 => "守卫是死的"却看不出来。
+# 故用 chr(39) 构造引号, body 内不出现任何单引号字符。
+q = chr(39)
+open(os.path.join(src, "types.ts"), "w", encoding="utf8").write(
+    "export type Verdict = " + q + tag + "-alpha" + q + " | " + q + tag + "-beta" + q + "\n")
+assert tag not in open(os.path.expanduser("~/dsh-fork/dsh-cog-tests.sh"), encoding="utf8").read(), \
+    "合成取值字面量已存在于套件文本 —— 判据会自满足"
+json.dump({"entries": [], "exemptions": [], "baselineUncovered": [], "baselineAt": None},
+          open(os.path.join(root, "d/enum-consumers.json"), "w", encoding="utf8"))
+env = dict(os.environ, DSH_REPO=root, DSH_COG_DIR=os.path.join(root, "d"),
+           DSH_SUITE=os.path.expanduser("~/dsh-fork/dsh-cog-tests.sh"))  # 扫合成源, 但覆盖率仍对真套件
+r = subprocess.run([sys.executable, os.path.expanduser("~/dsh-fork/dsh-enum-consumer-check.py"),
+                    "--scan", "--strict-new"], capture_output=True, text=True, timeout=300, env=env)
+assert r.returncode == 2, "合成的新取值没有开火(退出码 %s) —— 守卫是死的" % r.returncode
+assert "新增未覆盖 2" in r.stdout, r.stdout[:200]
+print("合成新取值: 开火(退出码 2)")
+'
+t "同改守门须由排程驱动且日志新鲜" python3 -c '
+import os, subprocess, time
+out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30).stdout
+assert "dsh-enum-consumer-check.py" in out, "同改守门未挂排程"
+log = os.path.expanduser("~/.dsh/cognitive-pipeline/enum-consumers.log")
+assert os.path.exists(log), "同改守门日志不存在(排程从未产出痕迹)"
+age = time.time() - os.path.getmtime(log)
+assert age < 3 * 3600, "同改守门日志 %.1f 小时未更新" % (age / 3600)
+print("排程在册且日志新鲜(%.0f 分钟前)" % (age / 60))
+'
+
+t "断言 body 内不得含裸单引号(会被 bash 提前闭合)" python3 -c '
+import io, os, re
+src = io.open(os.path.expanduser("~/dsh-fork/dsh-cog-tests.sh"), encoding="utf8").read()
+bodies = re.findall(r"t \"([^\"]+)\" python3 -c \x27\n(.*?)\n\x27\n", src, re.S)
+assert bodies, "抽不到断言 body —— 本断言前提不成立"
+# 现实教训: body 跑在 bash 单引号里, 内部再写单引号会把引号提前闭合; 源码被吞掉引号后
+# **仍能求值**(于是写出缺引号的文件、脚本扫不到东西、"守卫是死的"却全绿)。历史两条已存在, 记入白名单。
+LEGACY = {"灰测模型到期闸", "cl-116: 回合闸门默认关闭(立项依据被证伪)"}
+bad = [n for n, b in bodies if "\x27" in b and n not in LEGACY]
+assert not bad, "新增断言 body 含裸单引号(会静默改义): %s" % bad
+print("检查 %d 条 body, 无新增裸单引号" % len(bodies))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
