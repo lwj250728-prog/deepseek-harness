@@ -83,15 +83,29 @@ export function backoffState(
  * 退避中, **注入数为 0**(退避前 5.7 条/小时)。通道全静默比"提醒早一点"更糟——所以
  * 当全部候选都被退避挡下时, 放行"最接近到期"的那一个; 但仅当它的**基础冷却**已过,
  * 否则会破坏"同经验不得在基础冷却内重复"的不变式(T96)。
+ *
+ * 实测 2026-09-11(cl-195): 这条保活把退避**架空**了。本会话注入节奏中位 5.2 分钟,
+ * 而保活只要求基础冷却(2 分钟)已过 => 该前提几乎恒真: 134 条带遥测的审计里 **19 条
+ * (14.2%) 是保活放行**, 放行时被绕过的有效冷却多为 2 小时, 连击最深 53 次——
+ * 于是 exp_80 在一个会话里被注入 258 次, 退避形同不存在。
+ * 修法: 给保活加**闲置门**——只有当本会话距上一次注入(任意经验)已超过 idleMs 时,
+ * 保活才允许开火。这保留了它的原始目的(别让通道静默一小时), 又让 5 分钟级别的重复
+ * 真正吃到退避。默认 60 分钟 = 原始事故(40 分钟零注入)的同一量级。
  * @param candidates - 被退避挡下的候选(含各自的基础冷却到期时间)。
  * @param now - 参考时刻。
- * @returns 应放行的 expId, 或 null(基础冷却都未过, 就该静默)。
+ * @param baseMs - 基础冷却(保活不得破坏它)。
+ * @param lastAnyInjectionAt - 本会话上一次注入任意经验的时刻(无注入传 0)。
+ * @param idleMs - 保活所需的闲置时长; <= 0 表示关闭闲置门(退回旧行为)。
+ * @returns 应放行的 expId, 或 null(基础冷却未过 / 通道并不闲置, 就该静默)。
  */
 export function admitLeastBackedOff(
   candidates: readonly { expId: string, lastInjectedAt: number, effectiveCooldownMs: number }[],
   now: number,
   baseMs: number,
+  lastAnyInjectionAt = 0,
+  idleMs = 0,
 ): string | null {
+  if (idleMs > 0 && lastAnyInjectionAt > 0 && now - lastAnyInjectionAt < idleMs) return null
   const eligible = candidates.filter(c => now - c.lastInjectedAt >= baseMs)
   if (eligible.length === 0) return null
   let best = eligible[0]!

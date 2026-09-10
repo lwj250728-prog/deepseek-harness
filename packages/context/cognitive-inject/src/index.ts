@@ -514,6 +514,7 @@ function coolDownInjected(
   hits: readonly ExperienceHit[],
   cooldownMs: number,
   backoffMaxMs = 2 * 60 * 60 * 1000,
+  keepAliveIdleMs = 60 * 60 * 1000,
 ): { kept: readonly ExperienceHit[], backoffDropped: number,
   details: readonly { expId: string, uncitedStreak: number, effectiveCooldownMs: number }[],
   admitted?: string | null } {
@@ -551,7 +552,9 @@ function coolDownInjected(
   // 否则退避会把整条注入通道静默掉(实测 40 分钟零注入)。
   let admitted: string | null = null
   if (kept.length === 0 && blocked.length > 0) {
-    admitted = admitLeastBackedOff(blocked, now, cooldownMs)
+    // cl-195: 保活加闲置门——本会话上一次注入(任意经验)距今须已超 keepAliveIdleMs。
+    const lastAnyInjectionAt = prior.reduce((acc, p) => Math.max(acc, p.injectedAt), 0)
+    admitted = admitLeastBackedOff(blocked, now, cooldownMs, lastAnyInjectionAt, keepAliveIdleMs)
     if (admitted !== null) {
       dropped -= 1
       const hit = hits.find(h => h.expId === admitted)

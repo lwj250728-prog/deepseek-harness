@@ -67,6 +67,22 @@ cases.push(['保活: 只在不破坏基础冷却的候选里挑', admitLeastBack
   { expId: 'fresh', lastInjectedAt: now - 2 * MIN, effectiveCooldownMs: 60 * MIN },
   { expId: 'old', lastInjectedAt: now - 200 * MIN, effectiveCooldownMs: 240 * MIN },
 ], now, 10 * MIN) === 'old'])
+// ⑤ cl-195 闲置门: 会话 5 分钟前刚注入过(实测节奏中位 5.2 分钟) → 保活不得开火
+cases.push(['闲置门: 会话刚注入过则保活静默', admitLeastBackedOff([
+  { expId: 'a', lastInjectedAt: now - 50 * MIN, effectiveCooldownMs: 120 * MIN },
+], now, 10 * MIN, now - 5 * MIN, 60 * MIN) === null])
+// ⑥ 闲置门: 会话真的闲置超阈值(原始事故: 40 分钟零注入) → 保活照常放行
+cases.push(['闲置门: 真闲置超阈值则保活照常', admitLeastBackedOff([
+  { expId: 'a', lastInjectedAt: now - 50 * MIN, effectiveCooldownMs: 120 * MIN },
+], now, 10 * MIN, now - 90 * MIN, 60 * MIN) === 'a'])
+// ⑦ 闲置门关闭(idleMs=0) → 退回旧行为(便于复现"被架空的退避")
+cases.push(['闲置门关闭时退回旧行为', admitLeastBackedOff([
+  { expId: 'a', lastInjectedAt: now - 50 * MIN, effectiveCooldownMs: 120 * MIN },
+], now, 10 * MIN, now - 5 * MIN, 0) === 'a'])
+// ⑧ 无注入历史(lastAnyInjectionAt=0) → 闲置门不阻断(不该因"没有历史"而静默)
+cases.push(['闲置门: 无注入历史时不阻断', admitLeastBackedOff([
+  { expId: 'a', lastInjectedAt: now - 50 * MIN, effectiveCooldownMs: 120 * MIN },
+], now, 10 * MIN, 0, 60 * MIN) === 'a'])
 
 const failed = cases.filter(([, ok]) => !ok).map(([name]) => name)
 if (failed.length > 0) {
