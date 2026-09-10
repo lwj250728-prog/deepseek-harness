@@ -1747,10 +1747,13 @@ if int(ep) * 1000 < os.path.getmtime(lib) * 1000:
 if int(ep) * 1000 + 20 * 60 * 1000 > time.time() * 1000:
     raise SystemExit(0)
 rows = [json.loads(l) for l in open(hb, encoding="utf8") if l.strip()]
-known = {"tick", "silent-skip", "agent-not-live", "agent-resumed", "agent-resume-failed", "busy", "user-active"}
-bad = [r.get("reason") for r in rows if r.get("reason") not in known]
-assert not bad, "未知跳过原因: %s" % bad[:3]
+known = {"tick", "silent-skip", "agent-not-live", "agent-resumed", "agent-resume-failed",
+         "busy", "user-active", "model-unavailable", "model-ok", "model-check-unknown",
+         "dispatch-unconsumed", "dispatch-suspended"}
+bad = sorted({r.get("reason") for r in rows if r.get("reason") not in known})
+assert not bad, "未知跳过原因(未登记的新心跳理由): %s" % bad[:5]
 '
+t "心跳理由集合与代码同步(cl-117)" bash -c "python3 '$HOME/dsh-fork/dsh-heartbeat-reasons.py'"
 
 # ── T61 inspect_memory 输出 schema 完备性(cl-082: 加 lexical 通道后输出多键, schema additionalProperties:false 未同步 → 工具自 12:5x 起调用即报错, 无人调用故无人发现) ──
 echo "[T61] inspect_memory 输出 schema 完备(输出键必须全部在 schema 声明, 防'没人调用就没人发现')"
@@ -2715,6 +2718,26 @@ if not recent:
 missing = [r for r in recent if r.get("stage") in ("injected", "below-gate") and "matched" not in r]
 assert not missing, "构建后的注入/未过闸记录缺 matched 归因: %s" % missing[:2]
 '
+
+# ── T94 采纳率唯一口径 + 数据水位(cl-116 教训: 坏账本被用了两次) ──
+echo "[T94] 采纳率口径唯一化(水位强制 / 自洽 / 声明窗口)"
+t "采纳统计脚本可运行且带水位" bash -c "cd '$HOME/dsh-fork' && timeout 300 python3 dsh-adoption-stats.py --json | python3 -c \"
+import json,sys
+d=json.load(sys.stdin)
+assert d['windowStart'], '缺窗口起点'
+assert 'settlement' in d['windowStartSource'] or '8ed52e7' in d['windowStartSource'], '窗口来源未标注结算修复水位'
+assert d['classes'], '无分类数据'
+\""
+t "采纳统计自洽(注入 = 采纳 + 未结算 + 未采纳)" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/adoption-stats.json")
+assert os.path.exists(p), "adoption-stats.json 缺失(未运行统一口径脚本)"
+d = json.load(open(p, encoding="utf8"))
+for kind, v in d["classes"].items():
+    assert v["injected"] >= v["cited"] + v["unsettled"], "分类 %s 数字不自洽: %s" % (kind, v)
+    assert v["injected"] >= v["cited"], "分类 %s 采纳数超过注入数" % kind
+'
+t "水位不可缺(cl-116: 没有来源的数不出)" bash -c "grep -q '缺水位' '$HOME/dsh-fork/dsh-adoption-stats.py' && grep -q 'SETTLEMENT_FIX_COMMIT' '$HOME/dsh-fork/dsh-adoption-stats.py'"
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
