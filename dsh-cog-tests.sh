@@ -2453,16 +2453,18 @@ assert n == 0, "构建后 %d 条注入仍含帧生经验" % n
 
 # ── T85 模型巡检的可证伪性(cl-103 正向痕迹 / cl-104 关闭记录契约与去重) ──
 echo "[T85] 模型巡检可证伪(正向痕迹 / 关闭记录带 claim / T73 读账本去重)"
-t "巡检正向痕迹: 最近 1h 内存在 model-ok 或 model-check-unknown 心跳" python3 -c '
+t "巡检必须留下判定痕迹(最近 1h 有任一 model-* 心跳)" python3 -c '
 import json, os, time
 p = os.path.expanduser("~/.dsh/cognitive-pipeline/quiet-driver-heartbeat.jsonl")
 assert os.path.exists(p), "心跳文件缺失"
 cut = time.time() * 1000 - 3600 * 1000
 rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
 hit = [r for r in rows if (r.get("ts") or 0) > cut
-       and r.get("reason") in ("model-ok", "model-check-unknown")]
-# cl-103: 只有失败路径留痕 => "没有告警"不可证伪(既可能模型在, 也可能根本没查成)。
-assert hit, "最近 1h 无 model-ok/model-check-unknown 心跳: 巡检结果不可证伪"
+       and str(r.get("reason") or "").startswith("model-")]
+# cl-103: 只有失败路径留痕 => "没有告警"不可证伪。断言"查过并留下判定",
+# 而不是"必须报 model-ok"——模型真的不在时, 正确的痕迹恰恰是 model-unavailable
+# (tp-070: 旧写法在到期后必然变红, 会把正确行为当成故障)。
+assert hit, "最近 1h 无任何 model-* 心跳: 巡检是否真的跑过不可证"
 '
 t "所有告警关闭记录都必须带 claim 字段(套件 10c 断言每行有 id 和 claim)" python3 -c '
 import re, os
