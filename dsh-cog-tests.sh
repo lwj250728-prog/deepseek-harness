@@ -2497,7 +2497,9 @@ assert d.get(\"modelInUse\"), \"未记录在用模型\"
 t "目录差异必须可见(cl-105: 巡检报 model-ok 而实时目录已无该模型)" python3 -c '
 import json, os
 d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/model-catalog.json"), encoding="utf8"))
-if d.get("verdict") != "missing":
+# cl-132: 守卫必须语义匹配(凡含 missing 即视为"不在目录")——verdict 扩了新取值后,
+# 原来 != "missing" 的写法会把"真正的缺失"判成"非缺失"并静默空过(三条断言一起失效)
+if "missing" not in str(d.get("verdict")):
     print("在用模型仍在目录中, 空过"); raise SystemExit(0)
 # 差异存在时, 结果文件必须显式记录, 且目录快照非空——差异不得被静默吞掉。
 assert d.get("missingFromCatalog") is True, "verdict=missing 但 missingFromCatalog 未置真"
@@ -2517,7 +2519,9 @@ hb = os.path.expanduser("~/.dsh/cognitive-pipeline/quiet-driver-heartbeat.jsonl"
 if not (os.path.exists(cat) and os.path.exists(hb)):
     print("缺文件, 空过"); raise SystemExit(0)
 d = json.load(open(cat, encoding="utf8"))
-if d.get("verdict") != "missing":
+# cl-132: 守卫必须语义匹配(凡含 missing 即视为"不在目录")——verdict 扩了新取值后,
+# 原来 != "missing" 的写法会把"真正的缺失"判成"非缺失"并静默空过(三条断言一起失效)
+if "missing" not in str(d.get("verdict")):
     print("在用模型仍在目录中, 空过"); raise SystemExit(0)
 rows = [json.loads(l) for l in open(hb, encoding="utf8") if l.strip()]
 model_beats = [r for r in rows if str(r.get("reason") or "").startswith("model-")]
@@ -2532,7 +2536,9 @@ import json, os
 cat = os.path.expanduser("~/.dsh/cognitive-pipeline/model-catalog.json")
 led = os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
 d = json.load(open(cat, encoding="utf8")) if os.path.exists(cat) else {}
-if d.get("verdict") != "missing":
+# cl-132: 守卫必须语义匹配(凡含 missing 即视为"不在目录")——verdict 扩了新取值后,
+# 原来 != "missing" 的写法会把"真正的缺失"判成"非缺失"并静默空过(三条断言一起失效)
+if "missing" not in str(d.get("verdict")):
     print("目录 verdict 非 missing, 空过"); raise SystemExit(0)
 by_id = {}
 for l in open(led, encoding="utf8"):
@@ -3228,6 +3234,33 @@ d = json.load(open(os.path.join(D, "ab-compare.json"), encoding="utf8"))
 kinds = {c["kind"] for c in d["confounders"]}
 assert "provider-rename-possible" in kinds, "供应商改名(区间型)未被列出: %s" % sorted(kinds)
 print("已列出混杂: %s" % sorted(kinds))
+'
+
+# ── T111 判据不得按字面值比较(cl-132: 新增枚举值会让断言静默失效) ──
+echo "[T111] 判据字面比较检查(守卫必须语义匹配 / 插件无字面比较)"
+t "套件内的 verdict 守卫必须是语义匹配" python3 -c '
+import os, re
+p = os.path.expanduser("~/dsh-fork/dsh-cog-tests.sh")
+t = open(p, encoding="utf8").read()
+# cl-132: cl-129 新增 verdict 取值后, 三处 `!= "missing"` 守卫把"真缺失"判成"非缺失"并静默空过。
+bad = re.findall(r"verdict\"\) != \"missing\"", t)
+assert not bad, "仍有字面比较的守卫(会静默空过): %d 处" % len(bad)
+assert "missing\" not in str(d.get(\"verdict\"))" in t, "未使用语义匹配写法"
+print("守卫均为语义匹配")
+'
+t "插件源码不得对 catalog verdict 做字面比较" python3 -c '
+import os, re
+roots = ["~/dsh-fork/packages/context/quiet-driver/src", "~/dsh-fork/packages/context/cognitive-inject/src"]
+bad = []
+for root in roots:
+    for dirpath, _dirs, files in os.walk(os.path.expanduser(root)):
+        for name in files:
+            if not name.endswith(".ts"): continue
+            text = open(os.path.join(dirpath, name), encoding="utf8").read()
+            for m in re.finditer(r"verdict\s*===\s*[\x27\"]missing[\x27\"]", text):
+                bad.append(os.path.join(dirpath, name) + ": " + m.group(0))
+assert not bad, "存在字面比较(新增取值会静默失配): %s" % bad[:3]
+print("插件内无 verbatim verdict 比较")
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
