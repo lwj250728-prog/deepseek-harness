@@ -5149,31 +5149,24 @@ print("停滞判据开火: " + (r.stderr.strip().splitlines() or [""])[-1][:80])
 # 而本会话注入节奏中位 5.2 分钟 ⇒ 该前提几乎恒真。实测: 134 条带遥测的审计里 19 条(14.2%)是保活放行,
 # 放行时被绕过的有效冷却多为 2 小时、连击最深 53 次; exp_80 在一个会话里被注入 258 次。
 # 修法: 保活加闲置门(本会话距上次注入须 >60 分钟)。判据只看**部署后**的审计行, 避免部署边界伪影。
-echo "[T144] 保活不得架空退避(部署后保活须间隔 >55 分钟)"
-t "部署后保活放行必须间隔 55 分钟以上" python3 -c '
-import json, os, collections
-d = os.path.expanduser("~/.dsh/cognitive-pipeline")
-audit = d + "/retrieval-audit.jsonl"
-lib = os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js")
-after = os.path.getmtime(lib) * 1000
-rows = [json.loads(l) for l in open(audit, encoding="utf8") if l.strip()]
-rows = [r for r in rows if (r.get("t") or 0) > after and "backoffAdmitted" in r]
-if not rows:
-    print("[部署边界] 部署后尚无带 backoff 遥测的审计行, 本帧不判(由 T134 类部署断言守)")
-    raise SystemExit(0)
-by = collections.defaultdict(list)
-for r in rows:
-    if r.get("backoffAdmitted"):
-        by[r.get("sessionId")].append(r["t"])
-bad = []
-for s, ts in by.items():
-    ts.sort()
-    for a, b in zip(ts, ts[1:]):
-        if (b - a) < 55 * 60 * 1000:
-            bad.append("%s: %.1f 分钟" % (s[:20], (b - a) / 60000.0))
-assert not bad, "保活间隔小于 55 分钟(闲置门没生效): " + repr(bad[:5])
-print("部署后 %d 条审计, 保活放行 %d 次, 最短间隔合规" % (len(rows), sum(len(v) for v in by.values())))
+echo "[T144] 保活不得架空退避(部署后: 保活间隔 >55 分钟 / 占比 <=5%)"
+t "保活判据须可跑且能开火(合成两条 5 分钟内的保活)" python3 -c '
+import json, os, subprocess, tempfile
+d = tempfile.mkdtemp()
+now = 1_800_000_000_000
+rows = [
+  {"t": now, "sessionId": "s1", "backoffAdmitted": "exp_a", "backoffDropped": 1},
+  {"t": now + 5 * 60 * 1000, "sessionId": "s1", "backoffAdmitted": "exp_b", "backoffDropped": 1},
+] + [{"t": now + i * 60 * 1000, "sessionId": "s1", "backoffAdmitted": None, "backoffDropped": 1} for i in range(30)]
+p = os.path.join(d, "audit.jsonl")
+open(p, "w", encoding="utf8").write("\n".join(json.dumps(r) for r in rows) + "\n")
+r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-keepalive-lint.py", "--audit", p, "--after", str(now - 1)],
+                   capture_output=True, text=True, timeout=60)
+assert r.returncode == 1, "合成的违规没被抓住(exit=%d): %s" % (r.returncode, r.stdout + r.stderr)
+assert "间隔" in r.stderr, "红是红了, 理由不对: " + r.stderr[:120]
+print("合成违规开火: " + r.stderr.strip().splitlines()[-1][:70])
 '
+t "部署后保活不得架空退避(真实审计)" python3 /home/ubuntu/dsh-fork/dsh-keepalive-lint.py
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
