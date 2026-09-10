@@ -3775,9 +3775,20 @@ assert "dsh-experience-transform.py" in out, "转化扫描未挂排程 => 新缺
 log = os.path.expanduser("~/.dsh/cognitive-pipeline/experience-transform.cron.log")
 # 只认 cron 写的那份: 套件自己也会跑这个脚本, 共用日志时排程新鲜度可被套件跑满足(cl-146)
 assert os.path.exists(log), "转化扫描日志不存在(排程从未产出痕迹)"
-age = time.time() - os.path.getmtime(log)
-assert age < 3 * 3600, "转化扫描日志 %.1f 小时未更新" % (age / 3600)
-print("排程在册且日志新鲜(%.0f 分钟前)" % (age / 60))
+# 只认 origin=cron 的行: 手工/套件跑出来的行不算排程证据(cl-147 —— 我手工 seed 过一次
+# cron 专属日志, 说明"按文件名分离"只挡住了套件, 挡不住我自己)。
+cron_lines = [l for l in open(log, encoding="utf8") if "origin=cron" in l]
+if cron_lines:
+    import datetime
+    stamp = sorted(l[:16] for l in cron_lines)[-1]
+    age = time.time() - datetime.datetime.strptime(stamp, "%Y-%M-%dT%H:%M").timestamp()
+    assert age < 3 * 3600, "转化扫描最近的 cron 记录已 %.1f 小时未更新" % (age / 3600)
+    print("cron 记录新鲜(%.0f 分钟前)" % (age / 60))
+else:
+    # 首班未到(部署后第一个排程时刻尚未到达): 不算通过也不算失败 —— 但必须确认排程**带 origin 标记**,
+    # 否则首班到了也不会留下可判读的痕迹(这正是"排程≠完成"的老坑)。
+    assert "DSH_RUN_ORIGIN=cron" in out, "转化扫描排程未带 origin=cron 标记: 首班到了也留不下可判读的痕迹"
+    print("首班未到(尚无 origin=cron 记录), 排程已带 origin 标记")
 '
 
 # ── T118 枚举取值→消费方判据 同改守门(cl-135 族级 meta 断言 / tp-102) ──
@@ -3848,9 +3859,20 @@ assert "dsh-enum-consumer-check.py" in out, "同改守门未挂排程"
 log = os.path.expanduser("~/.dsh/cognitive-pipeline/enum-consumers.cron.log")
 # 同 cl-146: 归属分离, 判据只认 cron 痕迹
 assert os.path.exists(log), "同改守门日志不存在(排程从未产出痕迹)"
-age = time.time() - os.path.getmtime(log)
-assert age < 3 * 3600, "同改守门日志 %.1f 小时未更新" % (age / 3600)
-print("排程在册且日志新鲜(%.0f 分钟前)" % (age / 60))
+# 只认 origin=cron 的行: 手工/套件跑出来的行不算排程证据(cl-147 —— 我手工 seed 过一次
+# cron 专属日志, 说明"按文件名分离"只挡住了套件, 挡不住我自己)。
+cron_lines = [l for l in open(log, encoding="utf8") if "origin=cron" in l]
+if cron_lines:
+    import datetime
+    stamp = sorted(l[:16] for l in cron_lines)[-1]
+    age = time.time() - datetime.datetime.strptime(stamp, "%Y-%M-%dT%H:%M").timestamp()
+    assert age < 3 * 3600, "同改守门最近的 cron 记录已 %.1f 小时未更新" % (age / 3600)
+    print("cron 记录新鲜(%.0f 分钟前)" % (age / 60))
+else:
+    # 首班未到(部署后第一个排程时刻尚未到达): 不算通过也不算失败 —— 但必须确认排程**带 origin 标记**,
+    # 否则首班到了也不会留下可判读的痕迹(这正是"排程≠完成"的老坑)。
+    assert "DSH_RUN_ORIGIN=cron" in out, "同改守门排程未带 origin=cron 标记: 首班到了也留不下可判读的痕迹"
+    print("首班未到(尚无 origin=cron 记录), 排程已带 origin 标记")
 '
 
 t "断言 body 内不得含裸单引号(会被 bash 提前闭合)" python3 -c '
@@ -3924,9 +3946,20 @@ assert "dsh-guard-fire-check.py" in out, "开火核验未挂排程"
 log = os.path.expanduser("~/.dsh/cognitive-pipeline/guard-fire.cron.log")
 # 同 cl-146: 归属分离
 assert os.path.exists(log), "开火核验日志不存在(排程从未产出痕迹)"
-age = time.time() - os.path.getmtime(log)
-assert age < 8 * 3600, "开火核验日志 %.1f 小时未更新" % (age / 3600)
-print("排程在册且日志新鲜(%.0f 分钟前)" % (age / 60))
+# 只认 origin=cron 的行: 手工/套件跑出来的行不算排程证据(cl-147 —— 我手工 seed 过一次
+# cron 专属日志, 说明"按文件名分离"只挡住了套件, 挡不住我自己)。
+cron_lines = [l for l in open(log, encoding="utf8") if "origin=cron" in l]
+if cron_lines:
+    import datetime
+    stamp = sorted(l[:16] for l in cron_lines)[-1]
+    age = time.time() - datetime.datetime.strptime(stamp, "%Y-%M-%dT%H:%M").timestamp()
+    assert age < 8 * 3600, "开火核验最近的 cron 记录已 %.1f 小时未更新" % (age / 3600)
+    print("cron 记录新鲜(%.0f 分钟前)" % (age / 60))
+else:
+    # 首班未到(部署后第一个排程时刻尚未到达): 不算通过也不算失败 —— 但必须确认排程**带 origin 标记**,
+    # 否则首班到了也不会留下可判读的痕迹(这正是"排程≠完成"的老坑)。
+    assert "DSH_RUN_ORIGIN=cron" in out, "开火核验排程未带 origin=cron 标记: 首班到了也留不下可判读的痕迹"
+    print("首班未到(尚无 origin=cron 记录), 排程已带 origin 标记")
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"

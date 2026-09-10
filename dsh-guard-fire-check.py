@@ -110,8 +110,9 @@ def main() -> int:
                'liveFired': fired,
                'note': '新守卫(>=T112)必须登记开火路径; 声明的命令必须现在就能开火'}
     with open(_log_path(LOG), 'a', encoding='utf8') as fh:
-        fh.write('%s 组%d 登记%d 实开火%d 问题%d\n'
-                 % (payload['scannedAt'][:16], len(groups), len(declared), len(fired), len(problems)))
+        fh.write('%s origin=%s 组%d 登记%d 实开火%d 问题%d\n'
+                 % (payload['scannedAt'][:16], os.environ.get('DSH_RUN_ORIGIN', 'manual'),
+                    len(groups), len(declared), len(fired), len(problems)))
     if '--json' in args:
         print(json.dumps(payload, ensure_ascii=False))
     else:

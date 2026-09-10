@@ -170,8 +170,9 @@ def main() -> int:
         print('套件断言组 %d 个, 其中无经验绑定 %d 个(只报数, 历史断言无从回溯)'
               % (payload['suiteAssertionGroups'], payload['assertionGroupsWithoutExperience']))
     with open(_log_path(LOG), 'a', encoding='utf8') as fh:
-        fh.write('%s 修复型%d 已登记%d 新增缺口%d 腐烂%d\n'
-                 % (payload['scannedAt'][:16], payload['fixTypeExperiences'], payload['linked'],
+        fh.write('%s origin=%s 修复型%d 已登记%d 新增缺口%d 腐烂%d\n'
+                 % (payload['scannedAt'][:16], os.environ.get('DSH_RUN_ORIGIN', 'manual'),
+                    payload['fixTypeExperiences'], payload['linked'],
                     payload['uncoveredCount'], len(payload['rotten'])))
     if '--strict-new' in args and (payload['uncoveredCount'] > 0 or payload['rotten']):
         return 2

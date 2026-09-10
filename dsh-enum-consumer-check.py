@@ -118,9 +118,9 @@ def main() -> int:
         for value in uncovered[:8]:
             print('  未覆盖: %s' % value)
     with open(_log_path(LOG), 'a', encoding='utf8') as fh:
-        fh.write('%s 成员%d 已引用%d 新增未覆盖%d\n'
-                 % (payload['scannedAt'][:16], payload['memberCount'], payload['coveredBySuite'],
-                    payload['uncoveredCount']))
+        fh.write('%s origin=%s 成员%d 已引用%d 新增未覆盖%d\n'
+                 % (payload['scannedAt'][:16], os.environ.get('DSH_RUN_ORIGIN', 'manual'),
+                    payload['memberCount'], payload['coveredBySuite'], payload['uncoveredCount']))
     return 2 if ('--strict-new' in args and uncovered) else 0
 
 
