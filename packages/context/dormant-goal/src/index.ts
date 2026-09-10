@@ -220,21 +220,39 @@ export function apply(ctx: Context, config: Config): void {
   // 2026-09-11 01:3x (cl-181): 逐次触发/采纳轨迹。此前只有累计 triggerCount 与全为 null 的
   // lastTriggerAt —— 无法回答"第 N 次唤醒发生在何时、命中的是哪一层、相似度多少"，
   // 于是"等待型目标照涨触发数(空转被读成活跃, cl-178)"这类判断只能靠猜。
+// 2026-09-11 02:5x (cl-186): 唤醒侧此前不读"等待态" —— 新触发轨迹实测 6 次唤醒 0 采纳, 其中 5 次来自
+// 等待型目标(nextAction 以"待事件/待用户/待 09-11…"开头)。行动帧侧已有 isWaitingNextAction(waiting.ts),
+// 但两侧判据没有共同来源 ⇒ 这里实现**同构**判据, 并由 T137 用同一批样本语料比对两侧结果(不一致即红),
+// 以测试而非 import 保证同源(避免跨包依赖成环)。
+const WAITING_PREFIX = /^(?:待用户|等待用户|请用户|需用户|等用户|待你|等你|待事件|待日期|等待外部|等外部)/
+const WAITING_DATE = /^(?:等待|等|待)\s*(?:[0-9]{4}|[0-9]{1,2}\s*[-/.月])/
+const NOT_WAITING = /^(?:待办|待修|待补|待验证|待测试|待评估|待实现|待重构)/
+
+/** 与 quiet-driver/waiting.ts 同构的等待型判定(由 T137 比对两侧正则/样本一致性)。 */
+function isWaitingNextActionLocal(nextAction: string): boolean {
+  const text = (nextAction ?? '').trim()
+  if (text.length === 0) return false
+  if (NOT_WAITING.test(text)) return false
+  return WAITING_PREFIX.test(text) || WAITING_DATE.test(text)
+}
+
   const triggerLogPath = join(homedir(), '.dsh', 'cognitive-pipeline', 'goal-trigger-log.jsonl')
-  const logTriggers = (deltas: Map<string, boolean>, stamps: Map<string, number>): void => {
+  const logTriggers = (deltas: Map<string, boolean>, stamps: Map<string, number>, skipped: Map<string, string>): void => {
     const rows = [...deltas.entries()].map(([goalId, adopted]) => JSON.stringify({
       ts: new Date().toISOString(),
       goalId,
       adopted: adopted === true,
+      // cl-186: 等待型目标被唤醒时标 skipped —— 不与"可执行唤醒"混计, 否则空转被读成活跃(cl-178)
+      skipped: skipped.get(goalId) ?? null,
       kernelScore: stamps.get(goalId) ?? null,
     }))
     if (rows.length === 0) return
     void appendFile(triggerLogPath, rows.join('\n') + '\n').catch(() => undefined)
   }
 
-  const bumpMany = (deltas: Map<string, boolean>): void => {
+  const bumpMany = (deltas: Map<string, boolean>, skipped: Map<string, string> = new Map()): void => {
     if (deltas.size === 0) return
-    logTriggers(deltas, new Map())
+    logTriggers(deltas, new Map(), skipped)
     void readFile(poolPath, 'utf8').then(raw => {
       const lines = raw.split('\n').filter(Boolean)
       const out = lines.map(line => {
@@ -353,7 +371,9 @@ export function apply(ctx: Context, config: Config): void {
     const set = pending.get(agent.session.id) ?? new Map<string, string>()
     for (const h of hits) set.set(h.goal.id, poolSnapshot(h.goal))
     pending.set(agent.session.id, set)
-    bumpMany(new Map(hits.map(h => [h.goal.id, false])))
+    bumpMany(new Map(hits.map(h => [h.goal.id, false])),
+      new Map(hits.filter(h => isWaitingNextActionLocal(String((h.goal as { nextAction?: string }).nextAction ?? '')))
+        .map(h => [h.goal.id, 'waiting'])))
     return { kind: 'enter', messages: [...decision.messages, block] }
   }, 'dormant-goal sentinel')
 

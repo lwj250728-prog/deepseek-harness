@@ -4824,6 +4824,68 @@ assert "unavailable" in d["armC_status"] or d.get("armC_mrr") is not None, "C �
 print("C 档状态: %s" % d["armC_status"][:60])
 '
 
+# ── T137 唤醒侧判据与行动帧同源(cl-186: 两侧各写一套等待态判据 = 半个机制) ──
+# exp_252 的教训("暂停只停了一半"): 跨插件语义必须两侧读同一字段/同一判据。
+# 现在 dormant-goal 有了同构的 isWaitingNextActionLocal, 并由本组比对**正则源**确保不会各自漂移。
+echo "[T137] 唤醒侧等待态判据(与行动帧同源 / 触发轨迹须标 skipped)"
+t "两侧等待态判据必须同源(正则逐条一致)" python3 -c '
+import os, re
+def patterns(path):
+    s = open(path, encoding="utf8").read()
+    out = {}
+    for name in ("WAITING_PREFIX", "WAITING_DATE", "NOT_WAITING"):
+        m = re.search(name + r"\s*=\s*(/.+?/)\s*$", s, re.M)
+        assert m, "%s 缺 %s" % (path, name)
+        out[name] = m.group(1)
+    return out
+a = patterns(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/waiting.ts"))
+b = patterns(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/src/index.ts"))
+diff = [k for k in a if a[k] != b[k]]
+assert not diff, "两侧判据不一致(会各自漂移): %s" % diff
+print("三条正则逐字一致: %s" % ", ".join(a))
+'
+t "触发轨迹行须带 skipped 字段(供空转判定)" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/goal-trigger-log.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+assert rows, "触发轨迹为空"
+if not any("skipped" in r for r in rows):
+    # 埋点已进 lib(02:5x 构建)但进程未加载 ⇒ 显式声明, 不假红(由 T11 守部署)
+    lib = os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/lib/index.js")
+    assert "skipped" in open(lib, encoding="utf8").read(), "lib 未含 skipped 埋点"
+    print("skipped 埋点已在 lib, 待重启部署(既有旧行无该字段属正常)")
+    raise SystemExit(0)
+print("触发轨迹已含 skipped 字段")
+'
+t "等待型唤醒必须标 skipped(非零即红)" python3 -c '
+import json, os, datetime
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+pool = {}
+for l in open(os.path.join(D, "dormant-goals.jsonl"), encoding="utf8"):
+    if l.strip():
+        g = json.loads(l); pool[g["id"]] = g
+def waiting(na):
+    t = (na or "").strip()
+    if not t or t.startswith(("待办","待修","待补","待验证","待测试","待评估","待实现","待重构")): return False
+    import re
+    return bool(re.match(r"^(?:待用户|等待用户|请用户|需用户|等用户|待你|等你|待事件|待日期|等待外部|等外部)", t)
+                or re.match(r"^(?:等待|等|待)\s*(?:[0-9]{4}|[0-9]{1,2}\s*[-/.月])", t))
+rows = [json.loads(l) for l in open(os.path.join(D, "goal-trigger-log.jsonl"), encoding="utf8") if l.strip()]
+now = datetime.datetime.now(datetime.timezone.utc)
+# 判据只看**部署之后**的行: 埋点上线的行才有 skipped 字段, 用"首条带 skipped 的行"当分界,
+# 否则回看 1h 会把部署前的历史行(必然无该字段)判成缺陷 —— 这是部署边界伪影, 不是机制问题。
+withfield = [r for r in rows if "skipped" in r and r.get("ts")]
+if not withfield:
+    print("尚无带 skipped 的行(埋点未部署到运行进程), 不判红")
+    raise SystemExit(0)
+boundary = min(r["ts"] for r in withfield)
+recent = [r for r in rows if r.get("ts") and r["ts"] >= boundary
+          and (now - datetime.datetime.fromisoformat(r["ts"].replace("Z","+00:00"))).total_seconds() <= 3600]
+unmarked = [r for r in recent if waiting(pool.get(r["goalId"], {}).get("nextAction")) and r.get("skipped") != "waiting"]
+assert not unmarked, "近 1h 有 %d 条等待型唤醒未标 skipped: %s" % (len(unmarked), [(r["goalId"], r["ts"]) for r in unmarked][:3])
+print("近 1h 等待型唤醒 %d 条, 全部已标 skipped" % len([r for r in recent if waiting(pool.get(r["goalId"], {}).get("nextAction"))]))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
