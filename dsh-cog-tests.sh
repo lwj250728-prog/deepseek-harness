@@ -2630,32 +2630,40 @@ print("构建后决策 %d 条, 阶段分布 %s" % (len(rows), stages))
 
 # ── T92 采用率闸门效果见证 + 目标入池体检(cl-114 第1步 / tp-073,tp-074) ──
 echo "[T92] 闸门运行时效果(反思类帧必须被静默 / 漏斗单调) + 目标入池体检"
-t "闸门运行时效果: 已建立会话的反思类帧必须被静默" python3 -c '
-import json, os
+t "审计的 decision 必须与闸门配置模式一致" python3 -c '
+import json, os, re
 p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
-lib = os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js")
+src_path = os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/src/index.ts")
 assert os.path.exists(p), "retrieval-audit.jsonl 缺失(cl-114 第1步的产物)"
-ESTABLISHED = 20   # 与 cognitive-inject 的 establishedSessionTurns 默认一致
-cut = os.path.getmtime(lib) * 1000
-rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
-recent = [r for r in rows if (r.get("t") or 0) > cut]
-reflective = [r for r in recent if r.get("turnKind") == "reflective-frame"]
-# tp-076: 断言必须按"会话是否已建立"分档——旁路/子代理是 1 回合的新会话, 它们的
-# 反思帧按设计**应当**注入(实测采纳 ~17%, 是采纳数最大来源)。旧写法要求所有反思帧
-# 一律 skip, 会在第一个旁路帧注入时伪红。
-bad = [r for r in reflective
-       if (r.get("sessionTurns") or 0) >= ESTABLISHED and r.get("decision") == "inject"]
-assert not bad, "已建立会话的反思类帧未被静默: %s" % [(r.get("sessionTurns"), r.get("decision")) for r in bad[:2]]
-skipped = [r for r in reflective if r.get("stage") == "skipped-reflective-frame"]
-print("构建后审计 %d 条, 反思类 %d 条(跳过 %d), 其中新会话反思帧 %d 条(应注入)"
-      % (len(recent), len(reflective), len(skipped),
-         len([r for r in reflective if (r.get("sessionTurns") or 0) < ESTABLISHED])))
-'
-t "审计活性: 构建后至少出现 2 个不同 stage" python3 -c '
-import json, os
-p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+src = open(src_path, encoding="utf8").read()
+m = re.search(r"enableTurnGating: z\.boolean\(\)\.default\((true|false)\)", src)
+assert m, "未找到 enableTurnGating 默认值"
+enabled = m.group(1) == "true"
+ESTABLISHED = 20   # 与 establishedSessionTurns 默认一致
 lib = os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js")
-cut = os.path.getmtime(lib) * 1000
+build = os.path.getmtime(lib) * 1000   # 模式切换只在重启后生效 => 只判本次构建之后的记录
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+rows = [r for r in rows if (r.get("t") or 0) > build]
+if not rows:
+    print("本次构建后暂无审计记录, 空过"); raise SystemExit(0)
+reflective = [r for r in rows if r.get("turnKind") == "reflective-frame"]
+# cl-116 后断言必须**随配置模式**判定: 闸门关着时"反思帧被注入"是正确行为; 开着时
+# 已建立会话的反思帧必须 skip。写死一种模式, 就会在切换开关时伪红(tp-076 同类)。
+if not enabled:
+    bad = [r for r in reflective if r.get("decision") != "inject"]
+    assert not bad, "闸门已关闭, 但审计出现非 inject 决策: %s" % [(r.get("decision"), r.get("stage")) for r in bad[:2]]
+    print("闸门关闭模式: %d 条反思类决策均为 inject(含历史 skip 记录 %d 条)"
+          % (len(reflective), len([r for r in reflective if r.get("stage") == "skipped-reflective-frame"])))
+else:
+    bad = [r for r in reflective
+           if (r.get("sessionTurns") or 0) >= ESTABLISHED and r.get("decision") == "inject"]
+    assert not bad, "已建立会话的反思类帧未被静默: %s" % [(r.get("sessionTurns"), r.get("decision")) for r in bad[:2]]
+'
+t "审计活性: 最近 24h 至少出现 2 个不同 stage" python3 -c '
+import json, os, time
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+# 窗口取 24h 而非"构建后": 每次重启都会重置构建窗口 => 必然伪红(tp-076 的窗口教训)。
+cut = (time.time() - 24 * 3600) * 1000
 rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
 stages = {r.get("stage") for r in rows if (r.get("t") or 0) > cut}
 # 只验"审计在多个分支上都活着"; 不要求某个具体 stage 出现——below-gate/cooldown
