@@ -42,6 +42,26 @@ def session_log(session_id: str) -> str | None:
     return None
 
 
+
+
+def stream_lines(path: str):
+    """逐行产出解压后的日志行 —— 不把整份解压结果读进内存。
+
+    2026-09-10 21:03 事故: 会话日志 58MB → 解压 163MB, 原实现用
+    subprocess.run(capture_output=True) 一次读进内存, 单脚本峰值 **~1.04 GB**;
+    叠加 node 服务自身 1.4-1.7 GB(机器 3.6 GB), dsh-web 被内核 oom-kill。
+    观测工具不得把被观测对象打死 ⇒ 一律流式(cl-155)。
+    """
+    proc = subprocess.Popen(['zstd', '-dc', path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        for raw_line in proc.stdout:
+            yield raw_line.decode('utf8', 'replace')
+    finally:
+        try:
+            proc.stdout.close()
+        finally:
+            proc.wait(timeout=60)
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--since-ms', type=int, default=None)
@@ -57,12 +77,10 @@ def main() -> int:
     if log_path is None:
         print('缺会话日志: 无法核对文本命中', file=sys.stderr)
         return 1
-    raw = subprocess.run(['zstd', '-dc', log_path], capture_output=True, timeout=300).stdout
-    raw_text = raw.decode('utf8', 'replace')
     starts: dict[int, int] = {}
     texts: dict[int, list[str]] = collections.defaultdict(list)
     current: int | None = None
-    for line in raw_text.splitlines():
+    for line in stream_lines(log_path):
         if '"turn/start"' not in line and '"assistant/message"' not in line:
             continue
         try:

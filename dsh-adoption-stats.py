@@ -53,12 +53,31 @@ def session_log_path(session_id: str) -> str | None:
     return None
 
 
+def stream_lines(path: str):
+    """逐行产出解压后的日志行 —— 不把整个解压结果读进内存。
+
+    2026-09-10 21:03 实测事故: 本脚本原用 subprocess.run(capture_output=True) 读 zstd 输出,
+    单次运行峰值 RSS **1.04 GB**(会话日志 58MB → 解压 163MB, 加上 decode 副本);
+    而 ab-compare 一次要跑 4 遍本脚本、闸门每 30 分钟、观察每小时、套件每 6 小时都跑 ——
+    叠加 node 服务自身 1.7 GB RSS(3.6 GB 机器), 直接把 dsh-web 打成 oom-kill(systemd 记录 21:03:21)。
+    改为流式: 峰值降到每行级别。
+    """
+    proc = subprocess.Popen(['zstd', '-dc', path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        for raw_line in proc.stdout:                    # 逐行, 不缓冲整份
+            yield raw_line.decode('utf8', 'replace')
+    finally:
+        try:
+            proc.stdout.close()
+        finally:
+            proc.wait(timeout=60)
+
+
 def turn_classes(log_path: str) -> tuple[list[dict], list[int]]:
     """Turns (start/user/frame) and the sorted start times."""
-    raw = subprocess.run(['zstd', '-dc', log_path], capture_output=True, timeout=300).stdout
     turns: list[dict] = []
     current: dict | None = None
-    for line in raw.decode('utf8', 'replace').splitlines():
+    for line in stream_lines(log_path):
         if '"turn/start"' not in line and '"user/message"' not in line:
             continue
         try:
@@ -91,6 +110,17 @@ def main() -> int:
     parser.add_argument('--session-id', default=MAIN_SESSION)
     parser.add_argument('--json', action='store_true')
     args = parser.parse_args()
+
+    # 内存闸(cl-155): 本脚本是重活(解压+扫描会话日志)。宿主只有 3.6GB, 服务本身 ~1.7GB,
+    # 若不设闸, 它会和服务抢内存并把服务打成 oom-kill —— 观测工具不该杀死被观测对象。
+    try:
+        with open('/proc/meminfo', encoding='utf8') as _fh:
+            avail_kb = next(int(l.split()[1]) for l in _fh if l.startswith('MemAvailable'))
+    except Exception:
+        avail_kb = 10 ** 9
+    if avail_kb < 400 * 1024:
+        print('内存不足(可用 %d MB < 400 MB): 拒绝运行, 以免触发 OOM' % (avail_kb // 1024), file=sys.stderr)
+        return 3
 
     watermark = commit_epoch(SETTLEMENT_FIX_COMMIT)
     if watermark is None:
@@ -177,10 +207,9 @@ def main() -> int:
     mentioned_injected = []      # 回合: 文本提到注入项
     mentioned_background = []    # 回合: 文本提到非注入项
     if log_path2 is not None:
-        raw = subprocess.run(['zstd', '-dc', log_path2], capture_output=True, timeout=300).stdout
         cur_turn = None
         by_turn_text: dict[int, list[str]] = {}
-        for line in raw.decode('utf8', 'replace').splitlines():
+        for line in stream_lines(log_path2):
             if '"turn/start"' not in line and '"assistant/message"' not in line:
                 continue
             try:
@@ -197,7 +226,7 @@ def main() -> int:
                 if text:
                     by_turn_text.setdefault(cur_turn, []).append(text)
         turn_starts = {}
-        for line in raw.decode('utf8', 'replace').splitlines():
+        for line in stream_lines(log_path2):
             if '"turn/start"' not in line:
                 continue
             try:

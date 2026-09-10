@@ -49,10 +49,9 @@ def turn_tool_args(log_path: str) -> tuple[dict[int, str], list[tuple[int, int]]
     隐式采纳必须在**注入之后的那几个回合**里找行为证据。首版拿整个会话的工具参数求交,
     结果 95.9%(必然重叠——1160 个回合的工具调用覆盖了整条管线词汇), 是典型的量错对象。
     """
-    raw = subprocess.run(['zstd', '-dc', log_path], capture_output=True, timeout=300).stdout
     by_turn: dict[int, list[str]] = {}
     starts: dict[int, int] = {}
-    for line in raw.decode('utf8', 'replace').splitlines():
+    for line in stream_lines(log_path):
         if '"tool/call"' not in line and '"turn/start"' not in line:
             continue
         try:
@@ -86,6 +85,26 @@ def markers(text: str) -> set[str]:
         tokens.add(word.lower())
     return tokens
 
+
+
+
+def stream_lines(path: str):
+    """逐行产出解压后的日志行 —— 不把整份解压结果读进内存。
+
+    2026-09-10 21:03 事故: 会话日志 58MB → 解压 163MB, 原实现用
+    subprocess.run(capture_output=True) 一次读进内存, 单脚本峰值 **~1.04 GB**;
+    叠加 node 服务自身 1.4-1.7 GB(机器 3.6 GB), dsh-web 被内核 oom-kill。
+    观测工具不得把被观测对象打死 ⇒ 一律流式(cl-155)。
+    """
+    proc = subprocess.Popen(['zstd', '-dc', path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        for raw_line in proc.stdout:
+            yield raw_line.decode('utf8', 'replace')
+    finally:
+        try:
+            proc.stdout.close()
+        finally:
+            proc.wait(timeout=60)
 
 def main() -> int:
     parser = argparse.ArgumentParser()

@@ -46,6 +46,18 @@ def _load(path: str) -> dict | None:
         return None
 
 
+
+def _mem_available_mb() -> int:
+    """宿主可用内存(MB)。观测工具不得与被观测的服务抢内存到把服务打死(cl-155 OOM 事故)。"""
+    try:
+        with open('/proc/meminfo', encoding='utf8') as fh:
+            for line in fh:
+                if line.startswith('MemAvailable'):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return 10 ** 6
+
 def refresh() -> dict | None:
     run = subprocess.run([sys.executable, os.path.join(REPO, 'dsh-ab-compare.py'), '--quiet'],
                          capture_output=True, text=True, timeout=600)
@@ -73,6 +85,9 @@ def main() -> int:
     # 测试必须能把痕迹写到自己的临时文件: 合成用例写进生产日志 = 制造假痕迹
     # (实测踩过: 两条合成 ARMED 行混进 adoption-gate.log, 读日志的人会以为闸门真的武装了)。
     log_path = _arg('--log', LOG)
+    if _mem_available_mb() < 400:
+        print('内存不足(<400MB): 拒绝运行以免触发 OOM', file=sys.stderr)
+        return 3
     payload = refresh() if ab_path == AB else _load(ab_path)
     if payload is None:
         line = '缺判据 origin=%s: ab-compare 不可用, 闸门未检查' % os.environ.get('DSH_RUN_ORIGIN', 'manual')

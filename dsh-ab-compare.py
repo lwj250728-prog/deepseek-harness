@@ -34,6 +34,18 @@ SETTLEMENT_FIX_COMMIT = '8ed52e7'
 ADOPTION_SCRIPT = os.path.join(REPO, 'dsh-adoption-stats.py')
 
 
+
+def _mem_available_mb() -> int:
+    """宿主可用内存(MB)。观测工具不得与被观测的服务抢内存到把服务打死(cl-155 OOM 事故)。"""
+    try:
+        with open('/proc/meminfo', encoding='utf8') as fh:
+            for line in fh:
+                if line.startswith('MemAvailable'):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return 10 ** 6
+
 def commit_epoch(rev: str) -> int | None:
     import subprocess
     try:
@@ -332,6 +344,9 @@ def main() -> int:
     split_iso = split_iso or DEFAULT_SPLIT
     split_ms = int(datetime.datetime.fromisoformat(split_iso).timestamp() * 1000)
 
+    if _mem_available_mb() < 400:
+        print('内存不足(<400MB): 拒绝运行以免触发 OOM', file=sys.stderr)
+        return 3
     rows = load_rows()
     before = [r for r in rows if (r.get('t') or 0) < split_ms]
     after = [r for r in rows if (r.get('t') or 0) >= split_ms]
