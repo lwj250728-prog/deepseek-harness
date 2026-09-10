@@ -4227,6 +4227,68 @@ assert ok >= 3, "单写者日志样本不足(%d/4), 断言前提不成立" % ok
 print("%d/4 份单写者日志在册(其 mtime 判据正当)" % ok)
 '
 
+# ── T125 观测脚本不得打死宿主(OOM 防复发: 内存上界 / 内存闸开火 / 哨兵告警) ──
+# 事故: 2026-09-10 21:03 dsh-web 被内核 oom-kill —— 根因不是产品代码, 而是**我的观测脚本**
+# 把 58MB 会话日志解压成 163MB 后整份读进内存(单脚本峰值 1036MB), 叠加 node 服务 1.4-1.7GB
+# 与只有 3.6GB 的宿主。故本组断言守的是:**观测工具的内存上界**与"宁可拒跑也不打死宿主"的闸。
+echo "[T125] 观测脚本内存上界(峰值上限 / 内存闸开火 / 哨兵告警可开火)"
+t "采纳统计脚本峰值内存须有上界" python3 -c '
+import os, re, subprocess, sys
+# 实测口径: /usr/bin/time -v 的 Maximum resident set size。事故时该值为 1036MB, 修后 20MB。
+r = subprocess.run(["/usr/bin/time", "-v", sys.executable,
+                    os.path.expanduser("~/dsh-fork/dsh-adoption-stats.py"),
+                    "--since", "2026-09-10T14:07:00", "--json"],
+                   capture_output=True, text=True, timeout=600)
+m = re.search(r"Maximum resident set size \(kbytes\): (\d+)", r.stderr)
+assert m, "拿不到峰值内存读数(命令输出异常): %s" % r.stderr[-200:]
+peak_mb = int(m.group(1)) / 1024
+assert peak_mb < 200, "峰值 %.0fMB 超过 200MB 上界 —— 有重新引入整份缓冲的风险(事故值 1036MB)" % peak_mb
+print("峰值 %.0fMB (上界 200MB)" % peak_mb)
+'
+t "内存不足时脚本必须拒跑而非硬上" python3 -c '
+import os, subprocess, sys, tempfile
+fake = "/tmp/t125-meminfo"
+open(fake, "w", encoding="utf8").write(
+    "MemTotal:        3659000 kB\nMemAvailable:     102400 kB\nSwapTotal:        1987000 kB\nSwapFree:         1000000 kB\n")
+env = dict(os.environ, DSH_MEMINFO_PATH=fake)
+r = subprocess.run([sys.executable, os.path.expanduser("~/dsh-fork/dsh-adoption-stats.py"),
+                    "--since", "2026-09-10T14:07:00", "--json"],
+                   capture_output=True, text=True, timeout=300, env=env)
+assert r.returncode == 3, "低内存时退出码应为 3, 实为 %s" % r.returncode
+assert "拒绝运行" in (r.stderr or ""), "低内存退出但未说明原因: %s" % (r.stderr or "")[:120]
+assert not r.stdout.strip(), "拒跑时仍产出了读数(不该有输出)"
+print("低内存拒跑(退出码 3)且无产出")
+'
+t "内存哨兵必须在低内存时告警" python3 -c '
+import json, os, subprocess, sys
+fake = "/tmp/t125-meminfo"
+assert os.path.exists(fake), "缺合成 meminfo"
+env = dict(os.environ, DSH_MEMINFO_PATH=fake)
+r = subprocess.run([sys.executable, os.path.expanduser("~/dsh-fork/dsh-memory-watch.py"), "--json"],
+                   capture_output=True, text=True, timeout=300, env=env)
+assert r.returncode == 2, "低内存时哨兵退出码应为 2, 实为 %s" % r.returncode
+line = [l for l in r.stdout.splitlines() if l.startswith("{")][-1]
+rec = json.loads(line)
+assert rec["alert"] is True, "哨兵未告警: %s" % rec
+assert rec["memAvailableMB"] < 400, "读到的可用内存不符: %s" % rec["memAvailableMB"]
+print("哨兵告警开火(可用 %sMB)" % rec["memAvailableMB"])
+'
+t "内存记录字段完整且排程带 origin" python3 -c '
+import json, os, subprocess
+log = os.path.expanduser("~/.dsh/cognitive-pipeline/memory-watch.jsonl")
+assert os.path.exists(log), "内存哨兵记录不存在"
+recs = [json.loads(l) for l in open(log, encoding="utf8") if l.strip()]
+assert recs, "记录为空 —— 断言前提不成立"
+last = recs[-1]
+for key in ("ts", "memAvailableMB", "swapUsedMB", "serviceRssMB", "heavyScriptsRunning", "alert", "origin"):
+    assert key in last, "内存记录缺字段: %s" % key
+out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30).stdout
+hit = [l for l in out.splitlines() if "dsh-memory-watch.py" in l]
+assert hit, "内存哨兵未挂排程"
+assert any("DSH_RUN_ORIGIN=cron" in l for l in hit), "哨兵排程缺 origin 标记"
+print("内存记录 %d 条, 字段完整, 排程在册" % len(recs))
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──

@@ -34,7 +34,7 @@ WATCH_SCRIPTS = ('dsh-adoption-stats.py', 'dsh-ab-compare.py', 'dsh-adoption-obs
 def meminfo() -> dict:
     out = {}
     try:
-        with open('/proc/meminfo', encoding='utf8') as fh:
+        with open(os.environ.get('DSH_MEMINFO_PATH', '/proc/meminfo'), encoding='utf8') as fh:
             for line in fh:
                 parts = line.split()
                 if len(parts) >= 2 and parts[0].rstrip(':') in ('MemTotal', 'MemAvailable', 'SwapTotal', 'SwapFree'):

@@ -50,7 +50,7 @@ def _load(path: str) -> dict | None:
 def _mem_available_mb() -> int:
     """宿主可用内存(MB)。观测工具不得与被观测的服务抢内存到把服务打死(cl-155 OOM 事故)。"""
     try:
-        with open('/proc/meminfo', encoding='utf8') as fh:
+        with open(os.environ.get('DSH_MEMINFO_PATH', '/proc/meminfo'), encoding='utf8') as fh:
             for line in fh:
                 if line.startswith('MemAvailable'):
                     return int(line.split()[1]) // 1024

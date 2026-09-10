@@ -114,7 +114,7 @@ def main() -> int:
     # 内存闸(cl-155): 本脚本是重活(解压+扫描会话日志)。宿主只有 3.6GB, 服务本身 ~1.7GB,
     # 若不设闸, 它会和服务抢内存并把服务打成 oom-kill —— 观测工具不该杀死被观测对象。
     try:
-        with open('/proc/meminfo', encoding='utf8') as _fh:
+        with open(os.environ.get('DSH_MEMINFO_PATH', '/proc/meminfo'), encoding='utf8') as _fh:
             avail_kb = next(int(l.split()[1]) for l in _fh if l.startswith('MemAvailable'))
     except Exception:
         avail_kb = 10 ** 9
