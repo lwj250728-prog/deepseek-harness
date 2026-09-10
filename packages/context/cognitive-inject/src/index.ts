@@ -399,7 +399,8 @@ async function retrieve(
   novelty?: (expId: string) => number,
   noveltyMargin = 0,
 ): Promise<{ hits: readonly RankedHit[], rotated: boolean, rawHits: number,
-  topHits: readonly number[], textChars: number }> {
+  topHits: readonly number[], textChars: number,
+  preTop: readonly { expId: string, similarity: number }[] }> {
   const vector = actionVector(situation, [])
   const situationVec = situationVector(situation)
   const embedder = service.embedder
@@ -446,7 +447,11 @@ async function retrieve(
   const baseline = noveltyMargin > 0 ? coverViewpoints(hits, topK) : covered
   const rotated = covered.length !== baseline.length
     || covered.some(hit => !baseline.some(base => base.expId === hit.expId))
-  return { hits: covered, rotated, rawHits, topHits, textChars: textChars(covered) }
+  // cl-200(测量侧, 不改行为): 审计此前只落 coverViewpoints **之后**的候选(恒为 2),
+  // 于是离线影子对照的可排序集只有 11(<30), 判据无法裁决。这里额外落**截断前**的 top-5
+  // (只记录, 不改变注入什么): 排名对照需要的是"有多少条过阈可选", 而不是"最终注入了哪条"。
+  const preTop = hits.slice(0, 5).map(hit => ({ expId: hit.expId, similarity: Number(hit.similarity.toFixed(4)) }))
+  return { hits: covered, rotated, rawHits, topHits, textChars: textChars(covered), preTop }
 }
 
 /**
@@ -866,7 +871,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (record.sessionId !== agent.session.id) continue
       for (const expId of record.expIds) sessionCounts.set(expId, (sessionCounts.get(expId) ?? 0) + 1)
     }
-    const { hits, rotated, rawHits, topHits, textChars } = await retrieve(ctx.cognitivePipeline, situation, threshold, topK,
+    const { hits, rotated, rawHits, topHits, textChars, preTop } = await retrieve(ctx.cognitivePipeline, situation, threshold, topK,
       expId => sessionCounts.get(expId) ?? 0, resolved.noveltyMargin)
     if (hits.length === 0) {
       audit({ stage: 'no-candidates', threshold, rotated, rawHits })
@@ -947,6 +952,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       // 2026-09-11 01:5x (cl-183): 补**候选级得分**, 使"三档排序离线对照"可重建同一候选集——
       // 此前审计只落 topHits(裸相似度)与最终 expIds, 没有候选身份与各项得分, 影子对照无从做起。
       candidateScores: cooled.map(hit => ({ expId: hit.expId, similarity: hit.similarity })),
+      // cl-200: 截断前的候选清单(只记录不改变注入) —— 影子对照的可排序集靠它才够样本
+      preTop,
         triggerScore: verdict.score, matched: verdict.matched })
       return {
         kind: 'enter',
@@ -1009,6 +1016,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       // 2026-09-11 01:5x (cl-183): 补**候选级得分**, 使"三档排序离线对照"可重建同一候选集——
       // 此前审计只落 topHits(裸相似度)与最终 expIds, 没有候选身份与各项得分, 影子对照无从做起。
       candidateScores: cooled.map(hit => ({ expId: hit.expId, similarity: hit.similarity })),
+      // cl-200: 截断前的候选清单(只记录不改变注入) —— 影子对照的可排序集靠它才够样本
+      preTop,
       triggerScore: verdict.score, matched: verdict.matched })
     return {
       kind: 'enter',

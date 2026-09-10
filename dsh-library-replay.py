@@ -61,7 +61,12 @@ def main() -> int:
         if not line.strip():
             continue
         r = json.loads(line)
-        if r.get('stage') == 'injected' and r.get('candidateScores'):
+        if r.get('stage') != 'injected':
+            continue
+        # cl-200: 优先用**截断前**的候选清单(preTop, 部署后才有); 旧行回退到 candidateScores。
+        cands = r.get('preTop') or r.get('candidateScores')
+        if cands:
+            r['candidateScores'] = cands
             records.append(r)
 
     def mrr(arm: str) -> tuple[float | None, float | None]:

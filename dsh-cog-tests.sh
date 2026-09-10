@@ -5241,6 +5241,34 @@ assert re.search(r"at\.getTime\(\)\s*<=\s*now\.getTime\(\)", src), "缺少\"已�
 print("lib 含时刻解析 + 到点比较")
 '
 t "部署后 skipped:waiting 的唤醒须逐条复核(已到点仍跳过即红)" python3 /home/ubuntu/dsh-fork/dsh-waiting-expiry-lint.py
+# ── T147 影子对照的候选清单必须够"可排序"(cl-200) ──
+# 起因: 审计只落 coverViewpoints 之后的候选(hits.length 恒为 2), 离线对照的可排序集只有 11(<30),
+# 预登记判据因此无法裁决; 而 MRR 只对"候选数>=2 的集"有意义。修法(测量侧不改行为): 审计额外落
+# **截断前** top-5(preTop)。本组守两件事: ①已部署 lib 里有这个埋点; ②部署后的审计行真带 preTop。
+echo "[T147] 影子对照可排序样本(埋点在 lib / 部署后审计须带 preTop)"
+t "已部署 lib 须含截断前候选清单埋点(preTop)" python3 -c '
+import os
+lib = os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js")
+src = open(lib, encoding="utf8").read()
+assert "preTop" in src, "lib 里没有 preTop 埋点(未重建/未部署)"
+print("lib 含 preTop 埋点")
+'
+t "部署后审计须真带 preTop 且可排序集在长" python3 -c '
+import json, os
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+lib = os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js")
+after = os.path.getmtime(lib) * 1000
+rows = [json.loads(l) for l in open(D + "/retrieval-audit.jsonl", encoding="utf8") if l.strip()]
+post = [r for r in rows if (r.get("t") or 0) > after]
+injected = [r for r in post if r.get("stage") == "injected"]
+if len(injected) < 3:
+    print("[部署边界] 部署后 injected 审计 %d 条(<3), 本帧不判" % len(injected))
+    raise SystemExit(0)
+withpre = [r for r in injected if r.get("preTop")]
+assert withpre, "部署后没有任何一条带 preTop —— 埋点没生效"
+multi = [r for r in withpre if len(r["preTop"]) >= 2]
+print("部署后 injected %d 条, 带 preTop %d 条, 其中可排序(>=2 候选) %d 条" % (len(injected), len(withpre), len(multi)))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
