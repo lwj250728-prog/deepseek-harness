@@ -5000,7 +5000,7 @@ else:
     print("尚无裁决行(接线后 " + str(round(grace / 60.0, 1)) + " 分钟), 在 24h 宽限内")
 '
 
-# ── T140 追加式账本的写侧不变量(cl-190: 新行漏字段 = 删字段) ──
+# ── T140 追加式账本的写侧不变量(cl-191: 新行漏字段 = 删字段) ──
 # 起因: 04:0x 我自己补写 3 行(cl-175/cl-189/cl-test-…)都丢掉了前序行的 reviewBy, 直接让"非终态项
 # 均有处置位"转红。cl-041 讲的是读侧要带 last-wins 语义, 这里是写侧同型病: last-wins 之下,
 # 新行没写的字段就是被删掉的字段。修法不是"记得写全", 而是唯一追加入口 dsh-ledger-append.py(继承+覆盖)。
@@ -5026,6 +5026,44 @@ for k, v in by.items():
     if miss: bad.append(k + ":" + ",".join(miss))
 assert not bad, "最新行丢掉了前序行的处置位(last-wins 之下等于删字段): " + repr(bad[:5])
 print("非终态 " + str(sum(1 for v in by.values() if v[-1].get("status") not in TERMINAL)) + " 项均未丢处置位")
+'
+# ── T142 部署意图须有排程载体(cl-189/tp-120) ──
+# 起因: 同一个部署被我临时手排秒数、连续改期 3 次, 每次理由都是"重启会掐断进行中的回合"——重启是机制侧
+# 动作却由我手排, 于是"部署"永远排在"把这一轮做完"之后。T11 只守"lib 早于服务启动"这个症状: 它红了也没人
+# 在等, 改期本身不留痕。判据的关键选择: **账本项不算载体**(它只是意图的记录, 不是"会自己发生"的东西)——
+# tp-120 原计划的 (a) 单元 或 (b) 账本项 里 (b) 过弱, 合成实测显示当晚一直开着的 cl-189 就足以让判据永不报警。
+echo "[T142] 部署意图载体(读数齐全 / 有意图须有排程载体 / 判据须分得开强弱)"
+t "部署意图检测器须可运行且读数齐全" python3 -c '
+import json, os, subprocess, time
+out = "/tmp/t142-state.json"
+r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-deploy-intent.py", "--state", out],
+                   capture_output=True, text=True, timeout=120)
+assert r.returncode in (0, 1, 2), "检测器非预期退出 %d: %s" % (r.returncode, r.stderr[-120:])
+s = json.load(open(out, encoding="utf8"))
+for k in ("ts", "pending", "verdict", "libTs", "serviceStartTs"):
+    assert k in s, "状态缺字段 " + k
+assert s["libTs"] and s["serviceStartTs"], "lib/服务时间戳为空(读数失败不得按通过处理)"
+assert time.time() - os.path.getmtime(out) < 300, "状态文件不新鲜"
+print("verdict=%s pending=%s drift=%ds" % (s["verdict"], s["pending"], s["driftSeconds"]))
+'
+t "有部署意图时必须真有排程载体(账本项不算载体)" python3 -c '
+import json, os, subprocess
+out = "/tmp/t142-state2.json"
+subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-deploy-intent.py", "--state", out],
+               capture_output=True, text=True, timeout=120)
+s = json.load(open(out, encoding="utf8"))
+if not s["pending"]:
+    assert s["verdict"] == "no-intent", "无意图却给出别的判定: " + str(s["verdict"])
+    print("当前无待部署意图(lib 不新于服务启动), 但两个读数有效")
+else:
+    assert s["scheduledCarriers"], "有部署意图却无排程载体: 部署会永远排在把这一轮做完之后"
+    print("有意图, 排程载体 %d 个" % len(s["scheduledCarriers"]))
+'
+t "判据须分得开有载体/无载体(探针在现场开火)" python3 -c '
+import subprocess
+r = subprocess.run(["bash", "/home/ubuntu/dsh-fork/dsh-guard-t142-probe.sh"], capture_output=True, text=True, timeout=180)
+assert r.returncode == 1, "开火探针未按预期开火(exit=%d): %s" % (r.returncode, r.stderr[-140:])
+print("探针开火: " + r.stderr.strip().splitlines()[-1][:90])
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。

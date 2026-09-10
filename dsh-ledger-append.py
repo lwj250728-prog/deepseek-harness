@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""dsh-ledger-append.py — 言行账本的唯一追加入口(cl-190)
+"""dsh-ledger-append.py — 言行账本的唯一追加入口(cl-191)
 
 为什么需要它：账本是**追加式**的、消费方按 **last-wins** 读最后一行 ⇒ 新行漏写某个字段，
 等价于把那个字段删掉。实测 2026-09-11 04:0x：我自己补写的 3 行(cl-175 / cl-189 /
@@ -67,7 +67,7 @@ def main():
     row.update(patch)
     row["ts"] = now
 
-    # 写侧自检: 非终态行必须有处置位(cl-190 的直接后果)
+    # 写侧自检: 非终态行必须有处置位(cl-191 的直接后果)
     terminal = {"done", "retired", "closed"}
     disp = ("reviewBy", "disposition", "unblockPlan", "nextAction", "blockedReason")
     if row.get("status") not in terminal and not any(row.get(f) for f in disp):
