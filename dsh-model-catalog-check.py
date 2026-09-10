@@ -42,6 +42,18 @@ def api_key() -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def profile_default_model() -> str | None:
+    """The profile's configured model — the fallback target when a wake can't
+    reuse the session model (cl-129: it turned out to be delisted too)."""
+    if not os.path.exists(PROFILE):
+        return None
+    for line in open(PROFILE, encoding='utf8'):
+        stripped = line.strip()
+        if stripped.startswith('model:'):
+            return stripped.split(':', 1)[1].strip()
+    return None
+
+
 def model_in_use() -> str | None:
     """Last model the patrol reported as available (the live carrier model)."""
     if os.path.exists(HEARTBEAT):
@@ -75,12 +87,14 @@ def main() -> int:
     args = parser.parse_args()
 
     in_use = model_in_use()
+    default_model = profile_default_model()
     key = api_key()
     result: dict = {
         'checkedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
         'checkedAtLocal': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'endpoint': ENDPOINT,
         'modelInUse': in_use,
+        'profileDefault': default_model,
         'catalog': None,
         'missingFromCatalog': None,
         'verdict': 'unknown',
@@ -96,7 +110,14 @@ def main() -> int:
             ids = [entry.get('id') for entry in payload.get('data', []) if isinstance(entry, dict)]
             result['catalog'] = ids
             result['missingFromCatalog'] = in_use not in ids
-            result['verdict'] = 'missing' if in_use not in ids else 'present'
+            result['defaultMissingFromCatalog'] = (default_model not in ids) if default_model else None
+            # 回退目标也在目录里才算"换模路径可用"; 只查在用模型会漏掉"回退也下架"(cl-129)。
+            if in_use not in ids and default_model is not None and default_model not in ids:
+                result['verdict'] = 'in-use-and-default-missing'
+            elif in_use not in ids:
+                result['verdict'] = 'missing'
+            else:
+                result['verdict'] = 'present'
         except Exception as error:  # network/credential failure is "unknown", never a silent pass
             result['verdict'] = 'unknown'
             result['reason'] = f'{type(error).__name__}: {str(error)[:160]}'
@@ -104,12 +125,12 @@ def main() -> int:
     with open(OUT, 'w', encoding='utf8') as handle:
         json.dump(result, handle, ensure_ascii=False, indent=2)
     if not args.quiet:
-        print('在用模型 %s | 实时目录 %s | 判定 %s'
-              % (result['modelInUse'], result['catalog'], result['verdict']))
+        print('在用模型 %s | profile 默认 %s | 实时目录 %s | 判定 %s'
+              % (result['modelInUse'], result.get('profileDefault'), result['catalog'], result['verdict']))
         if result['verdict'] == 'missing':
             print('差异: 在用模型已不在供应商目录中(巡检因真相源是硬编码清单而报 model-ok)——见 cl-105',
                   file=sys.stderr)
-    return 1 if result['verdict'] == 'missing' else 0
+    return 1 if str(result['verdict']).endswith('missing') else 0
 
 
 if __name__ == '__main__':

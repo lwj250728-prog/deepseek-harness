@@ -2489,7 +2489,8 @@ p = os.path.expanduser(\"~/.dsh/cognitive-pipeline/model-catalog.json\")
 assert os.path.exists(p), \"model-catalog.json 缺失\"
 d = json.load(open(p, encoding=\"utf8\"))
 assert time.time() - os.path.getmtime(p) < 300, \"目录检查结果陈旧\"
-assert d.get(\"verdict\") in (\"present\", \"missing\", \"unknown\"), d.get(\"verdict\")
+# cl-129: verdict 新增 in-use-and-default-missing(在用与 profile 默认同时下架)
+assert d.get(\"verdict\") in (\"present\", \"missing\", \"unknown\", \"in-use-and-default-missing\"), d.get(\"verdict\")
 assert d.get(\"modelInUse\"), \"未记录在用模型\"
 "
 '
@@ -3181,6 +3182,28 @@ if d["textHits"] < d["minSample"]:
     print("样本不足(%d < %d), 空过可见" % (d["textHits"], d["minSample"])); raise SystemExit(0)
 assert d["textHitsBookedFalse"] == 0, "文本命中却 book 为未引用 %d 条: %s" % (
     d["textHitsBookedFalse"], d.get("misses"))
+'
+
+# ── T109 换模路径可用性(cl-129: 在用模型与 profile 默认**同时**下架) ──
+echo "[T109] 换模路径可用性(在用/默认双检 + 双缺必须显式)"
+t "模型巡检同时报告 profile 默认回退" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/model-catalog.json")
+d = json.load(open(p, encoding="utf8"))
+for k in ("modelInUse", "profileDefault", "defaultMissingFromCatalog", "verdict"):
+    assert k in d, "巡检缺字段 %s" % k
+print("在用 %s | 默认 %s | 判定 %s" % (d["modelInUse"], d.get("profileDefault"), d["verdict"]))
+'
+t "在用与默认双缺时必须显式判为换模路径不可用" python3 -c '
+import json, os
+d = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/model-catalog.json"), encoding="utf8"))
+if d.get("missingFromCatalog") and d.get("defaultMissingFromCatalog"):
+    # cl-129 实测: 目录仅剩 [deepseek-flash, deepseek-v4-pro], 连 profile 默认
+    # deepseek-v4-flash 都下架 => "回退到默认"这条路也不通, 必须显式标出。
+    assert d["verdict"] == "in-use-and-default-missing", "双缺却未标出(verdict=%s)" % d["verdict"]
+    print("双缺已显式标记: 回退到 profile 默认同样不可行")
+else:
+    print("非双缺状态, 空过")
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
