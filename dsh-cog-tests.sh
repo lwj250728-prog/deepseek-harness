@@ -3797,7 +3797,7 @@ cron_lines = [l for l in open(log, encoding="utf8") if "origin=cron" in l]
 if cron_lines:
     import datetime
     stamp = sorted(l[:16] for l in cron_lines)[-1]
-    age = time.time() - datetime.datetime.strptime(stamp, "%Y-%M-%dT%H:%M").timestamp()
+    age = time.time() - datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M").timestamp()
     assert age < 3 * 3600, "转化扫描最近的 cron 记录已 %.1f 小时未更新" % (age / 3600)
     print("cron 记录新鲜(%.0f 分钟前)" % (age / 60))
 else:
@@ -3881,7 +3881,7 @@ cron_lines = [l for l in open(log, encoding="utf8") if "origin=cron" in l]
 if cron_lines:
     import datetime
     stamp = sorted(l[:16] for l in cron_lines)[-1]
-    age = time.time() - datetime.datetime.strptime(stamp, "%Y-%M-%dT%H:%M").timestamp()
+    age = time.time() - datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M").timestamp()
     assert age < 3 * 3600, "同改守门最近的 cron 记录已 %.1f 小时未更新" % (age / 3600)
     print("cron 记录新鲜(%.0f 分钟前)" % (age / 60))
 else:
@@ -3968,7 +3968,7 @@ cron_lines = [l for l in open(log, encoding="utf8") if "origin=cron" in l]
 if cron_lines:
     import datetime
     stamp = sorted(l[:16] for l in cron_lines)[-1]
-    age = time.time() - datetime.datetime.strptime(stamp, "%Y-%M-%dT%H:%M").timestamp()
+    age = time.time() - datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M").timestamp()
     assert age < 8 * 3600, "开火核验最近的 cron 记录已 %.1f 小时未更新" % (age / 3600)
     print("cron 记录新鲜(%.0f 分钟前)" % (age / 60))
 else:
@@ -4169,6 +4169,62 @@ for fname, key in FILES.items():
     checked += 1
 assert checked >= 2, "可比对的豁免清单不足, 断言前提不成立"
 print("%d 份豁免清单版本可比" % checked)
+'
+
+# ── T124 判据族规则: "日志多写者 ⇒ 新鲜度判据必须辨来源"(cl-152 的下一步, 已可判定) ──
+# 起因: 我连续两次发现"同类判据只改了一部分"(先 3/5 处, 再 2 处)。原想建"同类清单", 但实测
+# 文本启发式分不出来(它把"心跳新鲜"误判成非新鲜度型) —— 说明族不能靠猜, 要靠**可判定的性质**。
+# 判定规则(本轮想清楚的那条): 新鲜度判据是否需要辨来源, 取决于**该日志有几个写者**:
+#   · 多写者(套件/手工也会跑同一脚本写同一日志) ⇒ mtime 会被非排程运行刷新 ⇒ 判据必须认 origin;
+#   · 单写者(只有 cron 写) ⇒ mtime 足够, 强行要求 origin 反而是给它加无谓负担。
+# 这也是为什么 lever-health/model-catalog/.script-lint/freeze-wiki 这四条老判据用 mtime 是对的。
+echo "[T124] 判据族规则(多写者日志须辨来源 / 单写者容许 mtime / 人工清单非空)"
+t "多写者日志的新鲜度判据必须判 origin" python3 -c '
+import json, os, re
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+suite = open(os.path.expanduser("~/dsh-fork/dsh-cog-tests.sh"), encoding="utf8").read()
+inv = json.load(open(os.path.join(D, "mechanism-inventory.json"), encoding="utf8"))
+multi, problems = [], []
+for e in inv["mechanisms"]:
+    script = os.path.basename(e["script"])
+    # 写者计数: 该脚本在套件里被调用了几次(排除它自己那条新鲜度断言所在行)
+    call_sites = len(re.findall(re.escape(script), suite))
+    if call_sites < 2:
+        continue
+    for rec in e.get("records") or []:
+        if not rec.endswith(".log"):
+            continue                     # 只对日志适用; jsonl 是数据存储, 没有"新鲜度判据"一说
+        base = os.path.basename(rec)
+        # 判据可能指向默认日志, 也可能指向 .cron.log 变体(归属分离后), 两者都算数。
+        cand = [base, base[:-4] + ".cron.log"]
+        seen, ok = False, False
+        for name in cand:
+            idx = suite.find(name)
+            if idx < 0:
+                continue
+            seen = True
+            if "origin" in suite[max(0, idx - 1500):idx + 1500]:
+                ok = True
+        if seen and not ok:
+            problems.append("%s(%s) 是多写者日志, 但其新鲜度判据不看 origin" % (base, script))
+        elif ok:
+            multi.append(base)
+assert multi or problems, "既无多写者日志也无问题 —— 本断言前提不成立"
+assert not problems, "多写者日志仍用 mtime 判来源: %s" % problems
+print("%d 份多写者日志的判据均已辨来源" % len(multi))
+'
+t "单写者日志容许 mtime(须确实存在此类)" python3 -c '
+import os, time
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+# 老判据里的四条只有 cron 写: 明确承认它们用 mtime 是对的, 防止下一步"一刀切全改 origin"的过度修正。
+single = ["lever-health.log", "model-catalog.log", ".script-lint.log", "freeze-wiki.log"]
+ok = 0
+for name in single:
+    p = os.path.join(D, name)
+    if os.path.exists(p) and os.path.getsize(p) > 0:
+        ok += 1
+assert ok >= 3, "单写者日志样本不足(%d/4), 断言前提不成立" % ok
+print("%d/4 份单写者日志在册(其 mtime 判据正当)" % ok)
 '
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
