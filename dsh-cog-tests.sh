@@ -2807,6 +2807,31 @@ assert median > BASE_MIN, "间隔中位 %.1f 分钟未超过基础冷却, 退避
 print("间隔样本 %d, 中位 %.1f 分钟, 违规 0" % (len(gaps), median))
 '
 
+# ── T97 注入通道活性(防止"机制把整条通道静默"再次发生) ──
+echo "[T97] 注入通道活性(退避/闸门不得把通道关死)"
+t "通道活性: 有决策点却零注入 => 红" python3 -c '
+import json, os, time
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+assert os.path.exists(p), "retrieval-audit.jsonl 缺失(无法判定通道活性)"
+now = time.time() * 1000
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+# 实测事故(cl-118 6h 上限): 主会话 47 分钟零注入, 期间审计仍在记"被退避挡下",
+# 却没有任何断言盯着——通道被机制自己关死而无人察觉。这条不变式补上这个盲区。
+H2 = [r for r in rows if (r.get("t") or 0) > now - 2 * 3600 * 1000]
+H6 = [r for r in rows if (r.get("t") or 0) > now - 6 * 3600 * 1000]
+def count(rs, stage): return len([r for r in rs if r.get("stage") == stage])
+silent6 = count(H6, "injected") == 0 and len(H6) >= 3
+silent2 = count(H2, "cooldown") >= 2 and count(H2, "injected") == 0
+assert not silent6, "最近 6h 有 %d 个决策点却零注入: 通道可能被退避/闸门关死" % len(H6)
+assert not silent2, "最近 2h 连续 %d 次 cooldown 且零注入: 通道保活未生效" % count(H2, "cooldown")
+print("最近 2h: 决策 %d 注入 %d | 6h: 决策 %d 注入 %d"
+      % (len(H2), count(H2, "injected"), len(H6), count(H6, "injected")))
+'
+t "通道保活守卫已接线且可配" bash -c "
+grep -q 'admitLeastBackedOff' '$HOME/dsh-fork/packages/context/cognitive-inject/lib/index.js' &&
+grep -q 'backoffAdmitted' '$HOME/dsh-fork/packages/context/cognitive-inject/lib/index.js'
+"
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
