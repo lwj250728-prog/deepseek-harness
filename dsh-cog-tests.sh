@@ -6403,6 +6403,32 @@ r = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-wait-check-ref
 assert r.returncode == 3, "输出解析不了却没 fail-closed(exit %d) —— 这会让「测不出来」被当成「条件满足」" % r.returncode
 print("坏输出 ⇒ exit 3(不放行)")
 '
+# ── T176 被脚本引用的仓库文件必须存在(测试审视帧发现的"静默缺失") ──
+# 起因: `cognitive-patch.yml` 被 dsh-chat.sh / fix.sh / dsh-cog.sh 三个脚本以 `--patch <路径>` 引用, 却已从
+# 工作区消失(部署窗口的文件处理留下的), 而那三个脚本会直接失败 —— 没有任何判据在看这件事。判据: 凡在
+# 这些脚本里以 `-patch $REPO/<file>` 或 `<repo>/<file>` 形式出现的仓库文件, 必须真实存在。
+echo "[T176] 被脚本引用的仓库文件必须存在"
+t "脚本引用的仓库配置/脚本不得静默缺失" python3 -c '
+import os, re
+repo = os.path.expanduser("~/dsh-fork")
+suspects = set()
+for name in sorted(os.listdir(repo)):
+    if not (name.endswith(".sh") or name.endswith(".py")):
+        continue
+    path = os.path.join(repo, name)
+    try:
+        text = open(path, encoding="utf8", errors="ignore").read()
+    except Exception:
+        continue
+    # 形如 /home/ubuntu/dsh-fork/xxx.yml 或 $REPO/xxx.yml 或 ${REPO}/xxx
+    for m in re.finditer(r"(?:/home/ubuntu/dsh-fork|\$\{?REPO\}?)/([A-Za-z0-9_.-]+\.(?:yml|yaml|json|sh|py|md))", text):
+        suspects.add(m.group(1))
+# 占位名(用法示例里的 xxx.yml / foo.yml)不算引用 —— 否则判据会被文档噪声打红
+PLACEHOLDER = re.compile(r"^(xxx|foo|bar|example|your|some|path|file)\b", re.I)
+missing = sorted(f for f in suspects if not PLACEHOLDER.match(f) and not os.path.exists(os.path.join(repo, f)))
+assert not missing, "被脚本引用却不存在(脚本会直接失败): %s" % missing
+print("脚本引用的 %d 个仓库文件均存在" % len(suspects))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

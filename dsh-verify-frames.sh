@@ -20,11 +20,16 @@ LOG_V="$LOG" CUT_V="$CUTOFF" python3 - << 'PYEOF'
 import json, sys, datetime, re
 import os
 log, cutoff = os.environ["LOG_V"], int(os.environ["CUT_V"])
+# quiet-driver 的实质产出帧种类(2026-09-09 补齐 test-plan/test-review: 它们是
+# 推进驱动的产出帧, 漏掉会把"最近全是测试帧"误报成"机制停了")。
+FRAME_KINDS = ('direct-frame', 'candidate-hatch', 'action-frame', 'test-plan-frame', 'test-review-frame')
 rows = []
 try:
     for line in open(log, encoding='utf8'):
         d = json.loads(line)
-        if d.get('ts', 0) >= cutoff * 1000 and d.get('kind') in ('direct-frame', 'candidate-hatch', 'action-frame'):
+        # 2026-09-09: 白名单补 test-plan-frame / test-review-frame——它们同样是
+        # quiet-driver 的实质产出帧; 缺了它们会把"最近全是测试帧"误报成"窗口内无帧(机制停了)"。
+        if d.get('ts', 0) >= cutoff * 1000 and d.get('kind') in FRAME_KINDS:
             rows.append(d)
 except Exception as e:
     print(f"✗ 读日志失败: {e}"); sys.exit(2)
@@ -47,7 +52,7 @@ prev = None
 allrows = []
 for line in open(log, encoding='utf8'):
     d = json.loads(line)
-    if d.get('kind') in ('direct-frame', 'candidate-hatch', 'action-frame'):
+    if d.get('kind') in FRAME_KINDS:
         allrows.append(d.get('ts', 0))
 allrows.sort()
 for i in range(1, len(allrows)):

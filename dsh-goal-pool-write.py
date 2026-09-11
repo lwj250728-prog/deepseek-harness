@@ -91,8 +91,10 @@ def main() -> int:
         row[field] = int(cur.get(field) or 0) + 1
 
     new_stamp = now_iso()
-    row['lastActionAt'] = new_stamp
-    if 'lastProgressAt' in cur or args.next_action is not None:
+    if not row.get('lastActionAt') or row.get('lastActionAt') == cur.get('lastActionAt'):
+        row['lastActionAt'] = new_stamp
+    if ('lastProgressAt' in cur or args.next_action is not None) and \
+       (not row.get('lastProgressAt') or row.get('lastProgressAt') == cur.get('lastProgressAt')):
         row['lastProgressAt'] = new_stamp
 
     for field in ('lastActionAt', 'lastProgressAt'):
@@ -104,6 +106,16 @@ def main() -> int:
     if stamp_now and new_stamp < stamp_now and not args.allow_regress:
         print('拒绝: 新行时间戳 %s 早于当前行 %s' % (new_stamp, stamp_now), file=sys.stderr)
         return 2
+
+    # 复活守卫(内容级): 意图回退的常见形态不是"时间戳变旧", 而是**把已被取代的旧 nextAction 又写回来**
+    # (写者拿旧快照回写)。判据: 提出的 nextAction 若与任何**更早行**逐字相同、却与当前行不同 ⇒ 拒绝。
+    proposed = row.get('nextAction')
+    if isinstance(proposed, str) and proposed.strip() and proposed != cur.get('nextAction'):
+        older = {str(r.get('nextAction') or '') for r in rows[:-1] if str(r.get('id')) == args.id}
+        if proposed in older and not args.allow_regress:
+            print('拒绝: 该 nextAction 与更早的某行逐字相同(已经被取代过的旧意图, 复活它会让 last-wins 读到旧指令); '
+                  '确有理由请加 --allow-regress --reason', file=sys.stderr)
+            return 2
 
     if json.dumps(row, ensure_ascii=False, sort_keys=True) == json.dumps(cur, ensure_ascii=False, sort_keys=True):
         print('[goal-pool-write] %s: 无变化, 不追加(幂等)' % args.id)
