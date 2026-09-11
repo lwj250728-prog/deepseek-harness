@@ -7458,6 +7458,46 @@ assert d2["preregMismatch"] is True, "不符却没标 preregMismatch"
 assert d2["preregSuspect"] is True, "期望自身可疑却没标 preregSuspect(会默认裁决错)"
 print("顶满⇒%s / 不符且期望可疑⇒mismatch+suspect" % d1["verdict"])
 '
+# ── T193 干预条件门必须可满足且拒绝旧窗口残留(cl-265) ──
+# 起因: "到点判读干预"的时点在 24h 之后, 而行动帧只认条件不认日历 ⇒ 没挂门时驱动侧每轮重复催办(本次已第 2 次)。
+# 挂上门之后, 新的失败模式是**死门**(永不满足 ⇒ 该目标再也不会被提醒): 故必须证明它**可满足**, 且不会拿上一个窗口的
+# 判读残留冒充本次结果。附一次自证: 我第一版忘了 chmod +x, 池内体检判据当场抓到 `返回故障码 126`。
+echo "[T193] 干预门(可满足 / 窗口未到不放行 / 旧窗口残留不放行)"
+t "干预条件门须可满足且拒绝旧窗口残留" python3 -c '
+import json, os, subprocess, tempfile, datetime
+TZ = datetime.timezone(datetime.timedelta(hours=8)); now = datetime.datetime.now(TZ)
+def build(tmp, disable_ts, restore_ts=None, readout_start=None):
+    iv = []
+    if disable_ts:
+        iv.append({"ts": disable_ts.isoformat(), "event": "disable", "goal": "g-x", "plannedHours": 24,
+                   "thresholdsBefore": {"kernel": 0.6, "focus": 0.55},
+                   "thresholdsAfter": {"kernel": 1.01, "focus": 1.01}})
+    if restore_ts:
+        iv.append({"ts": restore_ts.isoformat(), "event": "restore", "goal": "g-x",
+                   "thresholdsAfter": {"kernel": 0.6, "focus": 0.55}})
+    open(os.path.join(tmp, "wake-interventions.jsonl"), "w", encoding="utf8").write(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in iv) + ("\n" if iv else ""))
+    ro = []
+    if readout_start:
+        ro.append({"ts": now.isoformat(), "target": "g-x", "startIso": readout_start.isoformat(),
+                   "endIso": now.isoformat(), "verdict": "no-effect"})
+    open(os.path.join(tmp, "wake-intervention-readout.jsonl"), "w", encoding="utf8").write(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in ro) + ("\n" if ro else ""))
+def run(tmp):
+    r = subprocess.run(["/home/ubuntu/dsh-fork/dsh-wait-check-intervention.py", "--target", "g-x"],
+                       capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=tmp), timeout=300)
+    return r.returncode
+def case(disable_ts, restore_ts=None, readout_start=None):
+    tmp = tempfile.mkdtemp(); build(tmp, disable_ts, restore_ts, readout_start); return run(tmp)
+assert case(None) == 1, "没有 disable 记录却放行"
+assert case(now - datetime.timedelta(hours=2)) == 1, "窗口进行中就放行"
+assert case(now - datetime.timedelta(hours=26), now - datetime.timedelta(hours=2)) == 1, "窗口结束但判读未出就放行"
+assert case(now - datetime.timedelta(hours=26), now - datetime.timedelta(hours=2),
+            now - datetime.timedelta(hours=26)) == 0, "窗口结束且本窗口判读已出却仍不放行(死门!)"
+assert case(now - datetime.timedelta(hours=26), now - datetime.timedelta(hours=2),
+            now - datetime.timedelta(hours=50)) == 1, "拿旧窗口的判读残留冒充本次结果"
+print("未开始/进行中/判读未出/旧残留 ⇒ 1; 本窗口判读已出 ⇒ 0(可满足, 非死门)")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
