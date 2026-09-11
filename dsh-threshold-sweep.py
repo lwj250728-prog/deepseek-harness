@@ -40,7 +40,8 @@ PREREG = ('R1 widen-gate: 可排序集占比 +>=10pp 且 A 档 MRR/top-1 不降 
           'R3 no-headroom: 占比不随门限变化 ⇒ 天花板不在门限上; '
           'R0 inconclusive: 审计未记阈下候选 ⇒ 本数据上不可判, 先补埋点; '
           'R-1 insufficient-post-instrumentation: 埋点后样本回合不足 ⇒ 只报数不出裁决; '
-          'R-2 insufficient-belowgate-capped: 阈下记录顶满上限 ⇒ 记录被截断, 需先抬高上限(2026-09-12: 上限 5→20→500, 因为前两次都被顶满)')
+          'R-2 insufficient-belowgate-capped: 阈下记录顶满上限 ⇒ 记录被截断, 需先抬高上限(2026-09-12: 上限 5→20→500, 因为前两次都被顶满); '
+          'R-3 insufficient-undeclared-era: 未声明时代起点 ⇒ 可能混采被截断的旧回合, 不得出真裁决')
 
 
 def load_replay():
@@ -92,14 +93,20 @@ def main() -> int:
         util = mod.utility_map()
         labels = mod.label_map(args.label)
         records = []
+        skipped_no_record = 0
         for line in open(mod.AUDIT, encoding='utf8'):
             if not line.strip():
                 continue
             r = json.loads(line)
             if r.get('stage') != 'injected':
                 continue
+            # 2026-09-12 06:3x (今天第四次同型修正): **有效总体必须写死在代码里** —— 候选记录有两个埋点时代
+            # (旧 candidateScores / 新 preTop), 而"无候选记录"的回合是埋点之前的旧时代(实测 111 个, 09-10 10:01→09-11 01:53)。
+            # 把"空 preTop"当 0 个候选、或把无记录回合算进分母, 都会把**记录缺口**读成**召回性质**(我连续两次这样误读)。
+            # 故: 候选清单 preTop 为空则回退 candidateScores(与 replay 同口径); 两者都无 ⇒ 该回合不计入总体, 并计数上报。
             cands = r.get('preTop') or r.get('candidateScores')
             if not cands:
+                skipped_no_record += 1
                 continue
             # cl-263: 把**阈下候选**(belowGate, 2026-09-12 03:5x 起由审计落盘)并进候选集 —— 门限扫描要问的
             # 正是"门限放到 t 时这些被丢掉的候选会不会回来"; 没有它们就只能如实报 inconclusive。
@@ -196,7 +203,8 @@ def main() -> int:
     if capped_rounds > 0:
         payload = {'ts': datetime.datetime.now().astimezone().isoformat(),
                    'label': args.label, 'currentGate': CURRENT_GATE, 'turns': len(records),
-                   'subGateDiagnostics': diag, 'roundsWithBelowGate': rounds_with_bg,
+                   'skippedNoCandidateRecord': skipped_no_record,
+               'subGateDiagnostics': diag, 'roundsWithBelowGate': rounds_with_bg,
                    'table': table, 'verdict': 'insufficient-belowgate-capped',
                    'reason': ('有 %d 轮记录的阈下候选顶满上限(%d) ⇒ 记录本身被截断, "阈下有多少候选"不可知, '
                               '扫门限会系统性低估; 需先把上限抬高并等新一轮数据(现上限已抬到 %d)'
@@ -268,6 +276,13 @@ def main() -> int:
             reason = '门限放松对可排序集占比没什么影响 ⇒ 天花板不在门限上, 转查候选召回端'
     # 2026-09-12 06:0x (tp-169): 裁决必须**消费**事先写死的期望(threshold-prereg.json) —— 否则预注册只是摆设,
     # 而"期望对不对"这条最便宜的校准检验被浪费。不符时**不直接采信裁决**, 要求先给样本代表性复核的处置位。
+    # 2026-09-12 06:3x **硬闸: 真裁决必须由调用方声明时代起点**. 采集方式(埋点/上限)变更过至少两次
+    # (上限 5 → 20 → 500), 那些回合的记录**天生被截断**; 工具无从知道边界在哪 ⇒ 未给 --post-since 时
+    # 不得出真裁决(实测: 不给边界时它照出了 no-headroom, 而样本里混着上限 20 时代被截断的回合)。
+    if not args.post_since and verdict in ('widen-gate', 'tradeoff-ceiling', 'no-headroom'):
+        verdict = 'insufficient-undeclared-era'
+        reason = ('未声明时代起点(--post-since) ⇒ 样本可能混入采集方式变更前(上限 5/20)被截断的回合, '
+                  '不得据此裁决; 请给出"当前上限生效时刻"再跑')
     prereg = None
     prereg_path = os.path.join(os.environ.get('DSH_COG_DIR') or D, 'threshold-prereg.json')
     try:
@@ -275,7 +290,10 @@ def main() -> int:
     except Exception:
         prereg = None
     expected = (prereg or {}).get('expectedVerdict')
-    mismatch = bool(expected) and expected != verdict
+    # 只有**真裁决**才与期望比对: 各种 insufficient-* 是"还没法判", 拿它去比对会刷出"不符⇒复核"的噪声提示
+    # (2026-09-12 06:3x 实测: 未声明时代时它照样报了"与裁决不符", 而那时根本没有任何结论)。
+    real_verdict = verdict in ('widen-gate', 'tradeoff-ceiling', 'no-headroom')
+    mismatch = bool(expected) and real_verdict and expected != verdict
     # 2026-09-12 06:1x: 期望**自身**可能是在被截断的样本上算的(threshold-prereg.json 里的
     # computedOnTruncatedSample) ⇒ 不符时不能默认"裁决错了", 要把这一层也说出来。
     prereg_suspect = mismatch and bool((prereg or {}).get('computedOnTruncatedSample'))
@@ -307,13 +325,13 @@ def main() -> int:
                  '%.3f' % row['armA_top1'] if row['armA_top1'] is not None else '-',
                  '%.3f' % row['armB_mrr'] if row['armB_mrr'] is not None else '-'))
     print('判读: %s —— %s' % (verdict, reason))
-    if expected:
+    if expected and real_verdict:
         print('预注册期望: %s %s' % (expected, '(**与裁决不符** ⇒ 先做样本代表性复核, 不得直接采信裁决)' if mismatch
                                      else '(与裁决一致)'))
         if prereg_suspect:
             print('  ⚠ 该期望自身是在**被截断的样本**上算的(%s) ⇒ 不符时优先复核期望, 而不是直接改判据'
                   % str((prereg or {}).get('truncationNote'))[:80])
-    elif (prereg or {}).get('expectation'):
+    elif real_verdict and (prereg or {}).get('expectation'):
         print('预注册期望(未含 expectedVerdict, 无法机械比对): %s' % str(prereg.get('expectation'))[:80])
     return 0
 

@@ -7283,6 +7283,43 @@ assert era_d["roundsWithBelowGate"] == 35, "时代内带埋点回合不对: " + 
 assert r3.returncode != 0, "边界在未来却照样出了裁决(拿全史凑数)"
 print("全史 55/35 ⇒ 时代后 35/35 ⇒ 未来边界明确拒绝(exit %d)" % r3.returncode)
 '
+t "未声明时代起点时不得出真裁决(否则会混采被截断的旧回合)" python3 -c '
+# 2026-09-12 06:3x 实测事故: 不给 --post-since 时工具照出了 no-headroom, 而样本里混着上限 20 时代**被截断**的回合
+# (采集方式变更过两次: 上限 5→20→500)。工具无从知道边界在哪 ⇒ 必须要求调用方声明时代, 否则只能报 insufficient。
+import json, os, subprocess, tempfile, datetime
+tmp = tempfile.mkdtemp(); ids = ["exp_%03d" % i for i in range(60)]
+open(os.path.join(tmp, "experiences.jsonl"), "w", encoding="utf8").write("\n".join(json.dumps(
+    {"expId": e, "sar": {"situation": "s", "action": "a", "outcome": "o",
+                         "outcomeUtility": {"materialGain": i % 10, "emotionalValence": i % 5}}},
+    ensure_ascii=False) for i, e in enumerate(ids)) + "\n")
+now = datetime.datetime.now().timestamp() * 1000
+rows = []
+for k in range(18):
+    rows.append({"stage": "injected", "t": now - 30 * 3600 * 1000 + k * 60000, "expIds": [ids[k]], "cited": False,
+                 "candidates": 2, "overThreshold": 1,
+                 "preTop": [{"expId": ids[k], "similarity": 0.6}, {"expId": ids[k + 1], "similarity": 0.55}]})
+for k in range(12):
+    rows.append({"stage": "injected", "t": now - (k + 1) * 600000, "expIds": [ids[k]], "cited": False,
+                 "candidates": 2, "overThreshold": 1,
+                 "preTop": [{"expId": ids[k], "similarity": 0.6}, {"expId": ids[k + 1], "similarity": 0.55}],
+                 "belowGate": [{"expId": ids[k + 2], "similarity": 0.45}, {"expId": ids[k + 3], "similarity": 0.35}]})
+open(os.path.join(tmp, "retrieval-audit.jsonl"), "w", encoding="utf8").write(
+    "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+json.dump({"ts": "2026-09-12T00:00:00+08:00", "table": [], "expectation": "沙箱",
+           "expectedVerdict": "no-headroom"},
+          open(os.path.join(tmp, "threshold-prereg.json"), "w", encoding="utf8"), ensure_ascii=False)
+def run(*extra):
+    r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json"] + list(extra),
+                       capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=tmp), timeout=900)
+    assert r.returncode == 0, "扫描失败: " + (r.stderr or r.stdout)[-200:]
+    return json.loads(r.stdout.strip().splitlines()[-1])
+d0 = run()
+assert d0["verdict"] == "insufficient-undeclared-era", "未声明时代却出了裁决: " + str(d0["verdict"])
+era = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))) - datetime.timedelta(hours=6)
+d1 = run("--post-since", era.isoformat())
+assert d1["verdict"] == "no-headroom", "声明时代后反而无法裁决: " + str(d1["verdict"])
+print("未声明时代⇒%s / 声明后⇒%s" % (d0["verdict"], d1["verdict"]))
+'
 # ── T190 干预判读器必须三方向可分(cl-265) ──
 # 24h 后要判"唤醒是不是推进的因", 判据事先写死在工具里(免得我又临时定口径)。三类结果必须分得开:
 # ①目标推进速率降 >=50% 且降幅大于对照 ⇒ causal ②没降 ⇒ no-effect(提醒无独立贡献) ③窗口内仍被唤醒 ⇒ contaminated(结论作废)。
