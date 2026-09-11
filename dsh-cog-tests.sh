@@ -170,11 +170,16 @@ BAK7="$WORK7"
 # 原始 nextAction(还原保真的比对基准)——2026-09-09 08:5x 修正: 原断言写死"以'待'开头",
 # 而该目标 nextAction 已按 cl-059 改写为可执行子步, 故改为"还原后与原始一致"。
 NA7_ORIG_FILE=$(mktemp)
+# 口径必须与比对侧一致: 池是只追加 + last-wins, 而这里原来把**每一行**都打印出来
+# (该目标现有 4 行 ⇒ 基准是多行文本), 与比对里的单值永远对不上 —— 判据于是"正常前进一次即红"。
 python3 -c "
 import json
+out = ''
 for l in open('$GOALS7'):
-    d=json.loads(l)
-    if d.get('id')=='goal-digital-life-incubation': print(d.get('nextAction',''))
+    if not l.strip(): continue
+    d = json.loads(l)
+    if d.get('id') == 'goal-digital-life-incubation': out = d.get('nextAction', '')
+print(out)
 " > "$NA7_ORIG_FILE"
 # 7a. 解锁段执行: 模拟 probe 检测到数据的分支逻辑(与 dsh-oq010-probe.sh 相同)
 UNLOCK7=$(python3 - "$WORK7" << 'PYEOF'
@@ -215,13 +220,19 @@ for l in open('$GOALS7'):
 ")
 rm -f "$WORK7"
 # 2026-09-09 12:3x 修正: nextAction 文本含单引号, 塞进 bash 插值会语法崩 → 用 Python 比对
+# 2026-09-11 17:4x 修口径: 池是**只追加 + last-wins** 的账本, 而这里原来用 first-wins 读
+# (命中第一条就 return)。于是"某目标的 nextAction 被正常前进一次"会让本断言转红 —— 实测孵化目标
+# 有 4 行(15:36/17:16/17:18/17:20), 首行的 nextAction 是旧的 ⇒ 判据红而测试其实没碰过任何文件。
+# 判据的意图是"套件运行不得改动活文件", 那就必须与捕获原值用**同一种口径**(last-wins)比对。
 t "测试未改动活文件" python3 -c "
 import json
 def na(p):
+    out = ''
     for l in open(p, encoding='utf8'):
+        if not l.strip(): continue
         d = json.loads(l)
-        if d.get('id') == 'goal-digital-life-incubation': return d.get('nextAction', '')
-    return ''
+        if d.get('id') == 'goal-digital-life-incubation': out = d.get('nextAction', '')
+    return out
 orig = open('$NA7_ORIG_FILE', encoding='utf8').read().strip()
 assert na('$GOALS7') == orig, '活文件 nextAction 被测试改动'
 "

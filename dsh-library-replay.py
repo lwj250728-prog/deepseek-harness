@@ -82,6 +82,30 @@ def utility_map() -> dict:
     return out
 
 
+def _arm_c_verdict(c_mrr, c_top1, c_sets: int, a_mrr, a_top1, min_sample: int) -> dict:
+    """C 档(学习权重替换常数)的预登记处置位(cl-173 / cl-185)。
+
+    预登记: 等 C 档可排序集 >= minSample 再裁决; 若仍 C<=A(按 top-1 主判、MRR 副判)则**退役该接线**,
+    并把"权重口径不可跨打分器搬用"写进设计文档。样本不足时只报计数, 不下结论(小样本伪信号的教训)。
+    """
+    if c_mrr is None or c_top1 is None:
+        return {'verdict': 'unavailable', 'note': 'C 档无法计算(缺分通道得分)'}
+    if c_sets < min_sample:
+        return {'verdict': 'insufficient',
+                'note': 'C 档可排序集 %d < %d ⇒ 按预登记不裁决(只报数)' % (c_sets, min_sample)}
+    # 主判 top-1, 副判 MRR: 两者都不高于 A 才算"该退役", 避免单个指标抖动就下结论
+    worse = (c_top1 <= a_top1) and (c_mrr <= a_mrr)
+    return {
+        'verdict': 'retire-c-arm' if worse else 'keep-c-arm-candidate',
+        'note': ('C(%s/%s) 不高于 A(%s/%s) 且可排序集 %d >= %d ⇒ 按 cl-173 退役"学习权重替换常数"接线, '
+                 '并把"权重口径不可跨打分器搬用"写入设计文档')
+                % (c_mrr, c_top1, a_mrr, a_top1, c_sets, min_sample) if worse
+                else ('C(%s/%s) 反超 A(%s/%s) ⇒ 可再谈接线(仍需独立量窗口)' % (c_mrr, c_top1, a_mrr, a_top1)),
+        'cArm': {'mrr': c_mrr, 'top1': c_top1, 'rankableSets': c_sets},
+        'armA': {'mrr': a_mrr, 'top1': a_top1},
+    }
+
+
 def main() -> int:
     args = sys.argv[1:]
     if not os.path.exists(BASE):
@@ -184,6 +208,8 @@ def main() -> int:
         'armC_status': ('ok' if c_rankable >= base['minSample']
                         else 'insufficient: 带分通道得分的可排序集 %d < %d(埋点已于 2026-09-11 09:0x 上线, 等部署后累积)'
                              % (c_rankable, base['minSample'])),
+        # cl-173 处置位的机械裁决: 样本到 30 后若仍 C<=A, 该接线退役 —— 不让"该不该接"靠记忆复辩。
+        'armC_verdict': _arm_c_verdict(c_arm, c1, c_rankable, a, a1, base['minSample']),
         'channelWeights': W,
         'lift': (round((b - a) / a, 4) if a and b is not None else None),
         'labelRobustness': label_reports,
@@ -207,6 +233,8 @@ def main() -> int:
         print('结论: %s | %s' % (payload['conclusion'], payload.get('note', '')))
         print('C 档(学习权重替换常数): MRR %s top1 %s(可排序集 %d) | %s'
               % (c_arm, c1, c_rankable, payload['armC_status']))
+        cv = payload.get('armC_verdict') or {}
+        print('C 档预登记裁决: %s | %s' % (cv.get('verdict'), cv.get('note')))
         print('标签稳健性(关键: gain 标签对 B 档是**同义反复**, 只有非 gain 标签才算证据):')
         for lk, v in label_reports.items():
             print('  label=%-7s A %s/%s  B %s/%s  lift %s%s'

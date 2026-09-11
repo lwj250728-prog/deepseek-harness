@@ -445,6 +445,9 @@ async function retrieve(
       // cl-185/cl-173(测量侧, 不改变任何选择行为): 把 similarity 的**三个成分**一并带出。
       // 影子对照的 C 档要试"用学习到的 channel_weights 替换这些常数", 但审计此前只落整体
       // similarity ⇒ 离线无法重建同一候选集的分通道得分, C 档一直 unavailable。
+      // 2026-09-11 17:3x **该接线按预登记退役(cl-173)**: 可排序集 35 >= 30 时 C(0.4238/0.20)
+      // 仍不高于 A(0.5023/0.28) ⇒ 学习权重是在 hot-engine 的通道加权口径上训练的, 不可搬进
+      // 本处的三成分口径。别再接一次; 理由与边界见 experience-library-diagnosis.md「B2 收尾」。
       const symptomPart = symptomOverlap(situation, text) * SYMPTOM_BONUS * semantic
       const axisPart = axisBoost(service, situation, exp, exp.clusterId)
       const gain = exp.sar.outcomeUtility.materialGain
