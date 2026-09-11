@@ -162,7 +162,13 @@ anchor_history = load_lines('external-anchors.jsonl')
 with open(os.path.join(D, 'external-anchors.jsonl'), 'a', encoding='utf8') as f:
     f.write(json.dumps({'ts': NOW.isoformat(), **anchors}, ensure_ascii=False) + '\n')
 
-goals = load_lines('dormant-goals.jsonl')
+# cl-241: 池是只追加 + last-wins 的账本 ⇒ 必须先按 id 收敛到末行。实测不收敛的后果: 经验库目标
+# 在池里有两行, 本报表就把它列成两行(同一目标被算两次), 任何对池的聚合都会偏高。
+_pool_rows = load_lines('dormant-goals.jsonl')
+_goals_by_id: dict = {}
+for _row in _pool_rows:
+    _goals_by_id[_row.get('id')] = _row
+goals = list(_goals_by_id.values())
 adoptions = load_lines('incubation-log.jsonl')
 # cl-078: 存量采纳基线——基线建立前 adoptedCount 已计数但没有 incubation-log 时间戳的采纳,
 # 无法判定其 24h 窗口, 因此明确标为不可判定, 而不是默默从分母里消失或永久挂"待观察"。
@@ -243,7 +249,14 @@ def _grew(fields, adopted_at):
     if not usable:
         _witness_undecidable['n'] += 1
         return False
-    return any(a > b for b, a in usable)
+    if any(a > b for b, a in usable):
+        return True
+    # cl-242(2026-09-11 19:4x 实测): 窗口**还没走完**且暂未增长时, 原来直接返回 False ⇒ 刚发生的采纳被
+    # 记成"0% 推进"。这是旧的"结构性恒 100%"的**镜像假阴性**: 同样是拿没走完的窗口当结论。判据应按
+    # 自己的文档("待观察 = 采纳未满 24h 或缺少监视记录")返回 None, 由上层计入待观察、不进分母。
+    if adopted_at + datetime.timedelta(hours=24) > datetime.datetime.now(adopted_at.tzinfo):
+        return None
+    return False
 
 
 def advanced(goal_id, adopted_at):
@@ -329,7 +342,10 @@ for g in goals:
         'witness': list(GOAL_WITNESS.get(gid, GLOBAL_WITNESS)),
         'pending': pending,
         'adopt_rate': round(adopted / triggers * 100, 1) if triggers else 0.0,
-        'advance_rate': round(advanced_n / adopted * 100, 1) if adopted else None,
+        # 分母只算**已裁决**的采纳(排除待观察 pending 与不可判定 undecidable) —— 拿没走完的窗口当分母
+        # 正是 cl-242 的成因。全部待观察时给 None(不假装 0%)。
+        'advance_rate': round(advanced_n / (adopted - pending - undecidable) * 100, 1)
+                        if (adopted - pending - undecidable) > 0 else None,
         'advance_rate_global': round(advanced_global_n / adopted * 100, 1) if adopted else None,
     })
 

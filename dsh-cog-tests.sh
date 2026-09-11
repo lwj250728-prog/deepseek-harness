@@ -1394,7 +1394,7 @@ t "dormant-goal产物含status门(已部署)" bash -c "grep -q 'goal.status' '$H
 t "行动帧侧只选active" python3 -c '
 import os
 s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts")).read()
-i = s.index("async function findAllActionableGoals")
+i = s.index("export function selectActionableGoals")
 j = s.index(chr(10) + "}" + chr(10), i)          # 取函数体到最后一行单独的 }
 seg = s[i:j]
 assert "status === " in seg and chr(39) + "active" + chr(39) in seg, "行动帧选择器未限定 active"
@@ -5501,14 +5501,33 @@ bad = [l[:60] for l in need if "XDG_RUNTIME_DIR=" not in l or "DBUS_SESSION_BUS_
 assert not bad, "这些 cron 条目缺 systemd 会话环境(会在 cron 下系统性假红): " + repr(bad)
 print("%d 条依赖 systemd 的 cron 条目均带环境" % len(need))
 '
-t "无 systemd 会话时判据须显式说明环境缺失(不得静默)" python3 -c '
-import os, subprocess
+t "无 systemd 会话时须走 /proc 退路拿到读数(不再失明)" python3 -c '
+import json, os, subprocess
+# cl-238 加固后的期望变了: 裸环境(无 dbus)下原实现读不到 svc_ts 并每 5 分钟空转, 现在应能经
+# /proc/<pid>/stat 还原服务启动时刻。断言随之更新 —— 不是放宽, 而是把"失明"改成"必须看得见"。
+out = "/tmp/t151-intent-bare.json"
 r = subprocess.run(["env", "-i", "HOME=" + os.path.expanduser("~"), "PATH=/usr/bin:/bin",
-                    "python3", "/home/ubuntu/dsh-fork/dsh-deploy-intent.py", "--state", "/tmp/t151-intent.json"],
+                    "python3", "/home/ubuntu/dsh-fork/dsh-deploy-intent.py", "--state", out, "--quiet"],
                    capture_output=True, text=True, timeout=120)
-assert r.returncode == 3, "裸环境下应判自检失败(exit 3), 实得 %d" % r.returncode
-assert "systemd user" in (r.stdout + r.stderr), "失败理由里没点明 systemd 会话: " + (r.stderr or r.stdout)[:120]
-print("裸环境: 显式报自检失败并点明 systemd 会话")
+assert r.returncode != 3, "裸环境下仍判自检失败(exit 3) —— /proc 退路没生效: " + (r.stderr or r.stdout)[:160]
+s = json.load(open(out, encoding="utf8"))
+assert s.get("serviceStartTs"), "裸环境下 serviceStartTs 为空(退路未拿到读数)"
+print("裸环境走 /proc 退路: svc_ts=%s" % s["serviceStartTs"])
+'
+t "两条路径都不可用时必须显式报环境缺失(不得静默)" python3 -c '
+import os, subprocess, tempfile
+# 把 systemctl 与 pgrep 都换成"成功但空输出"的壳 ⇒ systemd 与 /proc 两条路都拿不到值
+tmp = tempfile.mkdtemp()
+for name in ("systemctl", "pgrep"):
+    p = os.path.join(tmp, name)
+    open(p, "w").write("#!/bin/sh\nexit 0\n"); os.chmod(p, 0o755)
+r = subprocess.run(["env", "-i", "HOME=" + os.path.expanduser("~"), "PATH=" + tmp + ":/usr/bin:/bin",
+                    "python3", "/home/ubuntu/dsh-fork/dsh-deploy-intent.py", "--state", "/tmp/t151-none.json"],
+                   capture_output=True, text=True, timeout=120)
+combined = r.stdout + r.stderr
+assert r.returncode == 3, "两条路径都不可用时应判自检失败(exit 3), 实得 %d" % r.returncode
+assert "自检失败" in combined, "失败理由未显式说明: " + combined[:160]
+print("两条路径皆不可用 ⇒ 显式 exit 3 并写明自检失败")
 '
 # ── T152 目标轨迹树面板的接线须可核查(用户要求的 UI) ──
 # 起因: 面板是新建的客户端插件, 而它的装配有一部分**不在版本库里**(profile 补丁 + node_modules symlink),
@@ -5881,6 +5900,65 @@ for gid, g in by.items():
     if n: dup.append("%s(%d 行重复)" % (gid, n))
 assert not dup, "存在逐字节重复行(写侧幂等缺失): %s" % dup
 print("无逐字节重复行")
+'
+# ── T163 行动帧选目标必须 last-wins(cl-233 的行为回归) ──
+# 起因: 池是只追加 + last-wins 的账本, 而行动帧原来按**文件序取首条** ⇒ 我 17:20 已把孵化目标的
+# nextAction 前进过, 帧仍按 15:36 那行催办同一件事(重复催办已完成步骤)。读侧已改成按 id 收敛到末行,
+# 但"改成什么样"必须有行为断言守着 —— 形状 grep 挡不住行为回归。
+echo "[T163] 行动帧选目标(last-wins / active 过滤 / 占位符过滤)"
+t "合成只追加池: 同 id 多行必须取末行, 且 paused 与 nextAction='无' 不得入选" python3 -c '
+import json, os, subprocess, tempfile
+tmp = tempfile.mkdtemp(); pool = os.path.join(tmp, "pool.jsonl"); script = os.path.join(tmp, "s.mts")
+rows = [{"id": "g1", "title": "目标一", "status": "active", "nextAction": "旧意图(已被取代)", "priority": 1},
+        {"id": "g2", "title": "目标二", "status": "paused", "nextAction": "暂停目标不该被选", "priority": 1},
+        {"id": "g1", "title": "目标一", "status": "active", "nextAction": "新意图(末行)", "priority": 1},
+        {"id": "g3", "title": "目标三", "status": "active", "nextAction": "无", "priority": 1}]
+open(pool, "w", encoding="utf8").write("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+open(script, "w", encoding="utf8").write(
+  "import { readFileSync } from \"node:fs\"\n"
+  "import { selectActionableGoals } from \"/home/ubuntu/dsh-fork/packages/context/quiet-driver/src/index.ts\"\n"
+  "console.log(JSON.stringify(selectActionableGoals(readFileSync(process.argv[2], \"utf8\"))))\n")
+r = subprocess.run(["npx", "tsx", script, pool], cwd=os.path.expanduser("~/dsh-fork"),
+                   capture_output=True, text=True, timeout=600)
+assert r.returncode == 0, "选择器脚本失败: %s" % (r.stderr[-200:])
+goals = json.loads(r.stdout.strip().splitlines()[-1])
+g1 = [g for g in goals if g["id"] == "g1"]
+assert len(g1) == 1, "同一 id 出现 %d 次(未按 id 收敛到末行)" % len(g1)
+assert g1[0]["nextAction"] == "新意图(末行)", "取到的不是末行意图: %s" % g1[0]["nextAction"]
+assert all(g["id"] != "g2" for g in goals), "paused 目标被选中(只应选 active)"
+assert all(g["id"] != "g3" for g in goals), "nextAction=\"无\" 被当成可执行"
+print("末行意图被选中, paused/占位符被排除")
+'
+# ── T164 推进率判据的三态(cl-242: 没走完的窗口不能当结论) ──
+# 起因: 该判据先是"结构性恒 100%"(把当前值无条件折进历史比较, cl-164), 修完后变成镜像的**假阴性** ——
+# 采纳刚发生、窗口还没走完、暂无增长时返回 False ⇒ 记成"0% 推进"。而它自己的文档写着这种情形是"待观察"。
+# 三态: 增长 ⇒ True; 窗口满且无增长 ⇒ False; 窗口未满且暂无增长 ⇒ None(待观察, 不进分母)。
+echo "[T164] 推进率判据三态(增长/窗口满无增长/窗口未满待观察)"
+t "推进判据三态: 未满窗口不得判 0%, 已满窗口无增长才判未推进" python3 -c '
+import datetime, os
+# 该脚本是过程式脚本(顶层就会读真实数据), 故只切出判据函数体来跑合成用例 —— 显式说明这点,
+# 免得日后有人以为这是"测了真脚本"。
+src = open(os.path.expanduser("~/dsh-fork/dsh-incubation-stats.py"), encoding="utf8").read()
+frag = src[src.index("def _grew"):src.index("def advanced(goal_id")]
+ns = {"datetime": datetime, "parse": lambda x: x, "anchor_history": [], "anchors": {}, "_witness_undecidable": {"n": 0}}
+exec(frag, ns)
+grew = ns["_grew"]
+now = datetime.datetime.now(datetime.timezone.utc)
+def H(hours, value): return {"ts": now - datetime.timedelta(hours=hours), "a": value}
+cases = [
+  ("窗口未满+暂无增长 ⇒ 待观察", [H(2, 5)], {"a": 5}, 1, None),
+  ("窗口未满+已有增长 ⇒ 推进", [H(2, 5)], {"a": 7}, 1, True),
+  ("窗口已满+无增长 ⇒ 未推进", [H(30, 5)], {"a": 5}, 26, False),
+  ("窗口已满+期间有增长 ⇒ 推进", [H(30, 5), H(25, 9)], {"a": 9}, 26, True),
+  ("窗口已满+仅窗口后才涨 ⇒ 未推进", [H(30, 5), H(25, 5)], {"a": 12}, 26, False),
+]
+bad = []
+for name, hist, anchors, adopted_hours, expect in cases:
+    ns["anchor_history"] = hist; ns["anchors"] = anchors
+    got = grew(("a",), now - datetime.timedelta(hours=adopted_hours))
+    if got is not expect: bad.append("%s: 得到 %s 期望 %s" % (name, got, expect))
+assert not bad, "推进判据三态不成立: %s" % bad
+print("五态一致(含待观察不计 0%)")
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。

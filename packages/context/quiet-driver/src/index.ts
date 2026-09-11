@@ -347,41 +347,54 @@ async function readGoalsSnapshot(poolPath: string): Promise<string> {
   }
 }
 
-/** P3 行动帧: 从目标池找"该执行"的目标——active 且 nextAction 非空。
- *  返回第一个可行动目标(单执行原则: 同一时刻只驱动一个 active 目标的 nextAction)。 */
-/** 多目标轮转调度: 从目标池找所有"该执行"的目标——active 且 nextAction 非空。
- *  返回全部候选, 由调用方做冷却/等待/停滞过滤后选择(用户: 目标冷却期可推动其他目标)。 */
-async function findAllActionableGoals(poolPath: string): Promise<Array<{ title: string; nextAction: string; id: string; priority: number }>> {
+/** 目标池一行的可行动面(选择器只读这些字段)。 */
+export interface ActionableGoal {
+  readonly title: string
+  readonly nextAction: string
+  readonly id: string
+  readonly priority: number
+}
+
+/**
+ * 选择"该执行"的目标: active 且 nextAction 非空。
+ *
+ * 池是**只追加 + last-wins** 的账本, 同一 id 会有多行(帧推进 nextAction、插件 bump 计数都会追加)
+ * —— 因此必须**按 id 收敛到末行**再选。2026-09-11 17:4x 实测过不收敛的后果: 我 17:20 已把孵化目标的
+ * nextAction 前进过, 而行动帧仍按 15:36 那一行催办同一件事(重复催办已完成步骤)。
+ *
+ * 抽成导出的纯函数(而不是留在插件闭包里)是为了让这条语义**可被回归断言直接测**(cl-233):
+ * 没有它, "读取侧 last-wins"只能靠源码 grep 的形状断言, 挡不住行为回归。
+ * @param rowsText - 池文件的原始 JSONL 文本。
+ * @returns 可行动目标, 保持池内出现顺序(调用方再做冷却/等待/停滞过滤)。
+ */
+export function selectActionableGoals(rowsText: string): readonly ActionableGoal[] {
+  const latestRows = new Map<string, Record<string, unknown>>()
+  for (const line of rowsText.split('\n').filter(Boolean)) {
+    try {
+      const row = JSON.parse(line) as Record<string, unknown>
+      latestRows.set(String(row.id ?? `anon-${latestRows.size}`), row)
+    } catch { /* skip malformed line */ }
+  }
+  const out: ActionableGoal[] = []
+  for (const row of latestRows.values()) {
+    const g = row as {
+      id?: string; title?: string; status?: string; nextAction?: string; priority?: number
+    }
+    const na = (g.nextAction ?? '').trim()
+    if (g.title && g.status === 'active' && na.length > 0 && na !== '无' && na !== 'none') {
+      out.push({ title: g.title, nextAction: na, id: g.id ?? 'unknown', priority: g.priority ?? 0 })
+    }
+  }
+  return out
+}
+
+async function findAllActionableGoals(poolPath: string): Promise<ActionableGoal[]> {
   const target = expandHome(poolPath)
-  const out: Array<{ title: string; nextAction: string; id: string; priority: number }> = []
   try {
     const { readFile } = await import('node:fs/promises')
-    const raw = await readFile(target, 'utf8')
-    // cl-233: 同上 —— 按 id 收敛到末行再选, 否则行动帧会拿**最老**那行的 nextAction 催办
-    // (实测: 我 17:20 已把孵化目标的 nextAction 前进过, 而帧仍在按 15:36 那行催办同一件事)。
-    const latestRows = new Map<string, Record<string, unknown>>()
-    for (const line of raw.split('\n').filter(Boolean)) {
-      try {
-        const row = JSON.parse(line) as Record<string, unknown>
-        latestRows.set(String(row.id ?? `anon-${latestRows.size}`), row)
-      } catch { /* skip */ }
-    }
-    for (const row of latestRows.values()) {
-      try {
-        const g = row as {
-          id?: string; title?: string; status?: string; nextAction?: string; priority?: number
-        }
-        const na = (g.nextAction ?? '').trim()
-        if (g.title && g.status === 'active' && na.length > 0 && na !== '无' && na !== 'none') {
-          out.push({ title: g.title, nextAction: na, id: g.id ?? 'unknown', priority: g.priority ?? 0 })
-        }
-      } catch { /* skip */ }
-    }
-    // P4 单执行仲裁: priority 高者优先(同优先级保持池顺序——稳定排序)
-    out.sort((a, b) => b.priority - a.priority)
-    return out
+    return [...selectActionableGoals(await readFile(target, 'utf8'))]
   } catch {
-    return out
+    return []
   }
 }
 

@@ -27,6 +27,25 @@ OUT = os.path.join(DIR, 'ab-compare.json')
 BASELINES = os.path.join(DIR, 'ab-baselines.json')
 CONFOUNDERS = os.path.join(DIR, 'ab-confounders.jsonl')
 DEFAULT_SPLIT = '2026-09-10T14:07:00+08:00'   # topK 1 -> 3 的重启时刻
+
+# cl-231/tp-135: **窗口规格**。此前只有一个写死的 topK 窗口, 于是用 --split 旁路去读别的变更
+# (如 utilityFusion)时, 报告头仍写"topK 1 -> 3"、窗口时长也照旧(实测真实 5.08h 却打印 25.71h)
+# —— 两个变更的窗口会被混着讲。现在每次变更是一条规格: 切换点 + 被测变量 + 预登记回滚判据,
+# 由 --change 选择; 若只给 --split 不给 --change, 报告必须声明这次判读**不可归因**。
+CHANGES = {
+    'topk-widen': {
+        'splitAt': '2026-09-10T14:07:00+08:00',
+        'variable': 'topK 1 -> 3 (cl-120 主杠杆)',
+        'rollback': '方向判为 adverse-significant(后窗区间上界 < 前窗区间下界) => topK 回滚到 1',
+        'keep': '方向判为 better-significant 或 indistinguishable 且主判据不降 => 保留 topK=3',
+    },
+    'utility-fusion': {
+        'splitAt': '2026-09-11T12:19:10+08:00',
+        'variable': 'utilityFusion.enabled(rankKey = similarity x (base + slope x gain), cl-218)',
+        'rollback': 'adverse-significant 或 注入文本量涨幅 >20% => 关 utilityFusion.enabled 回滚',
+        'keep': '方向 indistinguishable 或 better-significant 且文本量涨幅 <=20% => 保留接线',
+    },
+}
 REPO = os.path.expanduser('~/dsh-fork')
 # 结算口径变更时刻: cl-128 改用未截断文本(outcomeFull)后, cited 口径与之前不可直接比。
 # 它落在"加宽后"窗口内 => 后窗本身混合两套口径, 必须在对照里显式切出来, 否则低估后窗。
@@ -287,6 +306,23 @@ def summarize(rows: list[dict]) -> dict:
     }
 
 
+def _window_spans(rows, split_ms):
+    """两个窗口的真实起止与小时数(由该窗口内的行重算, 不沿用任何存量字段)。
+
+    cl-231 实测: 传 --split 指向 utilityFusion 时报告仍打印 topK 窗口的 25.71h, 而真实后窗是 5.08h。
+    """
+    def span(rs):
+        ts = [r.get('t') for r in rs if r.get('t')]
+        if not ts:
+            return {'rows': 0, 'startMs': None, 'endMs': None, 'hours': 0.0}
+        return {'rows': len(rs), 'startMs': min(ts), 'endMs': max(ts),
+                'hours': round((max(ts) - min(ts)) / 3600000.0, 2),
+                'startIso': datetime.datetime.fromtimestamp(min(ts) / 1000).isoformat(timespec='seconds'),
+                'endIso': datetime.datetime.fromtimestamp(max(ts) / 1000).isoformat(timespec='seconds')}
+    return {'before': span([r for r in rows if (r.get('t') or 0) < split_ms]),
+            'after': span([r for r in rows if (r.get('t') or 0) >= split_ms])}
+
+
 def confounders_in_window(before_start_ms: int) -> list[dict]:
     """窗口内的环境变更(混杂因素): 供应商改名/结算口径变化/受控重启等。
 
@@ -363,10 +399,12 @@ def novelty_stats(split_ms: int) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--split', default=None)
+    parser.add_argument('--change', default=None, choices=sorted(CHANGES), help='按登记的窗口规格判读(推荐)')
     parser.add_argument('--quiet', action='store_true')
     args = parser.parse_args()
 
-    split_iso = args.split
+    change = CHANGES.get(args.change) if args.change else None
+    split_iso = args.split or (change or {}).get('splitAt')
     if split_iso is None and os.path.exists(BASELINES):
         try:
             split_iso = json.load(open(BASELINES, encoding='utf8')).get('splitAt')
@@ -426,12 +464,16 @@ def main() -> int:
         else:
             _direction = 'indistinguishable'     # 区间重叠 => 现有样本分辨不出差异
         adoption_verdict = {
-            'enoughSample': _direction in ('adverse-significant', 'better-significant'),
-            'sampleNote': ('后窗回合 %s(最小护栏 %s); 前窗区间 %s vs 后窗区间 %s'
-                           % (_turns, _min_turns, _b_ci, _a_ci)),
+            # cl-231 附带修: 这个字段原写作 `_direction in ('adverse-significant','better-significant')`,
+            # 即"方向显著", 却被当成"样本够不够"用在打印里 ⇒ 出现"样本不足(后窗回合 20 >= 最小护栏 20)"
+            # 这种自相矛盾的判读。样本充分性只看回合数; 方向显著性由 direction 字段表达。
+            'enoughSample': _turns >= _min_turns,
+            'directionSignificant': _direction in ('adverse-significant', 'better-significant'),
+            'sampleNote': ('后窗回合 %s %s 最小护栏 %s; 前窗区间 %s vs 后窗区间 %s'
+                           % (_turns, '>=' if _turns >= _min_turns else '<', _min_turns, _b_ci, _a_ci)),
             'direction': _direction,
-            'rollbackIf': '方向判为 adverse-significant(后窗区间上界 < 前窗区间下界) => topK 回滚到 1',
-            'keepIf': '方向判为 better-significant 或 indistinguishable 且主判据不降 => 保留 topK=3',
+            'rollbackIf': (change or {}).get('rollback') or '方向判为 adverse-significant(后窗区间上界 < 前窗区间下界) => topK 回滚到 1',
+            'keepIf': (change or {}).get('keep') or '方向判为 better-significant 或 indistinguishable 且主判据不降 => 保留 topK=3',
             'judgeLiftAt': 'lift 需 n>=100(目标池判据), 当前仅作方向指示',
             'ciMethod': 'Wilson score interval, 95%',
         }
@@ -445,7 +487,15 @@ def main() -> int:
         'adoptionVerdict': adoption_verdict,
         'minSample': MIN_SAMPLE,
         'splitAt': split_iso,
-        'splitReason': 'topK 1 -> 3 (cl-120 主杠杆)',
+        'change': args.change,
+        'changeVariable': (change or {}).get('variable') if change else None,
+        'attributable': change is not None,
+        'attributionNote': ('按登记窗口规格判读: %s' % change['variable']) if change
+                           else '仅给了切换点/用了默认值, **未指定 --change ⇒ 本判读不可归因到某个已登记变更**',
+        'rollbackIf': (change or {}).get('rollback') or '未登记; 请用 --change 指定窗口规格',
+        'keepIf': (change or {}).get('keep') or '未登记',
+        'windows': _window_spans(rows, split_ms),
+        'splitReason': (change or {}).get('variable', 'topK 1 -> 3 (cl-120 主杠杆)'),
         'generatedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
         'before': before_sum,
         'after': after_sum,
@@ -454,6 +504,11 @@ def main() -> int:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     if not args.quiet:
         print('切换点 %s (%s) | 判读: %s' % (split_iso, payload['splitReason'], payload['verdict']))
+        w = payload['windows']
+        print('窗口(按行重算): 前 %s 行/%.2fh [%s → %s] | 后 %s 行/%.2fh [%s → %s]'
+              % (w['before']['rows'], w['before']['hours'], w['before'].get('startIso', '?'), w['before'].get('endIso', '?'),
+                 w['after']['rows'], w['after']['hours'], w['after'].get('startIso', '?'), w['after'].get('endIso', '?')))
+        print('归因: %s' % payload['attributionNote'])
         if confounds:
             print('混杂因素 %d 条(窗口内):' % len(confounds))
             for item in confounds:
