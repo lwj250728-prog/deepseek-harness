@@ -77,6 +77,9 @@ def main() -> int:
     ap.add_argument('--goal', default=None, help='只算该目标(默认全库可测目标)')
     ap.add_argument('--bin-min', type=float, default=60.0)
     ap.add_argument('--hours', type=float, default=72.0)
+    ap.add_argument('--control-active', action='store_true',
+                    help='同样活跃时段对照(cl-264): 只取"该段内全库至少有一帧"的时段, 再按该目标是否被唤醒分组 —— '
+                         '否则"无唤醒段"多半是我被别的事占住的停顿期, 速率差会被读成因果')
     ap.add_argument('--json', action='store_true')
     args = ap.parse_args()
 
@@ -87,6 +90,7 @@ def main() -> int:
         return 2
     now_ms = datetime.datetime.now().timestamp() * 1000
     cut = now_ms - args.hours * 3600 * 1000
+    any_frames = [f for f in frames if (ms_of(f.get('ts')) or 0) >= (datetime.datetime.now().timestamp() * 1000 - args.hours * 3600 * 1000)]
     if args.goal:
         frames = [f for f in frames if str(f.get('goalId')) == args.goal]
         changes = [c for c in changes if str(c.get('goalId')) == args.goal]
@@ -122,6 +126,15 @@ def main() -> int:
         i = bidx(ms_of(c.get('ts')) or 0)
         if i is not None and i in bins:
             bins[i]['advances'] += 1
+    # 同样活跃掩码: 段内是否有**全库任一目标**的行动帧(即"我在干活"的时段)
+    for f in any_frames:
+        i = bidx(ms_of(f.get('ts')) or 0)
+        if i is not None and i in bins:
+            bins[i]['anyFrame'] = bins[i].get('anyFrame', 0) + 1
+    for b in bins.values():
+        b.setdefault('anyFrame', 0)
+    if args.control_active:
+        bins = {k: v for k, v in bins.items() if v['anyFrame'] > 0}
 
     woken = [b for b in bins.values() if b['wakes'] > 0]
     idle = [b for b in bins.values() if b['wakes'] == 0]
@@ -156,6 +169,7 @@ def main() -> int:
     payload = {
         'ts': datetime.datetime.now().astimezone().isoformat(), 'goal': args.goal or 'ALL',
         'binMin': args.bin_min, 'hours': args.hours, 'bins': len(bins),
+        'controlActive': bool(args.control_active),
         'eraStartIso': datetime.datetime.fromtimestamp(start / 1000).astimezone().isoformat(),
         'eraHours': round((last - start) / 3600000.0, 2),
         'wokenBins': len(woken), 'idleBins': len(idle),
@@ -175,8 +189,9 @@ def main() -> int:
     if args.json:
         print(json.dumps(payload, ensure_ascii=False))
         return 0
-    print('目标=%s | 时段 %d×%g分钟 | 有唤醒段 %d(推进 %d)/无唤醒段 %d(推进 %d)'
-          % (payload['goal'], len(bins), args.bin_min, len(woken), adv_w, len(idle), adv_i))
+    print('目标=%s | 时段 %d×%g分钟%s | 有唤醒段 %d(推进 %d)/无唤醒段 %d(推进 %d)'
+          % (payload['goal'], len(bins), args.bin_min, '(**同样活跃对照**)' if args.control_active else '',
+             len(woken), adv_w, len(idle), adv_i))
     print('推进速率: 有唤醒 %.3f 次/h vs 无唤醒 %.3f 次/h | 比 %s | p=%.3f'
           % (rate_w or 0, rate_i or 0, payload['rateRatio'], p))
     print('判读: %s —— %s' % (verdict, reason))

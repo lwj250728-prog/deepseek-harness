@@ -7120,6 +7120,36 @@ d3 = run(tmp3)
 assert d3["verdict"] == "insufficient", "对照段太少却没报 insufficient: " + str(d3["verdict"])
 print("独立⇒%s / 集中⇒%s / 段少⇒%s" % (d1["verdict"], d2["verdict"], d3["verdict"]))
 '
+t "同样活跃时段对照必须真的筛掉停顿段(否则催化剂读数只是活动期的影子)" python3 -c '
+# 2026-09-12 05:0x(cl-264): 未控对照组把"我没在干活"的停顿段算成"无唤醒段", 于是任何目标都会被判 catalyst
+# (实测目标层 ×13.4, 控制后 30/60 分钟粒度变 no-signal; 全库层"活跃但无唤醒"的段数为 0 ⇒ 对照根本不适用)。
+# 守: --control-active 必须真的把**全库都没有帧**的停顿段剔除 —— 合成世界: 前 10 个时段目标有帧, 之后 20 个时段
+# **谁都没有帧**却仍有该目标的推进(正是反向判据里那 42%, 也是催化剂读数的真正来源)。
+import json, os, subprocess, tempfile, datetime
+TZ = datetime.timezone(datetime.timedelta(hours=8)); now = datetime.datetime.now(TZ)
+tmp = tempfile.mkdtemp()
+def ts(m): return (now - datetime.timedelta(minutes=m)).isoformat()
+frames, changes = [], []
+for i in range(10):                       # 活跃段: 目标有帧 + 有推进
+    frames.append({"kind": "action-frame", "goalId": "g-ctl", "nextAction": "步", "session": "s", "ts": ts(60 * i + 5)})
+    changes.append({"ts": ts(60 * i + 6), "goalId": "g-ctl", "sessionId": "s", "evidence": "pool-change", "before": "步", "after": "步2"})
+for i in range(10, 30):                   # 停顿段: 全库无帧, 但仍有推进
+    changes.append({"ts": ts(60 * i + 6), "goalId": "g-ctl", "sessionId": "s", "evidence": "pool-change", "before": "步", "after": "步2"})
+open(os.path.join(tmp, "quiet-driver-frames.jsonl"), "w", encoding="utf8").write("\n".join(json.dumps(r, ensure_ascii=False) for r in frames) + "\n")
+open(os.path.join(tmp, "incubation-log.jsonl"), "w", encoding="utf8").write("\n".join(json.dumps(r, ensure_ascii=False) for r in changes) + "\n")
+def run(extra):
+    r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-wake-causality.py", "--json", "--goal", "g-ctl", "--bin-min", "60"] + extra,
+                       capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=tmp), timeout=600)
+    assert r.returncode == 0, "因果工具失败: " + (r.stderr or r.stdout)[-200:]
+    return json.loads(r.stdout.strip().splitlines()[-1])
+d_raw = run([]); d_ctl = run(["--control-active"])
+assert d_raw["controlActive"] is False and d_ctl["controlActive"] is True, "对照开关没有生效标记"
+assert d_ctl["bins"] < d_raw["bins"], "同样活跃对照没有筛掉任何时段(bins %d→%d)" % (d_raw["bins"], d_ctl["bins"])
+assert d_ctl["idleBins"] == 0, "停顿段没被剔除(idle 段仍有 %d 个)" % d_ctl["idleBins"]
+assert d_ctl["verdict"] in ("insufficient", "no-signal"), "控制后仍给出催化剂结论: " + str(d_ctl["verdict"])
+print("未控 bins=%d(idle=%d) / 对照后 bins=%d(idle=%d, 判读 %s)"
+      % (d_raw["bins"], d_raw["idleBins"], d_ctl["bins"], d_ctl["idleBins"], d_ctl["verdict"]))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
