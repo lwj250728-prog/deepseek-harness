@@ -1,3 +1,4 @@
+import { appendFileSync } from 'node:fs'
 /**
  * File-backed store of the cognitive pipeline. In-memory maps serve the hot
  * path; JSONL files under the configured root persist each table. Mutations
@@ -516,6 +517,26 @@ export class CognitiveStore {
   /** Await every pending persistence write. */
   async flush(): Promise<void> {
     await this.queue.drain()
+  }
+
+  /**
+   * Append one taxonomy-rebuild **attempt** to its ledger (accepted, rejected and deferred all count).
+   *
+   * 为什么要有: 判据「摘要陈旧时必须有近期重建尝试」读的正是这份账本, 而在此之前**没有任何代码写它**
+   * —— 里面仅有的两行是手工补的。于是那条判据实际上在检查"有没有人手工写行", 而不是"整合层有没有在重试";
+   * 摘要一旦陈旧, 即使重建真的跑过也会假红(cl-256/tp-156)。记录面必须由机制产出。
+   * @param entry - attempt facts (scope/accepted/deferred/reason/newError/version).
+   */
+  recordTaxonomyAttempt(entry: Record<string, unknown>): void {
+    try {
+      const now = new Date()
+      const p2 = (n: number, w = 2): string => String(n).padStart(w, '0')
+      const off = -now.getTimezoneOffset()
+      const ts = `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())}`
+        + `T${p2(now.getHours())}:${p2(now.getMinutes())}:${p2(now.getSeconds())}.${p2(now.getMilliseconds(), 3)}`
+        + `${off >= 0 ? '+' : '-'}${p2(Math.floor(Math.abs(off) / 60))}:${p2(Math.abs(off) % 60)}`
+      appendFileSync(this.file('taxonomy-rebuild.jsonl'), `${JSON.stringify({ ts, ...entry })}\n`)
+    } catch { /* 记录失败不得影响重建本身 */ }
   }
 
   private enqueue(name: string, payload: unknown): void {

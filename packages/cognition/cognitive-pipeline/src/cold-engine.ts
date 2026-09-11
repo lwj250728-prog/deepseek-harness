@@ -281,6 +281,26 @@ export class ColdEngine {
     sessionId?: GenerateOptions['sessionId'],
     signal?: AbortSignal,
   ): Promise<RebuildResult> {
+    const result = await this.runRebuildCore(scope, sessionId, signal)
+    // cl-256/tp-156: 每次重建都留一行尝试记录(接受/拒绝/暂缓都算) —— 判据「摘要陈旧时必须有近期重建尝试」
+    // 读的就是这份账本, 而在此之前它只由人工写入, 于是判据在检查"有没有人写行"而非"整合层是否在重试"。
+    this.store.recordTaxonomyAttempt({
+      scope,
+      accepted: result.accepted,
+      deferred: result.deferred,
+      reason: result.reason,
+      newError: result.newError ?? null,
+      version: (result as { taxonomyVersion?: number }).taxonomyVersion ?? null,
+    })
+    return result
+  }
+
+  /** The rebuild body; {@link runRebuild} wraps it to record the attempt. */
+  private async runRebuildCore(
+    scope: 'local' | 'global',
+    sessionId?: GenerateOptions['sessionId'],
+    signal?: AbortSignal,
+  ): Promise<RebuildResult> {
     const all = this.store.experiencesSnapshot()
     if (all.length === 0) {
       return this.rejected(scope, [], 0, '无经验样本，跳过重构')
