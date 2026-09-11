@@ -39,7 +39,8 @@ PREREG = ('R1 widen-gate: 可排序集占比 +>=10pp 且 A 档 MRR/top-1 不降 
           'R2 tradeoff-ceiling: 占比升但 A 档质量降 >0.02 ⇒ 真实权衡, 停止在此旋钮上试; '
           'R3 no-headroom: 占比不随门限变化 ⇒ 天花板不在门限上; '
           'R0 inconclusive: 审计未记阈下候选 ⇒ 本数据上不可判, 先补埋点; '
-          'R-1 insufficient-post-instrumentation: 埋点后样本回合不足 ⇒ 只报数不出裁决')
+          'R-1 insufficient-post-instrumentation: 埋点后样本回合不足 ⇒ 只报数不出裁决; '
+          'R-2 insufficient-belowgate-capped: 阈下记录顶满上限 ⇒ 记录被截断, 需先抬高上限')
 
 
 def load_replay():
@@ -112,7 +113,14 @@ def main() -> int:
     # 所以门限不是瓶颈"这种**用截断样本冒充总体**的结论。故: 有 belowGate 的回合数不足(默认 <10)时,
     # 一律报 insufficient-post-instrumentation, 只报数, 不出裁决。
     rounds_with_bg = sum(1 for r in records if 'belowGate' in r)
-    diag = {'candidates': len(allsims), 'min': min(allsims) if allsims else None,
+    # 2026-09-12 05:0x 实测: 前两轮记录**都恰好等于当时的上限(5)** ⇒ 上限被顶满 = 样本被截断, 此时连
+    # "阈下有多少候选"都答不出, 更谈不上扫门限(上限已抬到 20, 若仍顶满则同样判为截断)。
+    BELOW_GATE_CAP = 20
+    capped_rounds = sum(1 for r in records
+                        if isinstance(r.get('belowGate'), list) and len(r['belowGate']) >= BELOW_GATE_CAP)
+
+    diag = {'cappedRounds': capped_rounds, 'cap': BELOW_GATE_CAP,
+            'candidates': len(allsims), 'min': min(allsims) if allsims else None,
             'max': max(allsims) if allsims else None,
             'belowGate': len(below), 'belowGateShare': round(len(below) / len(allsims), 4) if allsims else None}
 
@@ -162,6 +170,22 @@ def main() -> int:
     # 于是"放松门限能不能多出可排序集"在这份数据上**根本算不出来** —— 表格里那行平坦的 75% 是数据结构的
     # 产物, 不是关于门限的证据。此时必须报 inconclusive 而不是 no-headroom(后者会把"没数据"讲成"没空间")。
     POST_MIN_ROUNDS = 10
+    if capped_rounds > 0:
+        payload = {'ts': datetime.datetime.now().astimezone().isoformat(),
+                   'label': args.label, 'currentGate': CURRENT_GATE, 'turns': len(records),
+                   'subGateDiagnostics': diag, 'roundsWithBelowGate': rounds_with_bg,
+                   'table': table, 'verdict': 'insufficient-belowgate-capped',
+                   'reason': ('有 %d 轮记录的阈下候选顶满上限(%d) ⇒ 记录本身被截断, "阈下有多少候选"不可知, '
+                              '扫门限会系统性低估; 需先把上限抬高并等新一轮数据(现上限已抬到 %d)'
+                              % (capped_rounds, BELOW_GATE_CAP, BELOW_GATE_CAP)),
+                   'bestRow': None, 'prereg': PREREG}
+        json.dump(payload, open(out, 'w', encoding='utf8'), ensure_ascii=False, indent=1)
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False))
+            return 0
+        print('注入回合 %d | 埋点后回合 %d | 顶满上限的回合 %d' % (len(records), rounds_with_bg, capped_rounds))
+        print('判读: %s —— %s' % (payload['verdict'], payload['reason']))
+        return 0
     if rounds_with_bg < POST_MIN_ROUNDS:
         payload = {'ts': datetime.datetime.now().astimezone().isoformat(),
                    'label': args.label, 'currentGate': CURRENT_GATE, 'turns': len(records),

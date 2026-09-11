@@ -473,7 +473,9 @@ async function retrieve(
   const droppedByThreshold = scoredBeforeThreshold
     .filter(hit => hit.similarity < minSimilarity)
     .sort((a, b) => b.similarity - a.similarity)
-    .slice(0, 5)
+    // 2026-09-12 05:0x 实测: 两轮记录**都恰好 5 条** ⇒ 上限被顶满, 意味着"阈下只有 5 个候选"是截断假象,
+    // 而门限扫描要问的正是"放到 t 时有多少候选会回来" ⇒ 上限卡在 5 会让扫描系统性低估。抬到 20(仍只记录)。
+    .slice(0, 20)
     .map(hit => ({ expId: hit.expId, similarity: Number(hit.similarity.toFixed(4)) }))
   const hits = scoredBeforeThreshold.filter(hit => hit.similarity >= minSimilarity)   // 阈值判据不变(cl-218: 融合不得泄漏进过阈判定)
   // cl-122: 记录**过阈后的原始候选数**与头部相似度——三个调度杠杆接连被"候选供给"卡住,
