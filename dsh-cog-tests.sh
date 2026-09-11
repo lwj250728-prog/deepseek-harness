@@ -6048,13 +6048,13 @@ import os, re
 src = open(os.path.expanduser("~/dsh-fork/dsh-deploy-window.sh"), encoding="utf8").read()
 assert "CANONICAL_LOG=" in src, "部署脚本没有 canonical 账本常量"
 seg = src[src.index("emit() {"):src.index("if [ \"$PLAN_ONLY\" = 1 ]")]
-line = next((l for l in seg.splitlines() if l.strip().startswith("for target in")), None)
-assert line, "emit 里没有遍历写入目标(应当同时写 canonical 与 --log)"
-raw = line.split("in", 1)[1].split("#")[0].strip().rstrip(":").strip()   # 行尾注释不算目标
-targets = {t.strip() for t in raw.strip("(){}[] ").split(",") if t.strip()}
-assert {"canonical", "log"} <= targets, "emit 未同时写 canonical 与 --log: %s" % sorted(targets)
+# 2026-09-12 00:5x 再修口径: 干跑(既不重启也不复跑)已被**豁免**写 canonical(T180 行为验证),
+# 故不再要求"写盘目标里同时有 canonical 与 log"; 改判"canonical 必须出现在某个写盘分支里"
+# (即真实部署仍落权威账本)。判据的口径随设计变, 但**意图**(部署史必须落权威账本)不变。
+found = re.findall(r"\{(canonical[^}]*)\}", seg)
+assert found, "emit 的写盘目标里没有 canonical(真实部署将不落权威账本)"
 assert "open(target" in seg, "emit 没有按遍历目标落盘"
-print("emit 同时写 canonical 与 --log(按行解析, 不靠正则): %s" % sorted(targets))
+print("真实部署仍写 canonical(干跑豁免由 T180 行为验证): {%s}" % found[0])
 '
 # ── T167 孵化预测机制不得腐烂成"永远命中"(cl-249) ──
 # 起因: 把孵化从"能自证"推进到"能预测"时先写出的区间是"二项比例区间 × horizon ±1" ⇒ 10 次唤醒给出
@@ -6520,6 +6520,40 @@ same_window = [r for r in rows if r.get("ts") >= last["ts"]]
 assert any(r.get("trigger") == "emergency-fallback" or (r.get("scope") == "global" and r.get("accepted"))
            for r in same_window), "最近一次自动尝试后既无回退也无被接受的 global: %s" % last
 print("最近一次自动尝试后已伴随回退/被接受的 global")
+'
+# ── T180 部署记录必须真的带上 stage/suiteStatus(参数展开静默丢字段) ──
+# 起因(测试审视帧): `emit` 里写的是 `"${3:-{}}"` —— bash 把**第一个未转义的 `}`** 当展开结束, 于是实际传成
+# `<json>}`, 下游 json.loads 抛错并被 `except: pass` **静默吞掉**。后果: 账本 50 条 done 行**从来没有**
+# stage/suiteStatus ⇒ cl-214「把部署成败与套件裁决分开记」的修复**从未落进产物**(记录通道看起来在工作,
+# 实际一直在丢字段)。本组守两件: ①干跑的行必须带 stage(端到端, 直接跑一次干跑到临时 --log);
+# ②干跑不得写 canonical 账本(T145 的意图, 但此前只被合成沙箱覆盖, 手工干跑仍会污染)。
+echo "[T180] 部署记录带 stage / 干跑不污染 canonical"
+t "干跑必须写出带 stage 的 done 行(参数展开不得静默丢字段)" python3 -c '
+import json, os, subprocess, tempfile
+tmp = tempfile.mkdtemp(); log = os.path.join(tmp, "dry.jsonl")
+r = subprocess.run(["bash", os.path.expanduser("~/dsh-fork/dsh-deploy-window.sh"),
+                    "--skip-restart", "--skip-suite", "--delay-seconds", "0", "--log", log],
+                   capture_output=True, text=True, timeout=300,
+                   env=dict(os.environ, DSH_RUN_ORIGIN="probe"))
+assert r.returncode == 0, "干跑失败: %s" % (r.stderr or r.stdout)[-160:]
+rows = [json.loads(l) for l in open(log, encoding="utf8") if l.strip()]
+done = [x for x in rows if x.get("phase") == "done"]
+assert done, "干跑没有写 done 行"
+assert done[-1].get("stage"), "done 行缺 stage —— extra JSON 又被静默丢掉了(检查 emit 的参数展开): %s" % done[-1]
+assert done[-1]["stage"] == "no-suite", "干跑的 stage 应为 no-suite: %s" % done[-1]["stage"]
+print("干跑 done 行带 stage=%s" % done[-1]["stage"])
+'
+t "干跑不得写 canonical 部署账本" python3 -c '
+import json, os, subprocess, tempfile
+canon = os.path.expanduser("~/.dsh/cognitive-pipeline/deploy-log.jsonl")
+before = sum(1 for l in open(canon, encoding="utf8") if l.strip()) if os.path.exists(canon) else 0
+tmp = tempfile.mkdtemp()
+subprocess.run(["bash", os.path.expanduser("~/dsh-fork/dsh-deploy-window.sh"),
+                "--skip-restart", "--skip-suite", "--delay-seconds", "0", "--log", os.path.join(tmp, "dry.jsonl")],
+               capture_output=True, text=True, timeout=300, env=dict(os.environ, DSH_RUN_ORIGIN="probe"))
+after = sum(1 for l in open(canon, encoding="utf8") if l.strip()) if os.path.exists(canon) else 0
+assert after == before, "干跑污染了 canonical 账本(%d → %d 行)" % (before, after)
+print("干跑未写 canonical(仍 %d 行)" % after)
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。

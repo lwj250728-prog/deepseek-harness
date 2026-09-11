@@ -49,7 +49,13 @@ done
 CANONICAL_LOG="$COG/deploy-log.jsonl"
 
 emit() { # emit <phase> <status> [extra-json]
-  python3 - "$CANONICAL_LOG" "$LOG" "$1" "$2" "$ORIGIN" "$DELAY" "$POST_WAIT" "${3:-{}}" <<'PY'
+  # 2026-09-12 00:5x 修: 原写法 `"${3:-{}}"` 里第一个未转义的 `}` 会**提前结束参数展开** ⇒ 实际传的是
+  # `<json>}` ⇒ 下游 json.loads 抛错 ⇒ 被 except 静默吞掉 ⇒ **账本 50 条 done 行从来没有 stage/
+  # suiteStatus**。也就是说 cl-214「把部署成败与套件裁决分开记」的修复从未落进产物(cl-258 家族:
+  # 记录通道看起来在工作, 实际一直在丢字段)。显式取变量, 不用花括号默认值。
+  local _extra="${3:-}"
+  [ -n "$_extra" ] || _extra='{}'
+  python3 - "$CANONICAL_LOG" "$LOG" "$1" "$2" "$ORIGIN" "$DELAY" "$POST_WAIT" "$_extra" <<'PY'
 import datetime, json, os, sys, socket
 canonical, log, phase, status, origin, delay, postwait, extra = sys.argv[1:9]
 row = {"ts": datetime.datetime.now().astimezone().isoformat(), "phase": phase, "status": status,
@@ -60,7 +66,11 @@ try:
 except Exception:
     pass
 line = json.dumps(row, ensure_ascii=False) + "\n"
-for target in {canonical, log}:        # set 去重: --log 缺省时 canonical 与 log 是同一路径, 否则每条写两遍
+# 干跑(既不重启也不复跑)只在调用方指定的 --log 留痕, **不写 canonical**: 否则探针/自检会把
+# "部署史"灌进权威账本(T145 的"干跑不得污染生产日志"正是这条意图; 2026-09-12 00:5x 实测我自己的
+# 两次 probe 就因为少了这个判断进了 canonical)。
+targets = {log} if canonical == log or os.environ.get("DSH_DEPLOY_DRY") == "1" else {canonical, log}
+for target in targets:
     if not target:
         continue
     os.makedirs(os.path.dirname(target), exist_ok=True)
@@ -75,6 +85,9 @@ if [ "$PLAN_ONLY" = 1 ]; then
   echo "记录: $LOG (plan-only 不写记录)"
   exit 0
 fi
+
+# 干跑 = 既不重启也不复跑: 由 emit 决定是否写 canonical(见 emit 里对 DSH_DEPLOY_DRY 的判断)
+if [ "$SKIP_RESTART" = 1 ] && [ "$SKIP_SUITE" = 1 ]; then export DSH_DEPLOY_DRY=1; fi
 
 emit start running "{\"pid\": $$}"
 sleep "$DELAY"
