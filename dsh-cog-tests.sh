@@ -7212,6 +7212,49 @@ back = cur().get("triggerThresholds")
 assert back == {"kernel": 0.6, "focus": 0.55}, "恢复的不是原值: " + json.dumps(back, ensure_ascii=False)
 print("关闭 ⇒ {kernel:1.01,focus:1.01}(对象) / 恢复 ⇒ 原值 / 无据拒绝")
 '
+# ── T189 门限裁决的时代过滤必须真的生效(tp-168) ──
+# 起因: 裁决样本的时代起点由 --post-since 界定(采集方式变更=新时代, cl-263)。若该过滤静默失效, 裁决会把
+# "旧上限下被截断的行"与未截断的行混采 —— 正是刚修掉的偏差换个入口回来。本组用沙箱三例守:
+# ①全史统计两批都在 ②给了边界只统计边界之后 ③边界在未来 ⇒ 明确报"该时代内没有回合"(不拿全史凑数)。
+# 执行中还抓到一处设计冲突: 30 条下限原先是**对 era 过滤后的集合**施加的 ⇒ 新时代样本 <30 条会把裁决整个挡住,
+# 哪怕该时代已有 >=10 个带 belowGate 的回合(那才是本工具的代表性判据) ⇒ 已把下限改为只用于"数据源是否可用"。
+echo "[T189] 门限裁决的时代过滤(全史/边界后/未来边界)"
+t "时代过滤必须真的生效: 边界后只统计该时代, 未来边界不得拿全史凑数" python3 -c '
+import json, os, subprocess, tempfile, datetime
+TZ = datetime.timezone(datetime.timedelta(hours=8)); now = datetime.datetime.now(TZ)
+tmp = tempfile.mkdtemp(); ids = ["exp_%03d" % i for i in range(60)]
+open(os.path.join(tmp, "experiences.jsonl"), "w", encoding="utf8").write("\n".join(json.dumps(
+    {"expId": e, "sar": {"situation": "s", "action": "a", "outcome": "o",
+                         "outcomeUtility": {"materialGain": i % 10, "emotionalValence": i % 5}}},
+    ensure_ascii=False) for i, e in enumerate(ids)) + "\n")
+boundary = now - datetime.timedelta(hours=2); bms = boundary.timestamp() * 1000
+rows = []
+for k in range(20):        # 边界前: 有 preTop, 无 belowGate(旧世界)
+    rows.append({"stage": "injected", "t": bms - (k + 1) * 600000, "expIds": [ids[k]], "cited": False,
+                 "candidates": 2, "overThreshold": 1,
+                 "preTop": [{"expId": ids[k], "similarity": 0.6}, {"expId": ids[k + 1], "similarity": 0.55}]})
+for k in range(20, 55):    # 边界后: 带 belowGate(埋点之后)
+    rows.append({"stage": "injected", "t": bms + (k - 19) * 600000, "expIds": [ids[k]], "cited": False,
+                 "candidates": 2, "overThreshold": 1,
+                 "preTop": [{"expId": ids[k], "similarity": 0.6}, {"expId": ids[k + 1], "similarity": 0.55}],
+                 "belowGate": [{"expId": ids[k + 2], "similarity": 0.4}, {"expId": ids[k + 3], "similarity": 0.35}]})
+open(os.path.join(tmp, "retrieval-audit.jsonl"), "w", encoding="utf8").write(
+    "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+env = dict(os.environ, DSH_COG_DIR=tmp)
+def run(*extra):
+    r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json"] + list(extra),
+                       capture_output=True, text=True, env=env, timeout=900)
+    return r, (json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else None)
+_, all_d = run()
+_, era_d = run("--post-since", boundary.isoformat())
+r3, _ = run("--post-since", (now + datetime.timedelta(hours=6)).isoformat())
+assert all_d and all_d["turns"] == 55, "全史条数不对: " + str(all_d and all_d.get("turns"))
+assert all_d["roundsWithBelowGate"] == 35, "全史带埋点回合不对: " + str(all_d.get("roundsWithBelowGate"))
+assert era_d and era_d["turns"] == 35, "给了边界却没有只统计该时代(实得 %s)" % (era_d and era_d.get("turns"))
+assert era_d["roundsWithBelowGate"] == 35, "时代内带埋点回合不对: " + str(era_d.get("roundsWithBelowGate"))
+assert r3.returncode != 0, "边界在未来却照样出了裁决(拿全史凑数)"
+print("全史 55/35 ⇒ 时代后 35/35 ⇒ 未来边界明确拒绝(exit %d)" % r3.returncode)
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

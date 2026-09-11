@@ -115,8 +115,15 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         print('读不到审计: %s' % exc, file=sys.stderr)
         return 2
-    if len(records) < 30:
-        print('数据不足(%d 条注入回合), 不下结论' % len(records), file=sys.stderr)
+    # 2026-09-12 05:4x 修设计冲突(沙箱 tp-168 当场抓到): 30 条下限原先是**对 era 过滤后的集合**施加的,
+    # 于是"新时代样本 <30 条"会把裁决整个挡住 —— 哪怕该时代已有 >=10 个带 belowGate 的回合(那才是本工具的
+    # 代表性判据)。改为: 下限只用于**数据源是否可用**(过滤前), 时代内的代表性交给 roundsWithBelowGate/截断闸。
+    raw_records = sum(1 for line in open(mod.AUDIT, encoding='utf8') if line.strip())
+    if raw_records < 30:
+        print('数据源不足(%d 行审计), 不下结论' % raw_records, file=sys.stderr)
+        return 1
+    if not records:
+        print('该时代内没有注入回合, 不下结论(era 起点: %s)' % args.post_since, file=sys.stderr)
         return 1
 
     grid = [float(x) for x in args.grid.split(',')]
