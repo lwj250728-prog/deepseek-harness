@@ -124,10 +124,28 @@ def main() -> int:
     lm = ms_of(live_after)
     if lm is not None and start_ms <= lm < end_ms:
         contaminated = True
+    # 2026-09-12 06:1x 补: 关闭必须**两侧同时**生效 —— 抬 triggerThresholds 只停哨兵提醒, 行动帧由
+    # quiet-driver 按 status/waitChecker 选(实测查证), 故窗口内若仍出现该目标的行动帧 ⇒ 开关没关全, 结论作废。
+    frames_in_window = 0
+    try:
+        for line in open(os.path.join(D, 'quiet-driver-frames.jsonl'), encoding='utf8'):
+            if not line.strip():
+                continue
+            f = json.loads(line)
+            if f.get('kind') != 'action-frame' or str(f.get('goalId')) != args.target:
+                continue
+            fm = ms_of(f.get('ts'))
+            if fm is not None and start_ms <= fm < end_ms:
+                frames_in_window += 1
+    except Exception:
+        frames_in_window = -1
+    if frames_in_window > 0:
+        contaminated = True
 
     dropped_more_than_controls = all((ratio is not None and ratio <= r) for r in ctrl_ratios) if ctrl_ratios else True
     if contaminated:
-        verdict, reason = 'contaminated', '干预窗口内该目标仍被唤醒过(lastTriggerAt=%s) ⇒ 开关没真关上, 结论作废' % live_after
+        verdict, reason = 'contaminated', ('干预窗口内该目标仍被唤醒过(lastTriggerAt=%s / 窗口内行动帧 %d 条) '
+                                           '⇒ 开关没真关上, 结论作废' % (live_after, frames_in_window))
     elif ratio is not None and ratio <= 0.5 and dropped_more_than_controls:
         verdict, reason = 'causal', ('目标推进速率 %.3f→%.3f 次/h(比 %.2f, 降幅大于所有对照 %s) ⇒ 唤醒是推进的因'
                                      % (t_rate_b, t_rate_i, ratio, ctrl_ratios))
@@ -140,6 +158,7 @@ def main() -> int:
                'hours': round(hours, 2), 'eraSince': era_since,
                'targetBaselineRate': round(t_rate_b, 3), 'targetInterventionRate': round(t_rate_i, 3),
                'targetRatio': ratio if ratio is None else (round(ratio, 3) if ratio != float('inf') else 'inf'),
+               'framesInWindow': frames_in_window,
                'controls': controls, 'verdict': verdict, 'reason': reason}
     with open(OUT, 'a', encoding='utf8') as f:
         f.write(json.dumps(payload, ensure_ascii=False) + '\n')

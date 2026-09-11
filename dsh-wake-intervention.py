@@ -33,6 +33,11 @@ POOL = os.path.join(D, 'dormant-goals.jsonl')
 RECORD = os.path.join(D, 'wake-interventions.jsonl')
 WRITER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dsh-goal-pool-write.py')
 OFF_THRESHOLDS = {'kernel': 1.01, 'focus': 1.01}   # 相似度上界为 1 ⇒ 1.01 永不命中
+# 2026-09-12 06:1x **实测查证后补的关键一刀**: dormant-goal 哨兵读 `triggerThresholds`, 但 quiet-driver 的
+# **行动帧**只读 `status`/`nextAction`/`waitChecker` —— 只抬阈值 ⇒ 孵化提醒停了, **行动帧照来**(实验只关掉一半信号,
+# 结论会失真)。故关闭时**同时**把 waitChecker 设成永不满足(`/bin/false`): cl-250 已把两侧语义统一(exit 0=该干),
+# 于是这一个字段能同时关掉哨兵与驱动两边的唤醒。
+OFF_WAIT_CHECKER = '/bin/false'
 
 
 def now_iso() -> str:
@@ -64,12 +69,14 @@ def records() -> list[dict]:
     return out
 
 
-def apply(goal_id: str, thresholds: dict, reason: str) -> int:
-    """通过唯一写入方改 triggerThresholds(保持写入口收口)。"""
-    r = subprocess.run(['python3', WRITER, goal_id, '--pool', POOL,
-                        '--set', 'triggerThresholds=' + json.dumps(thresholds, ensure_ascii=False),
-                        '--reason', reason, '--write'],
-                       capture_output=True, text=True, timeout=300)
+def apply(goal_id: str, thresholds: dict, reason: str, wait_checker: str | None = None) -> int:
+    """通过唯一写入方改 triggerThresholds(与 waitChecker)(保持写入口收口)。"""
+    cmd = ['python3', WRITER, goal_id, '--pool', POOL,
+           '--set', 'triggerThresholds=' + json.dumps(thresholds, ensure_ascii=False)]
+    if wait_checker is not None:
+        cmd += ['--set', 'waitChecker=' + wait_checker]
+    cmd += ['--reason', reason, '--write']
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     print((r.stdout or '') + (r.stderr or ''), end='')
     return r.returncode
 
@@ -104,18 +111,21 @@ def main() -> int:
         print(str(exc), file=sys.stderr)
         return 3
     orig = row.get('triggerThresholds')
+    orig_wait = row.get('waitChecker') or ''
     if args.cmd == 'disable':
-        if orig == OFF_THRESHOLDS:
-            print('已经是关闭状态(阈值 %s), 幂等返回' % json.dumps(orig, ensure_ascii=False))
+        if orig == OFF_THRESHOLDS and str(orig_wait).strip() == OFF_WAIT_CHECKER:
+            print('已经是关闭状态(阈值 %s + waitChecker %s), 幂等返回' % (json.dumps(orig, ensure_ascii=False), OFF_WAIT_CHECKER))
             return 0
-        rc = apply(args.goal, OFF_THRESHOLDS, args.reason or '关闭唤醒做干预实验')
+        rc = apply(args.goal, OFF_THRESHOLDS, args.reason or '关闭唤醒做干预实验', OFF_WAIT_CHECKER)
         if rc == 0:
             with open(RECORD, 'a', encoding='utf8') as f:
                 f.write(json.dumps({'ts': now_iso(), 'event': 'disable', 'goal': args.goal,
                                     'thresholdsBefore': orig, 'thresholdsAfter': OFF_THRESHOLDS,
+                                    'waitCheckerBefore': orig_wait, 'waitCheckerAfter': OFF_WAIT_CHECKER,
                                     'triggerCountBefore': row.get('triggerCount'),
                                     'plannedHours': args.hours, 'reason': args.reason}, ensure_ascii=False) + '\n')
-            print('[干预] %s 唤醒已关闭(阈值 %s), 计划 %g 小时后恢复' % (args.goal, json.dumps(OFF_THRESHOLDS), args.hours))
+            print('[干预] %s 唤醒已关闭(阈值 %s + waitChecker %s), 计划 %g 小时后恢复'
+                  % (args.goal, json.dumps(OFF_THRESHOLDS), OFF_WAIT_CHECKER, args.hours))
         return rc
     # restore
     prior = [r for r in records() if r.get('goal') == args.goal and r.get('event') == 'disable']
@@ -126,11 +136,13 @@ def main() -> int:
     if not isinstance(back, dict) or not back:
         print('disable 记录里没有原阈值 ⇒ 拒绝猜测', file=sys.stderr)
         return 2
-    rc = apply(args.goal, back, args.reason)
+    back_wait = prior[-1].get('waitCheckerBefore')
+    rc = apply(args.goal, back, args.reason, back_wait if isinstance(back_wait, str) else '')
     if rc == 0:
         with open(RECORD, 'a', encoding='utf8') as f:
             f.write(json.dumps({'ts': now_iso(), 'event': 'restore', 'goal': args.goal,
-                                'thresholdsAfter': back, 'restoredFrom': prior[-1].get('ts'),
+                                'thresholdsAfter': back, 'waitCheckerAfter': prior[-1].get('waitCheckerBefore'),
+                                'restoredFrom': prior[-1].get('ts'),
                                 'reason': args.reason}, ensure_ascii=False) + '\n')
         print('[干预] %s 唤醒已恢复(阈值 %s)' % (args.goal, json.dumps(back, ensure_ascii=False)))
     return rc

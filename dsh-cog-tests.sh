@@ -7183,6 +7183,34 @@ print("时代读数 %d 帧/%.0f%% vs 全史 %d 帧/%.0f%%; 缺声明时已显式
 # 干预若要可信, 开关必须①真的改到池字段且**类型正确**(--set 传 JSON 原先落成字符串 ⇒ 干预静默无效)
 # ②原值落盘(回滚不靠记忆) ③无原值时拒绝猜测。本组用沙箱守这三件事。
 echo "[T188] 唤醒开关(关得掉 / 类型对 / 回滚有据 / 无据不猜)"
+t "关闭必须两侧同时生效(哨兵阈值 + 驱动 waitChecker), 恢复亦然" python3 -c '
+# 2026-09-12 06:1x: 只抬 triggerThresholds 只停"孵化提醒", **行动帧照来**(quiet-driver 按 status/waitChecker 选)
+# ⇒ 实验只关掉一半信号。守: disable 后两侧都要关; restore 后两侧都要还原。
+import json, os, subprocess, tempfile
+W = "/home/ubuntu/dsh-fork/dsh-wake-intervention.py"
+tmp = tempfile.mkdtemp(); pool = os.path.join(tmp, "dormant-goals.jsonl")
+open(pool, "w", encoding="utf8").write(json.dumps({"id": "g-i", "status": "active", "nextAction": "步",
+                                                   "triggerThresholds": {"kernel": 0.6, "focus": 0.55},
+                                                   "waitChecker": "/bin/true"}, ensure_ascii=False) + "\n")
+env = dict(os.environ, DSH_COG_DIR=tmp)
+def run(*a): return subprocess.run(["python3", W] + list(a), capture_output=True, text=True, env=env, timeout=300)
+def cur():
+    r = None
+    for l in open(pool, encoding="utf8"):
+        if l.strip():
+            x = json.loads(l)
+            if x.get("id") == "g-i": r = x
+    return r
+assert run("disable", "g-i", "--hours", "24", "--reason", "沙箱").returncode == 0
+th, wc = cur().get("triggerThresholds"), cur().get("waitChecker")
+assert isinstance(th, dict) and th.get("focus") == 1.01, "阈值没关: " + json.dumps(th, ensure_ascii=False)
+assert "/bin/false" in str(wc), "waitChecker 没关(行动帧会照来): " + repr(wc)
+assert run("restore", "g-i").returncode == 0
+th2, wc2 = cur().get("triggerThresholds"), cur().get("waitChecker")
+assert th2 == {"kernel": 0.6, "focus": 0.55}, "阈值没还原: " + json.dumps(th2, ensure_ascii=False)
+assert "/bin/true" in str(wc2), "waitChecker 没还原: " + repr(wc2)
+print("关闭: 阈值+waitChecker 双关 / 恢复: 两者各自还原")
+'
 t "干预开关必须真改池字段且类型正确, 回滚有据, 无据拒绝" python3 -c '
 import json, os, subprocess, tempfile
 W = "/home/ubuntu/dsh-fork/dsh-wake-intervention.py"
