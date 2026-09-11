@@ -129,12 +129,31 @@ def main() -> int:
     ap.add_argument('--since', default=None,
                     help='只统计该时刻之后写入的行动帧(ISO 或 epoch ms)。全时读数会把"条件门装好之前"与之后混在一起 '
                          '—— 复测某目标是否变好时, 必须限定时代, 否则结论由旧账决定')
+    ap.add_argument('--lifetime', action='store_true',
+                    help='强制全史读数(下限)。默认读 attribution-era.json 声明的时代起点 —— 2026-09-12 实测: '
+                         '记录通道修复前的帧其推进**永远记不上**, 全史读数把该目标压到 6%%, 而时代读数是 100%%; '
+                         '若把全史当现状, 会用一个量错的尺子去改没坏的东西')
     ap.add_argument('--noise-window-hours', type=float, default=NOISE_WINDOW_HOURS,
                     help='噪声裁决只看最近这么多小时内的行动帧(默认 72): 全部历史帧会把旧 nextAction 时代的'
                          '步法与门控冻结时段混进今天的裁决(cl-261)')
     ap.add_argument('--reverse', action='store_true',
                     help='同时算**反向判据**: 有多少次池推进**没有**对应的行动帧(即没被唤醒也被推进了)')
     args = ap.parse_args()
+    era_path = os.path.join(DIR, 'attribution-era.json')
+    era_since = None
+    era_note = None
+    if not args.lifetime and not args.since:
+        try:
+            era = json.load(open(era_path, encoding='utf8'))
+            era_since = era.get('since')
+            era_note = era.get('reason')
+        except Exception:
+            era_since = None
+        if era_since:
+            args.since = era_since
+        else:
+            print('[时代] 未声明时代起点(attribution-era.json 缺失或无 since) ⇒ 本次为**全史读数(下限)**, '
+                  '不要把低读数当成"提醒没用"(2026-09-12 实测: 记录通道修复前 16 帧的推进永远记不上)', file=sys.stderr)
     try:
         frames = [r for r in load(FRAMES) if r.get('kind') == 'action-frame']
         if args.since:
@@ -300,6 +319,7 @@ def main() -> int:
     payload = {
         'ts': now_iso(), 'origin': os.environ.get('DSH_RUN_ORIGIN') or 'manual',
         'since': args.since,
+        'eraSince': era_since, 'eraReason': era_note, 'lifetime': bool(args.lifetime),
         'windowMin': args.window_min, 'preToleranceMin': args.pre_tolerance_min,
         'noiseRule': ('最近 %gh 内 frames>=%d 且 严格归因率<%d%% 且 目标当前 active 且 **其 waitChecker 未拦着**'
                       % (args.noise_window_hours, NOISE_MIN_FRAMES, int(NOISE_MAX_RATE * 100))),

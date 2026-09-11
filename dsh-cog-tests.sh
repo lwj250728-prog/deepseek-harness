@@ -7150,6 +7150,34 @@ assert d_ctl["verdict"] in ("insufficient", "no-signal"), "控制后仍给出催
 print("未控 bins=%d(idle=%d) / 对照后 bins=%d(idle=%d, 判读 %s)"
       % (d_raw["bins"], d_raw["idleBins"], d_ctl["bins"], d_ctl["idleBins"], d_ctl["verdict"]))
 '
+# ── T187 归因读数的"时代起点"必须由机制声明, 不靠我记得传参(cl-262) ──
+# 起因(2026-09-12 05:1x): 记录通道修复前的帧其推进**永远记不上** ⇒ 全史读数被系统性压低(经验库 6.2%),
+# 而时代读数(修复后)是 **100%(5/5)**; 我据此差点按"噪声"处置一个没坏的目标。纪律: 改采集方式 ⇒ 时代起点随之更新,
+# 且**读数默认就必须是时代读数**(否则下一个会话/下一帧又会把全史当现状)。
+echo "[T187] 归因读数默认时代化(声明在册 / 默认生效 / 缺声明必须显式警告)"
+t "归因读数默认必须走时代口径, 且缺声明时显式警告而非静默全史" python3 -c '
+import json, os, subprocess, tempfile
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+era = json.load(open(os.path.join(D, "attribution-era.json"), encoding="utf8"))
+assert era.get("since"), "attribution-era.json 缺 since(时代起点未声明)"
+assert era.get("reason"), "时代声明缺理由(无从判断该不该更新)"
+r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-wake-attribution.py", "--json", "--no-record"],
+                   capture_output=True, text=True, timeout=600)
+assert r.returncode == 0, "时代读数失败: " + (r.stderr or r.stdout)[-200:]
+d = json.loads(r.stdout.strip().splitlines()[-1])
+assert d.get("eraSince") == era["since"], "默认没有应用声明的时代起点: " + str(d.get("eraSince"))
+r2 = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-wake-attribution.py", "--json", "--no-record", "--lifetime"],
+                    capture_output=True, text=True, timeout=600)
+d2 = json.loads(r2.stdout.strip().splitlines()[-1])
+assert d2.get("lifetime") is True and d2["frames"] > d["frames"], "全史读数没有比时代读数更大(时代没生效或全史丢了帧)"
+# 缺声明时: 必须**显式警告**并退化为全史, 不得静默
+tmp = tempfile.mkdtemp()
+r3 = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-wake-attribution.py", "--json", "--no-record"],
+                    capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=tmp), timeout=600)
+assert "全史读数(下限)" in (r3.stderr + r3.stdout), "缺时代声明时没有显式警告(会静默用全史当现状)"
+print("时代读数 %d 帧/%.0f%% vs 全史 %d 帧/%.0f%%; 缺声明时已显式警告"
+      % (d["frames"], 100 * (d["attributionRate"] or 0), d2["frames"], 100 * (d2["attributionRate"] or 0)))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
