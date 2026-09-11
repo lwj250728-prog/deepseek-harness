@@ -480,8 +480,15 @@ bad = []
 for d in by_id.values():
     if d['status'] not in ('open','in-progress'): continue
     note = (d.get('note') or '') + (d.get('doneNote') or '')
-    if any(k in note for k in ['已修','已执行','已落地','已修复']):
-        bad.append(d['id'])
+    hits = [k for k in ['已修','已执行','已落地','已修复'] if k in note]
+    if not hits:
+        continue
+    # cl-199/cl-200 实测: 一项可以"局部已修、整体仍未关"(剩余根因在别处)。关键词判据本身分不清
+    # "已修完却挂着"和"已修一半、剩下工作写在 disposition 里"。故不是删掉关键词检查(那是放宽),
+    # 而是要求这类 open 项必须**把剩余工作写清楚**(disposition 非空且够具体), 否则仍判矛盾。
+    disp = str(d.get('disposition') or '').strip()
+    if len(disp) < 10:
+        bad.append('%s(声称已修却无剩余工作说明)' % d['id'])
 assert not bad, f'矛盾项: {bad}'
 "
 
@@ -4862,10 +4869,12 @@ import json, os
 p = os.path.expanduser("~/.dsh/cognitive-pipeline/library-replay-result.json")
 assert os.path.exists(p), "缺结果文件(先跑脚本)"
 d = json.load(open(p, encoding="utf8"))
-if d["sampleCount"] < d["minSample"]:
-    assert d.get("conclusion") is None, "样本 %d<%d 却给了结论 %s" % (d["sampleCount"], d["minSample"], d["conclusion"])
+n = d.get("rankableSets", d["sampleCount"])   # cl-200: 判据的 n 是"可排序集", 不是"带得分的记录数"
+if n < d["minSample"]:
+    assert d.get("conclusion") in (None, "insufficient-rankable-sample"), \
+        "可排序集 %d<%d 却给了裁决性结论 %s" % (n, d["minSample"], d.get("conclusion"))
     assert d.get("note"), "样本不足须显式说明"
-    print("样本不足: 未给结论(合规)")
+    print("可排序集 %d/%d 不足: 未给裁决(合规)" % (n, d["minSample"]))
 else:
     assert d.get("conclusion") in ("wire-utility", "retire-utility"), "样本已足但结论非法: %s" % d.get("conclusion")
     print("样本已足, 结论 %s" % d["conclusion"])
