@@ -4741,26 +4741,37 @@ pool = os.path.join(D, "dormant-goals.jsonl")
 assert os.path.exists(log) and os.path.exists(pool), "缺 log 或池文件"
 entries = [json.loads(l) for l in open(log, encoding="utf8") if l.strip()]
 log_last = max((e.get("ts") or "" for e in entries), default="")
-pool_last = ""
+def parse(v):
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M"):
+        try: return datetime.datetime.fromisoformat(str(v).replace("Z","")[:19])
+        except Exception: pass
+    return None
+# 只认**日期开头且可解析**的 note。实测教训(2026-09-11 08:5x): 池里有一条写的是模糊时间
+# "2026-09-09 13:5x"(分钟位是个 x), 旧写法取字符串最大值后再解析 ⇒ 解析成 None ⇒ 断言直接崩(判红),
+# 而真正的问题只是"有人写了个模糊时间"。判据不该被一条脏数据杀死: 解析不了的**跳过并报数**。
+notes_ts, unparsable = [], []
 for line in open(pool, encoding="utf8"):
     if not line.strip(): continue
     g = json.loads(line)
-    for n in (g.get("notes") or []):
-        # 只认**日期开头**的 note: 部分 note 是无时间戳的自由文本("起点证据: …"), 按前 16 字符比大小会取到它们
-        if isinstance(n, str) and re.match(r"\d{4}-\d{2}-\d{2}", n) and n[:16] > pool_last:
-            pool_last = n[:16]
-assert log_last and pool_last, "时间戳解析失败(断言前提不成立)"
-def parse(v):
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M"):
-        try: return datetime.datetime.fromisoformat(v.replace("Z","")[:19])
-        except Exception: pass
-    return None
-a, b = parse(log_last), parse(pool_last)
+    notes = g.get("notes")
+    if not isinstance(notes, list):   # 字符串型 notes 不参与(无法逐条取时间)
+        continue
+    for n in notes:
+        if not (isinstance(n, str) and re.match(r"\d{4}-\d{2}-\d{2}", n)):
+            continue
+        t = parse(n[:16])
+        if t is None:
+            unparsable.append(n[:20])
+            continue
+        notes_ts.append(t)
+assert notes_ts, "池里没有可解析的日期型 note(断言前提不成立)"
+pool_last = max(notes_ts).strftime("%Y-%m-%d %H:%M")
+a, b = parse(log_last), max(notes_ts)
 assert a and b, "时间戳解析失败: %s / %s" % (log_last, pool_last)
 gap = (b - a).total_seconds() / 3600.0
 # notes 比采纳日志新 >2h ⇒ 说明有目标改动只写了 notes 没写 log(采纳轨迹脱节)
 assert gap <= 2.0, "notes 最新(%s)比采纳日志(%s)新 %.1fh: 有改动未入 incubation-log" % (pool_last, log_last, gap)
-print("采纳日志与 notes 同步(差 %.1fh)" % gap)
+print("采纳日志与 notes 同步(差 %.1fh; 跳过 %d 条模糊时间)" % (gap, len(unparsable)))
 '
 
 # ── T134 影子对照的前提: 审计必须落**候选级得分**(cl-183) ──
@@ -5290,28 +5301,65 @@ t "账本时间戳必须同形且带 +08:00 偏移" python3 -c '
 import json, os, re
 D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
 EPOCH_ALLOW = {"quiet-driver-frames.jsonl", "quiet-driver-heartbeat.jsonl"}  # 历史就是 epoch(ms), 不改历史
+import subprocess as _sp
+after = int(_sp.run(["python3", "/home/ubuntu/dsh-fork/dsh-deploy-boundary.py"],
+                    capture_output=True, text=True, timeout=60).stdout.strip() or 0)
+def boundary_of(r):
+    # 账本行自己的时刻: ISO ts / doneAt / epoch ms
+    import datetime as _dt
+    v = r.get("ts") or r.get("doneAt")
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return _dt.datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp() * 1000
+        except Exception:
+            return None
+    return None
 pat = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(\.\d+)?\+08:00$")
 bad, checked = [], 0
 for name in sorted(os.listdir(D)):
     if not name.endswith(".jsonl") or name in EPOCH_ALLOW:
         continue
     path = os.path.join(D, name)
-    rows = [l for l in open(path, encoding="utf8") if l.strip()]
+    rows = [json.loads(l) for l in open(path, encoding="utf8") if l.strip()]
     if not rows:
         continue
-    try:
-        r = json.loads(rows[-1])
-    except Exception:
-        continue
-    v = r.get("ts") or r.get("doneAt")
-    if not v:
+    # 只看**部署边界之后**写下的行: 旧行可能是修复前的 Z(拿它判会假红), 而只看末行又会假绿
+    # —— 旁路三问实测指出: 只查末行时, 一个仍在写 Z 的账本只要最近没写就照样判绿。故扫"新行"。
+    recent = [r for r in rows if (boundary_of(r) or 0) > after]
+    if not recent:
         continue
     checked += 1
-    if not pat.match(str(v)):
-        bad.append("%s: %s" % (name, str(v)[:30]))
+    for r in recent:
+        v = r.get("ts") or r.get("doneAt")
+        if not v:
+            continue
+        if not pat.match(str(v)):
+            bad.append("%s: %s" % (name, str(v)[:30]))
+            break
 assert not bad, "账本时间戳不同形(UTC/无偏移会让跨账本比时间得出反向结论): " + repr(bad[:4])
 assert checked >= 5, "只检查到 %d 个账本 —— 判据前提不成立" % checked
 print("检查 %d 个账本, 时间戳均为 +08:00 同形" % checked)
+'
+# ── T149 active 目标不得停在"无法解析的等待"上(cl-206) ──
+# 起因: cl-198 只修了**日期型**等待(到点恢复可执行); 事件型("待事件(样本≥30)")无人能解析 ⇒ 唤醒侧永久跳过。
+# 实测: goal-experience-library 触发 0/采纳 0, 而它等的条件局部早就满足(记录数 41≥30, 真闸门是可排序集 12/30)。
+# 判据: active 目标的 nextAction 若被判为"等待中", 必须可解析(带时刻, 或带 waitChecker 命令)。
+echo "[T149] active 目标不得停在不可解析的等待(判据须可解析日期或带 waitChecker)"
+t "active 目标须为可执行或可解析等待" python3 /home/ubuntu/dsh-fork/dsh-goal-wait-lint.py
+t "该判据须能开火(合成'待事件'且无 waitChecker)" python3 -c '
+import json, os, subprocess, tempfile, time
+d = tempfile.mkdtemp()
+now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+with open(os.path.join(d, "goals.jsonl"), "w", encoding="utf8") as f:
+    f.write(json.dumps({"id": "goal-probe", "status": "active",
+                        "nextAction": "待事件(样本≥30 自动可判)", "ts": now}, ensure_ascii=False) + "\n")
+r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-goal-wait-lint.py",
+                    "--goals", os.path.join(d, "goals.jsonl")], capture_output=True, text=True, timeout=180)
+assert r.returncode == 1, "合成的不可解析等待没被判红(exit=%d): %s" % (r.returncode, r.stdout + r.stderr)
+assert "无法解析" in r.stderr, "红是红了, 理由不对: " + r.stderr[:120]
+print("合成不可解析等待: 开火")
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。

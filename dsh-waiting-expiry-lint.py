@@ -79,15 +79,28 @@ def main() -> int:
         if g.get("id"):
             latest[g["id"]] = g
 
-    items, meta = [], []
+    items, meta, skipped_stale = [], [], 0
     for ms, gid, ts in rows:
         g = latest.get(gid)
         if g is None:
             continue
+        # 关键修正(2026-09-11 08:5x, 由一次假红逼出): 判据不能用**当前** nextAction 去审**历史**跳过决定。
+        # 我刚刚按 T149 把两个"待事件"目标改写成动作型, 于是它们过去那些 skipped:waiting 立刻"变得不一致"而假红。
+        # 正确做法: 只看"当前 nextAction 已经生效之后"的唤醒(用 lastActionAt 作分界)。
+        la = str(g.get("lastActionAt") or "")
+        if la:
+            import datetime as _dt
+            try:
+                la_ms = _dt.datetime.fromisoformat(la).timestamp() * 1000
+                if ms < la_ms:
+                    skipped_stale += 1
+                    continue
+            except Exception:
+                pass
         items.append([str(g.get("nextAction") or ""), ms])
         meta.append((gid, ts, str(g.get("nextAction") or "")))
     if not items:
-        print("[样本不足] 无可用(唤醒, 目标)配对, 不判")
+        print("[样本不足] 无可用(唤醒, 目标)配对, 不判(另有 %d 条因 nextAction 已改写而跳过)" % skipped_stale)
         return 0
 
     probe = subprocess.run(["npx", "tsx", "-e", TS_PROBE, "x", json.dumps(items)],
