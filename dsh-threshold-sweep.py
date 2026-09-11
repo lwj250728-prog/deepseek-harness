@@ -66,9 +66,23 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--grid', default='0.30,0.35,0.40,0.45,0.50,0.55,0.60')
     ap.add_argument('--label', default='valence', choices=('valence', 'gain'))
+    ap.add_argument('--post-since', default=None,
+                    help='只统计该时刻之后的注入回合(ISO 或 epoch ms): 埋点/上限变更后**时代边界**必须显式传入 —— '
+                         '把"改之前"的行混进来, 就是把被截断的样本和未截断的样本一起统计(cl-263 实测: 首批 2 轮都顶满旧上限 5)')
     ap.add_argument('--json', action='store_true')
     args = ap.parse_args()
 
+    post_cut = None
+    if args.post_since:
+        ps = args.post_since.strip()
+        try:
+            post_cut = float(ps)
+        except Exception:
+            try:
+                post_cut = datetime.datetime.fromisoformat(ps).timestamp() * 1000
+            except Exception:
+                print('--post-since 解析失败(需 ISO 或 epoch ms): ' + ps, file=sys.stderr)
+                return 1
     if not os.path.exists(REPLAY):
         print('缺 replay 工具(口径来源): ' + REPLAY, file=sys.stderr)
         return 1
@@ -93,6 +107,8 @@ def main() -> int:
             # 只保留有相似度且在我们的效用表里可用的候选 —— 与 replay 的候选可用性口径一致
             c2 = [c for c in cands if isinstance(c.get('similarity'), (int, float)) and c.get('expId') in util]
             if not c2:
+                continue
+            if post_cut is not None and (r.get('t') or 0) < post_cut:
                 continue
             r['candidateScores'] = c2
             records.append(r)
