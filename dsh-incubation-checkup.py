@@ -15,7 +15,7 @@ import json
 import os
 import sys
 
-D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
 TRIGGER = os.path.join(D, "goal-trigger-log.jsonl")
 GOALS = os.path.join(D, "dormant-goals.jsonl")
 STATS = os.path.join(D, "incubation-stats.md")

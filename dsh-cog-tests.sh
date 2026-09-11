@@ -5485,6 +5485,103 @@ assert r.returncode == 3, "裸环境下应判自检失败(exit 3), 实得 %d" % 
 assert "systemd user" in (r.stdout + r.stderr), "失败理由里没点明 systemd 会话: " + (r.stderr or r.stdout)[:120]
 print("裸环境: 显式报自检失败并点明 systemd 会话")
 '
+# ── T152 目标轨迹树面板的接线须可核查(用户要求的 UI) ──
+# 起因: 面板是新建的客户端插件, 而它的装配有一部分**不在版本库里**(profile 补丁 + node_modules symlink),
+# 因此"重启后插件还在不在"没有任何东西守 —— 一旦 profile 被覆盖/漏掉, 面板会静默消失。
+# 判据: ①包在版本库且 profile 补丁里有登记; ②运行时 boot 清单确实把它的 client.js 发给浏览器;
+#       ③它的数据端点真返回目标(不是空壳)。(像素层不可验, 见 tp-128 的说明。)
+echo "[T152] 轨迹树面板接线(在册 / boot 清单含它 / 端点返回目标)"
+t "轨迹树面板须在版本库且已登记 profile" python3 -c '
+import os, subprocess
+pkg = "/home/ubuntu/dsh-fork/packages/client/ui-goal-tree/package.json"
+assert os.path.exists(pkg), "面板包不存在"
+out = subprocess.run(["git", "-C", "/home/ubuntu/dsh-fork", "ls-files", "--error-unmatch",
+                      "packages/client/ui-goal-tree/package.json"], capture_output=True, text=True)
+assert out.returncode == 0, "面板包未入版本库"
+patch = os.path.expanduser("~/.dsh/profiles/web/cordis.patch.yml")
+txt = open(patch, encoding="utf8").read()
+assert "ui-goal-tree" in txt, "profile 补丁里没有登记该插件(重启后会消失)"
+print("面板在版本库且 profile 已登记")
+'
+t "运行时 boot 清单须把面板 client.js 发给浏览器" python3 -c '
+import re, subprocess
+r = subprocess.run(["curl", "-s", "--max-time", "15", "http://127.0.0.1:3080/"], capture_output=True, text=True)
+assert r.returncode == 0 and r.stdout, "取不到 GUI 首页(服务未起?)"
+m = re.search(r"/plugins/@deepseek-ai/dsh-client-ui-goal-tree/client\.js[^\"\x27 ]*", r.stdout)
+assert m, "boot 清单里没有该插件的 client.js —— 面板不会出现在页面上"
+print("boot 清单含: " + m.group(0)[:70])
+'
+t "客户端插槽目录须与生成器一致(面板占用者须在册)" python3 -c '
+import os, subprocess
+# slot-catalog.ts 是**生成物**: 面板注册占用者后必须重算, 否则页面上找不到入口。
+# 该文件在 24h 内被改过(T28 元测试要求被断言引用), 这里既引用它、也守住"生成物须与源一致"。
+cat = "/home/ubuntu/dsh-fork/packages/extensions/cordis-client-runner/src/client/slot-catalog.ts"
+assert os.path.exists(cat), "插槽目录缺失"
+txt = open(cat, encoding="utf8").read()
+assert "goal-tree" in txt, "插槽目录里没有面板占用者(生成器没重算?)"
+r = subprocess.run(["npx", "tsx", "scripts/gen-client-catalog.ts", "--check"],
+                   cwd="/home/ubuntu/dsh-fork", capture_output=True, text=True, timeout=300)
+assert r.returncode == 0, "插槽目录与生成器不一致: " + (r.stdout + r.stderr)[-160:]
+print("插槽目录在册且与生成器一致")
+'
+t "轨迹树端点须返回目标(非空壳)" python3 -c '
+import json, subprocess
+body = json.dumps({"type": "client-request", "rpcId": "t152", "method": "trajectory/overview", "payload": {}})
+r = subprocess.run(["curl", "-s", "--max-time", "20", "-X", "POST", "-H", "content-type: application/json",
+                    "-d", body, "http://127.0.0.1:3080/goal-tree/trajectory/overview"],
+                   capture_output=True, text=True)
+assert r.returncode == 0, "端点不可达"
+d = json.loads(r.stdout)
+res = d.get("result") or {}
+assert res.get("ok") is True, "端点返回错误: " + json.dumps(res.get("error"), ensure_ascii=False)[:120]
+snap = (res.get("value") or {}).get("snapshot") or {}
+goals = snap.get("goals") or []
+assert goals, "端点返回 0 个目标(空壳)"
+for g in goals:
+    assert {"id", "lane", "counts", "steps"} <= set(g), "目标字段不全: " + str(sorted(g))[:80]
+print("端点返回 %d 个目标" % len(goals))
+'
+# ── T153 孵化体检的告警闭环(cl-211 降频后新增的 cron 机制) ──
+# 判据: 违规必须写账本告警(不是只写没人读的日志); 恢复必须自动关单 —— 用合成目录验证, 不碰真账本。
+echo "[T153] 孵化体检告警闭环(合成违规须写告警 / 恢复须自动关单)"
+t "合成违规须写告警且退出码 1" python3 -c '
+import json, os, subprocess, tempfile, datetime
+tz = datetime.timezone(datetime.timedelta(hours=8)); now = datetime.datetime.now(tz)
+d = tempfile.mkdtemp()
+open(os.path.join(d, "dormant-goals.jsonl"), "w", encoding="utf8").write(json.dumps(
+    {"id": "goal-probe", "status": "active",
+     "lastActionAt": (now - datetime.timedelta(hours=5)).isoformat()}, ensure_ascii=False) + "\n")
+with open(os.path.join(d, "goal-trigger-log.jsonl"), "w", encoding="utf8") as f:
+    for i in range(6):
+        ts = (now - datetime.timedelta(hours=4) + datetime.timedelta(minutes=i)).isoformat()
+        f.write(json.dumps({"ts": ts, "goalId": "goal-probe", "adopted": False}, ensure_ascii=False) + "\n")
+env = dict(os.environ, DSH_COG_DIR=d)
+r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-incubation-checkup.py"], capture_output=True, text=True, timeout=120, env=env)
+assert r.returncode == 1, "违规没被判出(exit=%d): %s" % (r.returncode, r.stdout[-120:])
+led = [json.loads(l) for l in open(os.path.join(d, "claims-ledger.jsonl"), encoding="utf8") if l.strip()]
+assert led and led[-1]["id"] == "cl-incubation-stall" and led[-1]["status"] == "open", "违规没写账本告警"
+print("合成违规: 账本告警已写")
+'
+t "恢复后须自动关单" python3 -c '
+import json, os, subprocess, tempfile, datetime
+tz = datetime.timezone(datetime.timedelta(hours=8)); now = datetime.datetime.now(tz)
+d = tempfile.mkdtemp()
+open(os.path.join(d, "dormant-goals.jsonl"), "w", encoding="utf8").write(json.dumps(
+    {"id": "goal-probe", "status": "active",
+     "lastActionAt": (now - datetime.timedelta(hours=5)).isoformat()}, ensure_ascii=False) + "\n")
+rows = []
+for i in range(6):
+    ts = (now - datetime.timedelta(hours=4) + datetime.timedelta(minutes=i)).isoformat()
+    rows.append({"ts": ts, "goalId": "goal-probe", "adopted": i == 3})
+with open(os.path.join(d, "goal-trigger-log.jsonl"), "w", encoding="utf8") as f:
+    for r0 in rows:
+        f.write(json.dumps(r0, ensure_ascii=False) + "\n")
+env = dict(os.environ, DSH_COG_DIR=d)
+r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-incubation-checkup.py"], capture_output=True, text=True, timeout=120, env=env)
+assert r.returncode == 0, "有采纳却仍判违规(exit=%d)" % r.returncode
+assert "违规 0" in r.stdout, "输出没显示无违规: " + r.stdout[-100:]
+print("有采纳: 判无违规(exit 0)")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
