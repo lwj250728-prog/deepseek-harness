@@ -7327,16 +7327,16 @@ echo "[T190] 干预判读器(causal / no-effect / contaminated 三方向)"
 t "干预判读须三方向可分: 降幅大⇒causal / 无降幅⇒no-effect / 窗口内仍唤醒⇒contaminated" python3 -c '
 import json, os, subprocess, tempfile, datetime
 TZ = datetime.timezone(datetime.timedelta(hours=8)); now = datetime.datetime.now(TZ)
-def build(tmp, target_after, ctrl_after, last_trigger=None):
+def build(tmp, target_after, ctrl_after, last_trigger=None, base_n=8):
     start = now - datetime.timedelta(hours=24)
     log = []
     def put(goal, t, n):
         for i in range(n):
             log.append({"ts": (t + datetime.timedelta(minutes=i + 1)).isoformat(), "goalId": goal,
                         "sessionId": "s", "evidence": "pool-change", "before": "a", "after": "b"})
-    put("goal-t", start - datetime.timedelta(hours=12), 8)
+    put("goal-t", start - datetime.timedelta(hours=12), base_n)
     put("goal-t", start, target_after)
-    put("goal-c", start - datetime.timedelta(hours=12), 8)
+    put("goal-c", start - datetime.timedelta(hours=12), base_n)
     put("goal-c", start, ctrl_after)
     open(os.path.join(tmp, "incubation-log.jsonl"), "w", encoding="utf8").write(
         "\n".join(json.dumps(r, ensure_ascii=False) for r in log) + "\n")
@@ -7361,8 +7361,22 @@ assert d2["verdict"] == "no-effect", "没降幅却判了 " + str(d2["verdict"])
 t3 = tempfile.mkdtemp(); build(t3, 1, 8, last_trigger=(now - datetime.timedelta(hours=6)).isoformat())
 d3 = run(t3)
 assert d3["verdict"] == "contaminated", "窗口内仍被唤醒却没判 contaminated: " + str(d3["verdict"])
+# ④ 退化输入: 基线与干预期都是零推进 ⇒ 不得判 causal(冒烟测试当场抓到的假阳性), 必须是"无可判"
+t4 = tempfile.mkdtemp(); build(t4, 0, 0, base_n=0)   # 基线也零推进 ⇒ 退化输入
+d4 = run(t4)
+assert d4["verdict"] == "insufficient-baseline-zero", "零基线却给了结论: " + str(d4["verdict"])
+# ⑤ 冻结基线必须被消费: 窗口对得上时 baselineSource 必须是 frozen
+frozen = {"ts": "2026-09-12T00:00:00+08:00", "target": "goal-t", "hours": 24,
+          "windowStart": (now - datetime.timedelta(hours=48)).isoformat(),
+          "windowEnd": (now - datetime.timedelta(hours=24)).isoformat(),
+          "rates": {"goal-t": {"advances": 8, "perHour": 0.333}}}
+json.dump(frozen, open(os.path.join(t4, "wake-intervention-baseline.json"), "w", encoding="utf8"), ensure_ascii=False)
+t5 = tempfile.mkdtemp(); build(t5, 1, 8)
+json.dump(frozen, open(os.path.join(t5, "wake-intervention-baseline.json"), "w", encoding="utf8"), ensure_ascii=False)
+d5 = run(t5)
+assert d5.get("baselineSource", "").startswith("frozen"), "冻结基线没有被消费: " + str(d5.get("baselineSource"))
 assert "controls" in d1 and d1["controls"], "判读缺对照目标读数(判据要求与对照比)"
-print("降幅大⇒causal / 无降幅⇒no-effect / 窗口内仍唤醒⇒contaminated")
+print("降幅大⇒causal / 无降幅⇒no-effect / 窗口内仍唤醒⇒contaminated / 零基线⇒无可判 / 冻结基线被消费")
 '
 # ── T191 裁决必须消费事先写死的期望(tp-169) ──
 # 起因: 我在正式裁决前把期望写死(threshold-prereg.json: expectedVerdict=no-headroom)。若没人读它, 这次预注册

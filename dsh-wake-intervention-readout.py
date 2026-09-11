@@ -106,13 +106,32 @@ def main() -> int:
         return n / (span / 3600000.0)
 
     hours = span / 3600000.0
-    t_rate_i, t_rate_b = rate(args.target, start_ms, end_ms), rate(args.target, base_start, base_end)
+    t_rate_i = rate(args.target, start_ms, end_ms)
+    # 2026-09-12 07:3x (与 tp-169 同一条教训: 预注册的东西必须被**消费**, 否则只是摆设):
+    # 干预开始前我已把基线冻结在 wake-intervention-baseline.json(写入时刻早于实验) ⇒ 判读**优先用冻结基线**,
+    # 而不是此刻重算 —— 重算会随日志裁剪/时代变化而漂移, 等于事后重定基准。窗口对不上才回退重算并标注来源。
+    baseline_src = 'recomputed'
+    t_rate_b = rate(args.target, base_start, base_end)
+    frozen = None
+    try:
+        frozen = json.load(open(os.path.join(D, 'wake-intervention-baseline.json'), encoding='utf8'))
+    except Exception:
+        frozen = None
+    def _near(a, b) -> bool:
+        return a is not None and b is not None and abs(a - b) < 1000.0   # 1s 容差: ISO 往返的浮点差
+
+    if frozen and _near(ms_of(frozen.get('windowStart')), base_start) and _near(ms_of(frozen.get('windowEnd')), base_end) \
+            and (frozen.get('rates') or {}).get(args.target):
+        t_rate_b = float(frozen['rates'][args.target]['perHour'])
+        baseline_src = 'frozen(wake-intervention-baseline.json)'
     ratio = (t_rate_i / t_rate_b) if t_rate_b > 0 else (0.0 if t_rate_i == 0 else float('inf'))
     controls = {}
     for gid, row in pool.items():
         if gid == args.target or row.get('status') in TERMINAL or row.get('status') != 'active':
             continue
         b, i = rate(gid, base_start, base_end), rate(gid, start_ms, end_ms)
+        if frozen and baseline_src.startswith('frozen') and (frozen.get('rates') or {}).get(gid):
+            b = float(frozen['rates'][gid]['perHour'])
         controls[gid] = {'baseline': round(b, 3), 'intervention': round(i, 3),
                          'ratio': (round(i / b, 3) if b > 0 else None)}
     ctrl_ratios = [c['ratio'] for c in controls.values() if c['ratio'] is not None]
@@ -143,9 +162,14 @@ def main() -> int:
         contaminated = True
 
     dropped_more_than_controls = all((ratio is not None and ratio <= r) for r in ctrl_ratios) if ctrl_ratios else True
+    # 2026-09-12 07:3x **冒烟测试当场抓到的假阳性**: 基线与干预期都是 0 推进时, ratio=0.0 <= 0.5 且"降幅大于所有对照"
+    # 都成立 ⇒ 会判 causal。零推进不是"唤醒有效"的证据, 而是**无可判**(基线里没有可比较的推进)。
     if contaminated:
         verdict, reason = 'contaminated', ('干预窗口内该目标仍被唤醒过(lastTriggerAt=%s / 窗口内行动帧 %d 条) '
                                            '⇒ 开关没真关上, 结论作废' % (live_after, frames_in_window))
+    elif t_rate_b == 0:
+        verdict, reason = 'insufficient-baseline-zero', ('基线期该目标零推进 ⇒ 无可比较的基线, 判不出唤醒的作用'
+                                                         '(零推进不是"唤醒有效"的证据)')
     elif ratio is not None and ratio <= 0.5 and dropped_more_than_controls:
         verdict, reason = 'causal', ('目标推进速率 %.3f→%.3f 次/h(比 %.2f, 降幅大于所有对照 %s) ⇒ 唤醒是推进的因'
                                      % (t_rate_b, t_rate_i, ratio, ctrl_ratios))
@@ -153,6 +177,7 @@ def main() -> int:
         verdict, reason = 'no-effect', ('目标推进速率 %.3f→%.3f 次/h(比 %s) 未达 >=50%% 降幅或未超过对照 %s '
                                         '⇒ 提醒对该目标无独立贡献' % (t_rate_b, t_rate_i, ratio, ctrl_ratios))
     payload = {'ts': datetime.datetime.now().astimezone().isoformat(), 'target': args.target,
+               'baselineSource': baseline_src,
                'startIso': datetime.datetime.fromtimestamp(start_ms / 1000).astimezone().isoformat(),
                'endIso': datetime.datetime.fromtimestamp(end_ms / 1000).astimezone().isoformat(),
                'hours': round(hours, 2), 'eraSince': era_since,
@@ -167,7 +192,8 @@ def main() -> int:
         return 0
     print('干预判读 %s | 窗口 %s → %s(%.1fh, 时代起点 %s)'
           % (args.target, payload['startIso'][11:16], payload['endIso'][11:16], hours, era_since))
-    print('  目标推进速率: 基线 %.3f → 干预 %.3f 次/h(比 %s)' % (t_rate_b, t_rate_i, payload['targetRatio']))
+    print('  目标推进速率: 基线 %.3f → 干预 %.3f 次/h(比 %s) | 基线来源: %s'
+          % (t_rate_b, t_rate_i, payload['targetRatio'], baseline_src))
     print('  对照: %s' % json.dumps(controls, ensure_ascii=False))
     print('判读: %s —— %s' % (verdict, reason))
     return 0
