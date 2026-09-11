@@ -6429,6 +6429,63 @@ missing = sorted(f for f in suspects if not PLACEHOLDER.match(f) and not os.path
 assert not missing, "被脚本引用却不存在(脚本会直接失败): %s" % missing
 print("脚本引用的 %d 个仓库文件均存在" % len(suspects))
 '
+# ── T177 反向判据也要覆盖(cl-254 的 --reverse) ──
+# 起因(测试审视帧): T172 只覆盖了正向归因的口径(前向容差/内容匹配), 而 `--reverse`("有多少池推进没有对应的
+# 唤醒")是另一条独立路径 —— 它一旦算错, 结论会直接反向(把"提醒必要"读成"提醒不必要", 或反之), 而这条读数
+# 已经写进孵化报告的常驻行。故补两个合成用例: 有匹配帧 ⇒ 不算"未被唤醒"; 无匹配帧 ⇒ 必须算。
+echo "[T177] 反向判据(池推进是否有对应唤醒)"
+t "合成: 有匹配帧的池推进不得计入「未被唤醒」, 无匹配帧必须计入" python3 -c '
+import json, os, subprocess, tempfile, datetime
+def run(frames, changes):
+    tmp = tempfile.mkdtemp()
+    open(os.path.join(tmp, "quiet-driver-frames.jsonl"), "w", encoding="utf8").write(frames)
+    open(os.path.join(tmp, "incubation-log.jsonl"), "w", encoding="utf8").write(changes)
+    open(os.path.join(tmp, "goal-trigger-log.jsonl"), "w", encoding="utf8").write("")
+    env = dict(os.environ, DSH_COG_DIR=tmp)
+    r = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-wake-attribution.py"), "--reverse", "--json", "--no-record"],
+                       capture_output=True, text=True, timeout=600, env=env)
+    assert r.returncode == 0, (r.stderr or r.stdout)[-200:]
+    return json.loads(r.stdout)["reverse"]
+base = datetime.datetime(2026, 9, 11, 22, 0, 0).timestamp() * 1000
+step = "步骤 A: 做甲事"
+iso = lambda ms: datetime.datetime.fromtimestamp(ms / 1000).astimezone().isoformat()
+# ① 有匹配帧(同目标/同会话/内容一致) ⇒ 不算未被唤醒
+frames = json.dumps({"ts": str(int(base)), "kind": "action-frame", "goalId": "g", "session": "s", "nextAction": step}) + "\n"
+matched = json.dumps({"ts": iso(base + 60000), "goalId": "g", "sessionId": "s", "evidence": "pool-change", "before": step, "after": "步骤 B"}) + "\n"
+d1 = run(frames, matched)
+assert d1["changes"] == 1 and d1["withoutWake"] == 0, "有匹配帧却被算成未被唤醒: %s" % d1
+# ② 无匹配帧(内容不同) ⇒ 必须算未被唤醒
+unmatched = json.dumps({"ts": iso(base + 60000), "goalId": "g", "sessionId": "s", "evidence": "pool-change", "before": "完全不同的另一步", "after": "步骤 B"}) + "\n"
+d2 = run(frames, unmatched)
+assert d2["changes"] == 1 and d2["withoutWake"] == 1 and d2["withoutWakeRate"] == 1.0, "无匹配帧却没算成未被唤醒: %s" % d2
+print("反向判据两例均正确(匹配不计入 / 不匹配必须计入)")
+'
+# ── T178 重建尝试账本的写入点必须在产物里(cl-256/tp-156) ──
+# 起因: 那条判据读 taxonomy-rebuild.jsonl, 而**源码里原本根本没有这个文件名**(账本只有人工补的 2 行) ——
+# 判据在检查"有没有人手工写行"而不是"整合层在不在重试"。修复已落地(store.recordTaxonomyAttempt + runRebuild
+# 包装), 本组守"写入点必须在**产物**里"(必要非充分: 端到端仍由 tp-156 在重启后验证 —— 这正是 T154 抓过
+# "埋点写了没进产物"的那类静默缺口)。
+echo "[T178] 重建尝试账本的写入点须在产物里"
+t "已部署 lib 必须含 taxonomy-rebuild.jsonl 的写入点" python3 -c '
+import os
+lib = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")
+src_store = os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/store.ts")
+text = open(lib, encoding="utf8").read()
+assert "taxonomy-rebuild.jsonl" in text, "产物里没有该账本的写入点(重建尝试又只能人工记录了)"
+src = open(src_store, encoding="utf8").read()
+assert "recordTaxonomyAttempt" in src, "store 没有 recordTaxonomyAttempt"
+assert "taxonomy-rebuild.jsonl" in src, "store 的写入点被移走了"
+print("写入点在 store 源码与产物里齐备")
+'
+t "try 路径: 重建必须真的调用写入点(不是只定义了方法)" python3 -c '
+import os, re
+src = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/cold-engine.ts"), encoding="utf8").read()
+i = src.index("async runRebuild(")
+seg = src[i:src.index("runRebuildCore", i + 10)]
+assert "recordTaxonomyAttempt(" in seg, "runRebuild 没有调用 recordTaxonomyAttempt(方法定义了但没人用)"
+assert "await this.runRebuildCore(" in seg, "runRebuild 未包装 runRebuildCore"
+print("runRebuild 包装层确实调用写入点")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
