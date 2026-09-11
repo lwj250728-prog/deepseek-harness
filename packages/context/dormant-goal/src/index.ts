@@ -18,6 +18,7 @@
  * @module @deepseek-ai/dsh-dormant-goal
  */
 
+import { execSync } from 'node:child_process'
 import { appendFile, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { createRequire } from 'node:module'
@@ -231,6 +232,27 @@ const NOT_WAITING = /^(?:待办|待修|待补|待验证|待测试|待评估|待�
 /** 与 quiet-driver/waiting.ts 同构的等待型判定(由 T137 比对两侧正则/函数体一致性)。
  *  cl-198: 加"到点即恢复可执行"——原实现只看文本不看时钟, 于是 `待 09-11 06:5x 复核` 在到点后
  *  仍被判等待, 唤醒侧永久跳过该目标(实测 35 次唤醒 0 采纳, 全部 skipped:waiting)。 */
+
+/** cl-215: 条件型等待求值 —— 等待型目标可带 `waitChecker`(一条命令), 由唤醒侧在标 skipped 前跑一次。
+ *
+ * 起因: cl-206 让**日期型**等待到点自行恢复, 但**条件型**等待(如"可排序集>=30")没有任何判据能回答
+ * "现在满足了吗", 于是目标被无限期标 skipped:waiting —— 唤醒在空转。
+ * 语义: exit 0 ⇒ 条件已满足(**不再是等待**, 照常推行动帧); 非零 ⇒ 仍未满足(保持等待);
+ *       超时/命令缺失 ⇒ 视为未满足(保守), 但把失败原因记进日志以便发现"checker 自己坏了"。
+ * @param goal - 池内目标(可带 waitChecker)。
+ * @returns true 表示"条件已满足, 不应算等待"。
+ */
+function waitConditionMet(goal: { waitChecker?: string }): boolean {
+  const cmd = typeof goal.waitChecker === 'string' ? goal.waitChecker.trim() : ''
+  if (cmd === '') return false
+  try {
+    execSync(cmd, { timeout: 20_000, stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
 function isWaitingNextActionLocal(nextAction: string, now: Date = new Date()): boolean {
   const text = (nextAction ?? '').trim()
   if (text.length === 0) return false
@@ -420,8 +442,13 @@ function parseWaitingMomentLocal(text: string, now: Date = new Date()): Date | n
     for (const h of hits) set.set(h.goal.id, poolSnapshot(h.goal))
     pending.set(agent.session.id, set)
     bumpMany(new Map(hits.map(h => [h.goal.id, false])),
-      new Map(hits.filter(h => isWaitingNextActionLocal(String((h.goal as { nextAction?: string }).nextAction ?? '')))
-        .map(h => [h.goal.id, 'waiting'])))
+      new Map(hits.filter(h => {
+        const g = h.goal as { nextAction?: string, waitChecker?: string }
+        if (!isWaitingNextActionLocal(String(g.nextAction ?? ''))) return false
+        // cl-215: 语法上是等待, 但**条件可能已经满足** —— 让 checker 现场回答一次。
+        if (waitConditionMet(g)) return false
+        return true
+      }).map(h => [h.goal.id, 'waiting'])))
     return { kind: 'enter', messages: [...decision.messages, block] }
   }, 'dormant-goal sentinel')
 
