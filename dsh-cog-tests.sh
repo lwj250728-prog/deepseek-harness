@@ -6911,6 +6911,35 @@ print("与 replay 同口径核对通过: A档 MRR %.4f / top-1 %.4f" % (cur["arm
 # nextAction 不变"的写入若也记一行, 就会把我的记录动作算成"这一步被推进了" —— 而我的目标正是更高的归因率,
 # 手里又握着记录通道, 这类自利偏差必须由判据挡住(实测我自己就这么写过一行, 已撤销并留备份)。
 echo "[T185] 池写入可归因(前进才记) / 笔记型写入不得记为推进"
+t "归因读数必须真的消费写入方产出的行(通道两半都要证)" python3 -c '
+# 起因(2026-09-12 03:4x): 上一条断言只证了**发射**这一半(写入方会记行); 而通道要成立还需要**消费**那一半 ——
+# 若读数不认这种行(字段/会话/口径任一不同), 记录通道就是个摆设, 而我可能等到下一次真实前进才发现。
+# 这里用合成数据把两半接起来验: 帧(nextAction=旧步骤 A) + 写入方产出的 pool-change(before=旧步骤 A, after=新步骤 B)
+# ⇒ 该帧必须由"未归因"转为"被归因"。**不碰真实数据**(真实前进只能等它自己发生, 手写行=伪造记录通道)。
+import json, os, subprocess, tempfile, datetime
+tmp = tempfile.mkdtemp()
+TZ = datetime.timezone(datetime.timedelta(hours=8)); now = datetime.datetime.now(TZ)
+t0 = now - datetime.timedelta(minutes=40)
+open(os.path.join(tmp, "dormant-goals.jsonl"), "w", encoding="utf8").write(
+    json.dumps({"id": "g-e2e", "status": "active", "nextAction": "新步骤 B"}, ensure_ascii=False) + "\n")
+open(os.path.join(tmp, "quiet-driver-frames.jsonl"), "w", encoding="utf8").write(
+    json.dumps({"kind": "action-frame", "goalId": "g-e2e", "nextAction": "旧步骤 A",
+                "session": "s-x", "ts": t0.isoformat()}, ensure_ascii=False) + "\n")
+open(os.path.join(tmp, "incubation-log.jsonl"), "w", encoding="utf8").write(
+    json.dumps({"ts": (t0 + datetime.timedelta(minutes=1)).isoformat(), "goalId": "g-e2e", "sessionId": "s-x",
+                "evidence": "pool-change", "before": "旧步骤 A", "after": "新步骤 B",
+                "origin": "dsh-goal-pool-write.py"}, ensure_ascii=False) + "\n")
+open(os.path.join(tmp, "goal-trigger-log.jsonl"), "w", encoding="utf8").write("\n")
+r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-wake-attribution.py", "--json", "--no-record"],
+                   capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=tmp), timeout=600)
+assert r.returncode == 0, "归因读数失败: " + (r.stderr or r.stdout)[-200:]
+d = json.loads(r.stdout.strip().splitlines()[-1])
+g = [x for x in d["perGoal"] if x["goalId"] == "g-e2e"]
+assert g, "合成目标没进读数"
+assert g[0]["frames"] == 1 and g[0]["attributed"] == 1, ("写入方产出的 pool-change 未被读数消费(attributed=%s/%s)"
+                                                         % (g[0]["attributed"], g[0]["frames"]))
+print("发射+消费两半接通: 合成帧被归因 1/1")
+'
 t "池写入的两道守卫必须在场(时间戳不得回退 / 旧 nextAction 不得复活)" python3 -c '
 import json, os, subprocess, tempfile
 W = "/home/ubuntu/dsh-fork/dsh-goal-pool-write.py"
