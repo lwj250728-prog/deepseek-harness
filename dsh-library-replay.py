@@ -40,6 +40,28 @@ def channel_weights() -> dict:
         return {}
 
 
+def label_map(kind: str) -> dict:
+    """相关性标签。**必须与排序特征分离**, 否则指标自证(cl-219 实测的缺陷)。
+
+    · gain   = materialGain —— B 档的特征里就含它 ⇒ **同义反复**, 只能当占位, 不能当证据;
+    · valence= emotionalValence —— 同一自陈家族但不进 B 档特征, 非自证;
+    · cited  = 结果侧(该经验真实被引用) —— 预登记明确排除作**主标签**(下游混淆), 但作为独立稳健性检查可用。
+    """
+    out = {}
+    for path in (EXP, EXP_FRAMES):
+        if not os.path.exists(path):
+            continue
+        for line in open(path, encoding='utf8'):
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            ou = (r.get('sar') or {}).get('outcomeUtility') or {}
+            v = ou.get('materialGain' if kind == 'gain' else 'emotionalValence')
+            if isinstance(v, (int, float)):
+                out[r['expId']] = float(v)
+    return out
+
+
 def utility_map() -> dict:
     """效用映照: **任务经验 + 帧层经验都要收**。
     cl-200 实测: 39 条带得分记录里, 只查任务经验时只有 18 条"候选全有效用", 可排序集 5;
@@ -80,15 +102,32 @@ def main() -> int:
             r['candidateScores'] = cands
             records.append(r)
 
-    def mrr(arm: str) -> tuple[float | None, float | None]:
-        """候选集内 MRR / top-1 命中率。相关性用效用分档(外生量)。"""
+    def mrr(arm: str, L: dict, label_kind: str) -> tuple[float | None, float | None]:
+        """候选集内 MRR / top-1 命中率。相关性来自 L(与排序特征分离的标签)。"""
         vals, hits, n = [], 0, 0
         for rec in records:
-            cands = [c for c in rec['candidateScores'] if c.get('expId') in util]
+            cands = [c for c in rec['candidateScores'] if c.get('expId') in util]  # 效用表决定候选可用性
             if arm == 'C':
                 cands = [c for c in cands if isinstance(c.get('channels'), dict)]
             if len(cands) < 2:
                 continue          # 单候选集无排序可言
+            if label_kind == 'cited':
+                # 结果侧标签: 该记录里**真实被引用**的那条经验才是相关项; 只算被引用者恰在候选集内的记录。
+                if rec.get('cited') is not True:
+                    continue
+                inj = [e for e in (rec.get('expIds') or []) if any(c['expId'] == e for c in cands)]
+                if len(inj) != 1:
+                    continue
+                n += 1
+                ranked = sorted(cands, key=(lambda c: c['similarity']) if arm == 'A'
+                                else (lambda c: c['similarity'] * (0.7 + 0.06 * util[c['expId']])))
+                for idx, c in enumerate(ranked, start=1):
+                    if c['expId'] == inj[0]:
+                        vals.append(1.0 / idx)
+                        if idx == 1:
+                            hits += 1
+                        break
+                continue
             n += 1
             if arm == 'A':
                 key = lambda c: c['similarity']
@@ -104,9 +143,9 @@ def main() -> int:
                     + c['channels']['axis']
                 )
             ranked = sorted(cands, key=key, reverse=True)
-            best = max(util[c['expId']] for c in cands)
+            best = max(L[c['expId']] for c in cands)
             for idx, c in enumerate(ranked, start=1):
-                if util[c['expId']] == best:
+                if L[c['expId']] == best:
                     vals.append(1.0 / idx)
                     if idx == 1:
                         hits += 1
@@ -116,9 +155,18 @@ def main() -> int:
         return sum(vals) / n, hits / n
 
     W = channel_weights()
-    a, a1 = mrr('A')
-    b, b1 = mrr('B')
-    c_arm, c1 = mrr('C')
+    LABELS = {'gain': label_map('gain'), 'valence': label_map('valence')}
+    a, a1 = mrr('A', LABELS['gain'], 'gain')      # 兼容旧结果字段
+    b, b1 = mrr('B', LABELS['gain'], 'gain')
+    c_arm, c1 = mrr('C', LABELS['gain'], 'gain')
+    label_reports = {}
+    for lk in ('gain', 'valence', 'cited'):
+        L = LABELS.get(lk) or LABELS['gain']
+        ra, ra1 = mrr('A', L, lk)
+        rb, rb1 = mrr('B', L, lk)
+        label_reports[lk] = {'armA_mrr': ra, 'armA_top1': ra1, 'armB_mrr': rb, 'armB_top1': rb1,
+                             'lift': (round((rb - ra) / ra, 4) if ra and rb is not None else None),
+                             'tautological': lk == 'gain'}
     c_rankable = sum(1 for rec in records
                      if len([x for x in rec['candidateScores']
                              if x.get('expId') in util and isinstance(x.get('channels'), dict)]) >= 2)
@@ -138,6 +186,7 @@ def main() -> int:
                              % (c_rankable, base['minSample'])),
         'channelWeights': W,
         'lift': (round((b - a) / a, 4) if a and b is not None else None),
+        'labelRobustness': label_reports,
         'conclusion': None,
     }
     # 判据必须挂在**可排序集**上: 记录数够但可排序集不够时, MRR 是 5 个集上的估计(实测 lift 的
@@ -158,6 +207,11 @@ def main() -> int:
         print('结论: %s | %s' % (payload['conclusion'], payload.get('note', '')))
         print('C 档(学习权重替换常数): MRR %s top1 %s(可排序集 %d) | %s'
               % (c_arm, c1, c_rankable, payload['armC_status']))
+        print('标签稳健性(关键: gain 标签对 B 档是**同义反复**, 只有非 gain 标签才算证据):')
+        for lk, v in label_reports.items():
+            print('  label=%-7s A %s/%s  B %s/%s  lift %s%s'
+                  % (lk, v['armA_mrr'], v['armA_top1'], v['armB_mrr'], v['armB_top1'], v['lift'],
+                     '  ← 自证(特征含标签)' if v['tautological'] else ''))
     return 0
 
 
