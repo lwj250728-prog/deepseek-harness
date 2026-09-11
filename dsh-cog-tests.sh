@@ -5627,6 +5627,58 @@ for gid, g in withchk.items():
     assert (r.returncode == 0) == met, "checker 的退出码与条件不自洽: exit=%d met=%s" % (r.returncode, met)
     print("%s: 条件 %s(可排序集 %s/%s) ⇒ exit %d, 自洽" % (gid, "已满足" if met else "未满足", d["rankableSets"], d["minSample"], r.returncode))
 '
+# ── T155 效用融合接线(cl-218) ──
+# 起因: 排序键改为 similarity×(0.7+0.06×materialGain) —— 这是**会改变生产检索顺序**的改动, 而它此前只有"代码写了"。
+# 本组守三件: ①阈值判定不得被融合污染(过阈仍按 similarity); ②部署后审计里的 rankKey 必须与公式自洽
+#   (这一条直接抓'配置没接到运行时'——我实现时第一版从 service.config 取值, 那个服务根本没有该字段 ⇒ 会静默失效);
+# ③融合必须**真的改变过顺序**(若始终与纯相似度同序, 说明开关没生效或恒等)。
+echo "[T155] 效用融合(阈值不受污染 / rankKey 与公式自洽 / 排序真的变了)"
+t "排序用融合键但过阈判定仍按 similarity(不得泄漏)" python3 -c '
+import os, re
+src = open(os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/src/index.ts"), encoding="utf8").read()
+lib = open(os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js"), encoding="utf8").read()
+assert "rankKey" in src and "rankKey" in lib, "排序键 rankKey 未实现/未部署"
+assert re.search(r"\.filter\(hit => hit\.similarity >= minSimilarity\)", src), "过阈判定不再按 similarity —— 融合泄漏进准入门槛"
+assert "utilityFusion" in lib, "lib 里没有 utilityFusion 配置读取(配置无法到达运行时)"
+print("排序=rankKey, 过阈=similarity, 配置项已在产物")
+'
+t "部署后 rankKey 须与公式自洽(证明配置真到了运行时)" python3 -c '
+import json, os, subprocess
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+after = int(subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-deploy-boundary.py"],
+                           capture_output=True, text=True, timeout=60).stdout.strip() or 0)
+rows = [json.loads(l) for l in open(D + "/retrieval-audit.jsonl", encoding="utf8") if l.strip()]
+cands = [c for r in rows if (r.get("t") or 0) > after for c in (r.get("preTop") or []) if "rankKey" in c]
+if not cands:
+    print("[部署边界] 尚无带 rankKey 的候选行, 本帧不判")
+    raise SystemExit(0)
+bad = []
+for c in cands:
+    if c.get("utility") is None:
+        continue
+    want = c["similarity"] * (0.7 + 0.06 * c["utility"])
+    if abs(want - c["rankKey"]) > 0.002:
+        bad.append("%s: rankKey=%s 公式=%0.4f" % (c["expId"], c["rankKey"], want))
+assert not bad, "rankKey 与公式不自洽(配置很可能没到运行时, 融合是空转): " + repr(bad[:3])
+print("%d 个候选的 rankKey 与公式自洽" % len(cands))
+'
+t "融合须真的改变过排序(否则开关空转)" python3 -c '
+import json, os, subprocess
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+after = int(subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-deploy-boundary.py"],
+                           capture_output=True, text=True, timeout=60).stdout.strip() or 0)
+rows = [json.loads(l) for l in open(D + "/retrieval-audit.jsonl", encoding="utf8") if l.strip()]
+sets = [r["preTop"] for r in rows if (r.get("t") or 0) > after and len(r.get("preTop") or []) >= 2]
+if not sets:
+    print("[部署边界] 部署后尚无多候选集, 本帧不判")
+    raise SystemExit(0)
+diff = 0
+for cs in sets:
+    if [c["expId"] for c in sorted(cs, key=lambda c: -c["rankKey"])] != [c["expId"] for c in sorted(cs, key=lambda c: -c["similarity"])]:
+        diff += 1
+assert diff > 0, "部署后 %d 个多候选集里融合从未改变顺序 —— 开关没生效或恒等" % len(sets)
+print("%d/%d 个多候选集里融合改变了顺序" % (diff, len(sets)))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

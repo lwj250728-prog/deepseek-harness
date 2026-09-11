@@ -422,7 +422,7 @@ function parseWaitingMomentLocal(text: string, now: Date = new Date()): Date | n
       if (config.debugSimilarity) {
         try {
           require('node:fs').appendFileSync(join(dirname(config.poolPath), 'dormant-goal-similarity.debug.jsonl'),
-            JSON.stringify({ ts: new Date().toISOString(), goalId: goal.id, rep: Number(rep.toFixed(4)),
+            JSON.stringify({ ts: (() => { const d = new Date(); const p2 = (n: number, w = 2): string => String(n).padStart(w, '0'); const off = -d.getTimezoneOffset(); return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}T${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}.${p2(d.getMilliseconds(), 3)}${off >= 0 ? '+' : '-'}${p2(Math.floor(Math.abs(off) / 60))}:${p2(Math.abs(off) % 60)}` })(), goalId: goal.id, rep: Number(rep.toFixed(4)),
               repThreshold: config.repThreshold, pass: rep >= config.repThreshold,
               cooled: now - last < config.cooldownMs }) + '\n')
         } catch { /* debug best-effort */ }

@@ -59,6 +59,10 @@ export const inject = ['agents', 'cognitivePipeline', 'llm', 'tools']
 export interface Config {
   /** How many related experiences to inject at most (default 1). */
   topK?: number
+  /** cl-218 效用融合: 排序键 = similarity × (base + slope × materialGain)。
+   *  显式开启(profile 里写 true); 关掉即回滚到纯相似度排序。
+   *  **只影响排序, 不影响过阈判定**(阈值仍按 similarity, 见下方 filter)。 */
+  utilityFusion?: { enabled?: boolean, base?: number, slope?: number }
   /** Minimum situation-vector similarity to consider a memory related (default 0.4). */
   minSimilarity?: number
   /** After a failed step, multiply minSimilarity by this factor (default 0.6). */
@@ -135,6 +139,11 @@ export interface ReviewConfig {
 /** Schemastery validation for {@link Config}. */
 export const Config: z<Config> = z.object({
   topK: z.number().step(1).min(1).max(10).default(1),
+  utilityFusion: z.object({
+    enabled: z.boolean().default(false),
+    base: z.number().default(0.7),
+    slope: z.number().default(0.06),
+  }).default({ enabled: false, base: 0.7, slope: 0.06 }),
   minSimilarity: z.number().min(0).max(1).default(0.4),
   failureThresholdFactor: z.number().min(0).max(1).default(0.6),
   failureTopK: z.number().step(1).min(1).max(10).default(3),
@@ -168,6 +177,7 @@ export const Config: z<Config> = z.object({
 /** Resolved configuration with every optional field materialized. */
 export interface ResolvedConfig {
   readonly topK: number
+  readonly utilityFusion: { enabled: boolean, base: number, slope: number }
   readonly minSimilarity: number
   readonly failureThresholdFactor: number
   readonly failureTopK: number
@@ -207,6 +217,11 @@ export function resolveConfig(config: Config): ResolvedConfig {
   const review = config.review ?? {}
   return Object.freeze({
     topK: config.topK ?? 1,
+    utilityFusion: {
+      enabled: config.utilityFusion?.enabled === true,
+      base: config.utilityFusion?.base ?? 0.7,
+      slope: config.utilityFusion?.slope ?? 0.06,
+    },
     minSimilarity: config.minSimilarity ?? 0.4,
     failureThresholdFactor: config.failureThresholdFactor ?? 0.6,
     failureTopK: config.failureTopK ?? 3,
@@ -329,6 +344,9 @@ interface RankedHit extends ExperienceHit {
   readonly polarity: OutcomePolarity
   /** 分通道成分(cl-185, 测量用): semantic 余弦 / symptom 症状加成 / axis 判别轴加成。 */
   readonly channels?: { semantic: number, symptom: number, axis: number }
+  /** cl-218: SAR 的 materialGain(效用项)与融合后的排序键; similarity 不受影响。 */
+  readonly utility?: number
+  rankKey?: number
 }
 
 /**
@@ -400,6 +418,7 @@ async function retrieve(
   topK: number,
   novelty?: (expId: string) => number,
   noveltyMargin = 0,
+  fusion: { enabled: boolean, base: number, slope: number } = { enabled: false, base: 0.7, slope: 0.06 },
 ): Promise<{ hits: readonly RankedHit[], rotated: boolean, rawHits: number,
   topHits: readonly number[], textChars: number,
   preTop: readonly { expId: string, similarity: number,
@@ -408,6 +427,7 @@ async function retrieve(
   const situationVec = situationVector(situation)
   const embedder = service.embedder
   const queryEmbedding = embedder === null ? null : await embedder.embed(situation)
+  const FUSION = fusion
   const hits = service.store.experiencesSnapshot()
     .filter(exp => !isTaskRestatement(exp))
     // cl-102: 帧生记录不回注帧——自我回声(帧→关于帧的经验→再注入帧)是实测
@@ -427,22 +447,30 @@ async function retrieve(
       // similarity ⇒ 离线无法重建同一候选集的分通道得分, C 档一直 unavailable。
       const symptomPart = symptomOverlap(situation, text) * SYMPTOM_BONUS * semantic
       const axisPart = axisBoost(service, situation, exp, exp.clusterId)
+      const gain = exp.sar.outcomeUtility.materialGain
+      const sim = semantic + symptomPart + axisPart
       return {
         expId: exp.expId,
         text,
         polarity: outcomePolarity(exp.sar.outcomeUtility),
-        similarity: semantic + symptomPart + axisPart,
+        similarity: sim,
+        // cl-218: 效用融合只作用于**排序键**; similarity 保持原样, 供阈值判定与离线 A 档复核。
+        utility: gain,
+        rankKey: FUSION.enabled ? sim * (FUSION.base + FUSION.slope * gain) : sim,
         channels: { semantic, symptom: symptomPart, axis: axisPart },
         ...exp.selfReflexive === true ? { selfReflexive: true } : {},
       }
     })
-    .filter(hit => hit.similarity >= minSimilarity)
-    .sort((a, b) => b.similarity - a.similarity)
+    .filter(hit => hit.similarity >= minSimilarity)   // 阈值判据不变(cl-218: 融合不得泄漏进过阈判定)
+    .sort((a, b) => (b.rankKey ?? b.similarity) - (a.rankKey ?? a.similarity))
   // cl-122: 记录**过阈后的原始候选数**与头部相似度——三个调度杠杆接连被"候选供给"卡住,
   // 但这条供给从来没被记过: 审计里的 candidates 是 coverViewpoints 之后的结果(恒为 2),
   // 看不到"到底有几条过阈可选"。没有这个数, topK/轮换/退避的空间都只能靠猜。
   const rawHits = hits.length
-  const topHits = hits.slice(0, 5).map(hit => Number(hit.similarity.toFixed(3)))
+  // cl-218: topHits 是"相似度头部"(断言要求单调不增) —— 融合改变了排序, 故必须**先按相似度取头部**,
+  // 不能直接切 rankKey 序的头部(那会让 topHits 不再单调, 是可被套件抓到的语义漂移)。
+  const topHits = [...hits].sort((a, b) => b.similarity - a.similarity)
+    .slice(0, 5).map(hit => Number(hit.similarity.toFixed(3)))
   // cl-120 A/B: topK 加宽会增加上下文成本, 所以每次注入的文本长度必须可测——
   // 判据是"采纳率/不同经验数上升"与"成本上升"的对照, 不能只看前者。
   const textChars = (subset: readonly RankedHit[]): number =>
@@ -460,6 +488,8 @@ async function retrieve(
   const preTop = hits.slice(0, 5).map(hit => ({
     expId: hit.expId,
     similarity: Number(hit.similarity.toFixed(4)),
+    ...(hit.utility === undefined ? {} : { utility: hit.utility }),
+    ...(hit.rankKey === undefined ? {} : { rankKey: Number(hit.rankKey.toFixed(4)) }),
     // exactOptionalPropertyTypes: 不能显式写 channels: undefined, 用条件展开
     ...(hit.channels === undefined ? {} : {
       channels: {
@@ -890,7 +920,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       for (const expId of record.expIds) sessionCounts.set(expId, (sessionCounts.get(expId) ?? 0) + 1)
     }
     const { hits, rotated, rawHits, topHits, textChars, preTop } = await retrieve(ctx.cognitivePipeline, situation, threshold, topK,
-      expId => sessionCounts.get(expId) ?? 0, resolved.noveltyMargin)
+      expId => sessionCounts.get(expId) ?? 0, resolved.noveltyMargin,
+      { enabled: config.utilityFusion?.enabled === true,
+        base: config.utilityFusion?.base ?? 0.7,
+        slope: config.utilityFusion?.slope ?? 0.06 })
     if (hits.length === 0) {
       audit({ stage: 'no-candidates', threshold, rotated, rawHits })
       return decision
