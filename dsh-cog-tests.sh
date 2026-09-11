@@ -7550,6 +7550,53 @@ assert src_cap == tool_cap, ("两边漂开了: 源码 slice=%d vs 工具 BELOW_G
                              % (src_cap, tool_cap))
 print("截断上限一致: %d(源码) == %d(工具)" % (src_cap, tool_cap))
 '
+# ── T195 门限裁决的条件门必须可满足 + 时代起点由文件声明(cl-263) ──
+# "等样本攒够"是样本型等待: 没门 ⇒ 驱动侧重复催办(cl-126/cl-215/cl-265 同型); 挂了门 ⇒ 新的失败模式是**死门**。
+# 故必须证明: 样本够时门会开(exit 0), 样本不够时不开; 且扫描工具的默认时代起点来自 sweep-era.json(不靠我记得传参)。
+echo "[T195] 门限裁决门(可满足 / 样本不足不放行 / 时代由文件声明)"
+t "门限裁决门须可满足, 且扫描工具默认读 sweep-era.json 声明的时代" python3 -c '
+import json, os, subprocess, tempfile, datetime
+tmp = tempfile.mkdtemp(); ids = ["exp_%03d" % i for i in range(60)]
+open(os.path.join(tmp, "experiences.jsonl"), "w", encoding="utf8").write("\n".join(json.dumps(
+    {"expId": e, "sar": {"situation": "s", "action": "a", "outcome": "o",
+                         "outcomeUtility": {"materialGain": i % 10, "emotionalValence": i % 5}}},
+    ensure_ascii=False) for i, e in enumerate(ids)) + "\n")
+now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+era = now - datetime.timedelta(hours=3)
+def build(n_bg):
+    rows = []
+    for k in range(18):     # 时代外(旧记录): 无候选字段
+        rows.append({"stage": "injected", "t": int((era.timestamp() - 30 * 3600) * 1000) + k * 60000,
+                     "expIds": [ids[k]], "cited": False, "candidates": 2, "overThreshold": 1})
+    for k in range(n_bg):   # 时代内: 带 belowGate
+        rows.append({"stage": "injected", "t": int((era.timestamp() + (k + 1) * 600) * 1000), "expIds": [ids[k]],
+                     "cited": False, "candidates": 2, "overThreshold": 1,
+                     "preTop": [{"expId": ids[k], "similarity": 0.6}, {"expId": ids[k + 1], "similarity": 0.55}],
+                     "belowGate": [{"expId": ids[k + 2], "similarity": 0.45}]})
+    open(os.path.join(tmp, "retrieval-audit.jsonl"), "w", encoding="utf8").write(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+json.dump({"since": era.isoformat(), "reason": "沙箱"},
+          open(os.path.join(tmp, "sweep-era.json"), "w", encoding="utf8"), ensure_ascii=False)
+env = dict(os.environ, DSH_COG_DIR=tmp)
+def run_check():
+    return subprocess.run(["/home/ubuntu/dsh-fork/dsh-wait-check-sweep.py"],
+                          capture_output=True, text=True, env=env, timeout=900)
+# ① 样本不足 ⇒ 不放行
+build(4)
+r1 = run_check()
+assert r1.returncode == 1, "样本只有 4 个埋点回合却放行了"
+# ② 样本够 ⇒ 必须放行(否则是死门)
+build(12)
+r2 = run_check()
+assert r2.returncode == 0, "样本够(12)却不放行(死门): " + (r2.stdout + r2.stderr)[-160:]
+# ③ 时代由文件声明: 删掉 sweep-era.json 且不给 --post-since ⇒ 工具必须拒绝出真裁决
+os.remove(os.path.join(tmp, "sweep-era.json"))
+r3 = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json"],
+                    capture_output=True, text=True, env=env, timeout=900)
+d3 = json.loads(r3.stdout.strip().splitlines()[-1])
+assert d3["verdict"] == "insufficient-undeclared-era", "缺时代声明却出了裁决: " + str(d3["verdict"])
+print("样本 4 ⇒ 不放行 / 样本 12 ⇒ 放行(可满足) / 缺时代声明 ⇒ 拒绝裁决")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

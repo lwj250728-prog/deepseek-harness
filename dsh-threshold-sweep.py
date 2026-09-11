@@ -73,9 +73,18 @@ def main() -> int:
     ap.add_argument('--json', action='store_true')
     args = ap.parse_args()
 
+    # 2026-09-12 06:5x (与 attribution-era.json 同一纪律): 时代起点**由机制声明**, 不靠我记得传参。
+    # sweep-era.json 缺失或未给 --post-since 时保持 None ⇒ 真裁决会被 R-3 闸拒绝(不会静默混采)。
+    post_since = args.post_since
+    if not post_since:
+        try:
+            _era = json.load(open(os.path.join(os.environ.get('DSH_COG_DIR') or D, 'sweep-era.json'), encoding='utf8'))
+            post_since = (_era or {}).get('since')
+        except Exception:
+            post_since = None
     post_cut = None
-    if args.post_since:
-        ps = args.post_since.strip()
+    if post_since:
+        ps = str(post_since).strip()
         try:
             post_cut = float(ps)
         except Exception:
@@ -279,7 +288,7 @@ def main() -> int:
     # 2026-09-12 06:3x **硬闸: 真裁决必须由调用方声明时代起点**. 采集方式(埋点/上限)变更过至少两次
     # (上限 5 → 20 → 500), 那些回合的记录**天生被截断**; 工具无从知道边界在哪 ⇒ 未给 --post-since 时
     # 不得出真裁决(实测: 不给边界时它照出了 no-headroom, 而样本里混着上限 20 时代被截断的回合)。
-    if not args.post_since and verdict in ('widen-gate', 'tradeoff-ceiling', 'no-headroom'):
+    if not post_since and verdict in ('widen-gate', 'tradeoff-ceiling', 'no-headroom'):
         verdict = 'insufficient-undeclared-era'
         reason = ('未声明时代起点(--post-since) ⇒ 样本可能混入采集方式变更前(上限 5/20)被截断的回合, '
                   '不得据此裁决; 请给出"当前上限生效时刻"再跑')
