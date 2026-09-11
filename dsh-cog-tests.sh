@@ -5273,6 +5273,26 @@ src = open(lib, encoding="utf8").read()
 assert "preTop" in src, "lib 里没有 preTop 埋点(未重建/未部署)"
 print("lib 含 preTop 埋点")
 '
+t "分通道成分须能重构 similarity(埋点不得自相矛盾)" python3 -c '
+import json, os, subprocess
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+after = int(subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-deploy-boundary.py"],
+                           capture_output=True, text=True, timeout=60).stdout.strip() or 0)
+rows = [json.loads(l) for l in open(D + "/retrieval-audit.jsonl", encoding="utf8") if l.strip()]
+cands = [c for r in rows if (r.get("t") or 0) > after
+         for c in (r.get("preTop") or []) if isinstance(c.get("channels"), dict)]
+if not cands:
+    print("[部署边界] 尚无带 channels 的候选, 本帧不判")
+    raise SystemExit(0)
+bad = []
+for c in cands:
+    ch = c["channels"]
+    want = ch["semantic"] + ch["symptom"] + ch["axis"]
+    if abs(want - c["similarity"]) > 0.001:
+        bad.append("%s: %.4f vs %.4f" % (c["expId"], want, c["similarity"]))
+assert not bad, "分通道成分与 similarity 不自洽(埋点有问题或公式变了): " + repr(bad[:3])
+print("%d 个候选的成分和与 similarity 一致(±0.001)" % len(cands))
+'
 t "部署后审计须真带 preTop 且可排序集在长" python3 -c '
 import json, os
 D = os.path.expanduser("~/.dsh/cognitive-pipeline")
