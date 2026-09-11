@@ -228,6 +228,7 @@ def main() -> int:
     if '--json' in args:
         print(json.dumps(payload, ensure_ascii=False))
     else:
+        print('口径=候选口径(可用的候选>=2 条; 见 caliber-notes.md)')
         print('带得分记录 %d | **可排序集 %d**/%d | A档 MRR %s top1 %s | B档 MRR %s top1 %s | lift %s'
               % (payload['sampleCount'], rankable, payload['minSample'], a, a1, b, b1, payload['lift']))
         print('结论: %s | %s' % (payload['conclusion'], payload.get('note', '')))
