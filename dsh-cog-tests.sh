@@ -6478,13 +6478,16 @@ assert "taxonomy-rebuild.jsonl" in src, "store 的写入点被移走了"
 print("写入点在 store 源码与产物里齐备")
 '
 t "try 路径: 重建必须真的调用写入点(不是只定义了方法)" python3 -c '
-import os, re
-src = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/cold-engine.ts"), encoding="utf8").read()
-i = src.index("async runRebuild(")
-seg = src[i:src.index("runRebuildCore", i + 10)]
-assert "recordTaxonomyAttempt(" in seg, "runRebuild 没有调用 recordTaxonomyAttempt(方法定义了但没人用)"
-assert "await this.runRebuildCore(" in seg, "runRebuild 未包装 runRebuildCore"
-print("runRebuild 包装层确实调用写入点")
+import os
+# 判"定义了且被调用"用**出现次数**(定义 1 次 + 至少 1 处调用), 不用 token 切片 ——
+# 第一版切片从 runRebuild( 切到下一个 runRebuildCore 出现处, 而包装层里 await runRebuildCore 排在
+# recordTaxonomyAttempt 之前, 于是把真正要查的调用切掉了(判据看错窗口, 本会话第 4 次同族)。
+cold = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/cold-engine.ts"), encoding="utf8").read()
+store = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/store.ts"), encoding="utf8").read()
+assert store.count("recordTaxonomyAttempt") >= 1, "store 没有定义写入点"
+assert cold.count("recordTaxonomyAttempt(") >= 1, "cold-engine 没有调用写入点(定义了没人用)"
+assert "await this.runRebuildCore(" in cold, "runRebuild 未包装 runRebuildCore"
+print("写入点已定义且被调用(store 定义 + cold-engine 调用)")
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。

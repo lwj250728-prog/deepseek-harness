@@ -284,13 +284,24 @@ export class ColdEngine {
     const result = await this.runRebuildCore(scope, sessionId, signal)
     // cl-256/tp-156: 每次重建都留一行尝试记录(接受/拒绝/暂缓都算) —— 判据「摘要陈旧时必须有近期重建尝试」
     // 读的就是这份账本, 而在此之前它只由人工写入, 于是判据在检查"有没有人写行"而非"整合层是否在重试"。
+    // 字段必须与账本既有 schema 对齐(判据「重建尝试必须落盘且字段完整」逐行检查 ts/accepted/oldError/
+    // newError/sampleCount) —— 第一版只记了子集, 于是新增行反而把那条判据打红。
+    const r = result as {
+      oldError?: number | null; deltaError?: number | null; clusterCount?: number
+      rejectedClusters?: number; sampleCount?: number; taxonomyVersion?: number
+    }
     this.store.recordTaxonomyAttempt({
       scope,
       accepted: result.accepted,
       deferred: result.deferred,
       reason: result.reason,
+      oldError: r.oldError ?? null,
       newError: result.newError ?? null,
-      version: (result as { taxonomyVersion?: number }).taxonomyVersion ?? null,
+      deltaError: r.deltaError ?? null,
+      clusterCount: r.clusterCount ?? null,
+      rejectedClusters: r.rejectedClusters ?? null,
+      sampleCount: r.sampleCount ?? null,
+      version: r.taxonomyVersion ?? null,
     })
     return result
   }
