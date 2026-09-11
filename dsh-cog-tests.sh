@@ -6161,6 +6161,98 @@ bad = ["%s(证据 %s/引用 %s, 龄 %.1fd)" % (r.get("jumpWord"), r.get("evidenc
 assert not bad, "存在超期且零证据的 llm 跳词(该通道的\"新鲜\"宽限又变成永不过期?): %s" % bad[:4]
 print("无超期零证据的 llm 跳词(龄在 TTL 内的条目由重建周期自然淘汰)")
 '
+# ── T170 孵化预测的 register→score 往返与 last-wins(cl-249 的机制面) ──
+# 起因(测试审视帧): T167 只守了"能判未命中"与"区间随样本收窄"两个**片段**, 而这条机制真正会被用的是
+# 往返: 先预登记, 等窗口走完再结算。两处此前无覆盖: ①往返是否真能结算(horizon 到了就出结论);
+# ②同一 (goalId, 基准唤醒数) 若被重复预登记(口径修正后会重新登记), 必须**只认最后一次**(last-wins)——
+# 否则同一窗口会被重复计入命中率, 指标自己就先歪了。
+echo "[T170] 预测往返(register→到达 horizon→结算) + 重复预登记 last-wins"
+t "往返: horizon 到达后必须结算出该窗口的实际采纳" python3 -c '
+import json, os, subprocess, tempfile
+tmp = tempfile.mkdtemp()
+log = os.path.join(tmp, "goal-trigger-log.jsonl")
+def row(i, adopted):
+    return json.dumps({"ts": "2026-09-11T10:00:%02d+08:00" % i, "goalId": "g", "adopted": adopted}) + "\n"
+open(log, "w", encoding="utf8").write(row(0, False) + row(1, False) + row(2, False))
+env = dict(os.environ, DSH_COG_DIR=tmp)
+fx = os.path.expanduser("~/dsh-fork/dsh-incubation-forecast.py")
+r = subprocess.run(["python3", fx, "--register", "--horizon", "2", "--json"], capture_output=True, text=True, timeout=600, env=env)
+assert r.returncode == 0, "预登记失败: %s" % (r.stderr or r.stdout)[-200:]
+pred = json.loads(r.stdout)["predictions"][0]
+assert pred["basisTriggers"] == 3 and pred["horizonWakes"] == 2, pred
+# 窗口走完: 再补 2 次唤醒, 其中 1 次采纳
+with open(log, "a", encoding="utf8") as f: f.write(row(3, True) + row(4, False))
+r2 = subprocess.run(["python3", fx, "--score", "--json"], capture_output=True, text=True, timeout=600, env=env)
+assert r2.returncode == 0, "结算失败: %s" % (r2.stderr or r2.stdout)[-200:]
+d = json.loads(r2.stdout)
+assert len(d["scored"]) == 1, "窗口已走完却没结算(或结算了多条): %s" % d
+got = d["scored"][0]
+assert got["actualAdoptions"] == 1 and got["target"] == 5, got
+assert d["hitRate"] in (0.0, 1.0), "命中率未算出: %s" % d["hitRate"]
+print("往返成立: 基准 3 → 目标 5 → 实际采纳 %s, 区间 %s ⇒ hit=%s" % (got["actualAdoptions"], got["interval"], got["hit"]))
+'
+t "重复预登记必须 last-wins(同一基准窗口只结算一次)" python3 -c '
+import json, os, subprocess, tempfile
+tmp = tempfile.mkdtemp()
+log = os.path.join(tmp, "goal-trigger-log.jsonl")
+rows = [json.dumps({"ts": "2026-09-11T10:00:%02d+08:00" % i, "goalId": "g", "adopted": False}) + "\n" for i in range(3)]
+open(log, "w", encoding="utf8").write("".join(rows))
+env = dict(os.environ, DSH_COG_DIR=tmp)
+fx = os.path.expanduser("~/dsh-fork/dsh-incubation-forecast.py")
+subprocess.run(["python3", fx, "--register", "--horizon", "2"], capture_output=True, text=True, timeout=600, env=env)
+# 口径修正式重登记: 同一基准(3)再来一次, 区间故意写成 [9,9](必然未命中)
+preds = os.path.join(tmp, "incubation-predictions.jsonl")
+rec = json.loads(open(preds, encoding="utf8").read().strip().split("\n")[-1])
+rec["predictions"][0]["adoptInterval"] = [9, 9]
+rec["predictions"][0]["adoptPoint"] = 9
+with open(preds, "a", encoding="utf8") as f: f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+# 窗口必须**走完**才结算: 基准 3 + horizon 2 = 5 ⇒ 再补 2 次唤醒(其中 1 次采纳)
+with open(log, "a", encoding="utf8") as f:
+    f.write(json.dumps({"ts": "2026-09-11T11:00:00+08:00", "goalId": "g", "adopted": True}) + "\n")
+    f.write(json.dumps({"ts": "2026-09-11T11:05:00+08:00", "goalId": "g", "adopted": False}) + "\n")
+d = json.loads(subprocess.run(["python3", fx, "--score", "--json"], capture_output=True, text=True, timeout=600, env=env).stdout)
+assert len(d["scored"]) == 1, "同一基准窗口被结算了 %d 次(未 last-wins)" % len(d["scored"])
+assert d["scored"][0]["interval"] == [9, 9], "结算用的不是最后一次预登记的区间: %s" % d["scored"][0]
+assert d["scored"][0]["hit"] is False, "按最后一次区间应判未命中: %s" % d["scored"][0]
+print("last-wins 成立: 只结算 1 条, 且用最后一次预登记的区间 %s ⇒ hit=False" % d["scored"][0]["interval"])
+'
+# ── T171 重复催办判据(cl-248 的机械化: 连续 3 次唤醒未采纳且无生效等待 ⇒ 红) ──
+# 起因(测试审视帧): cl-248 那类"已完成的 nextAction 仍留在池里"是靠我人工看出来的 —— 检索目标连续 6 次
+# 唤醒无事可做, 代价不只是空转, 还让"触发数"这个指标虚增。人工发现不可复现, 判据必须机械:
+#   · 连续 ≥3 次唤醒未产生采纳 **且** 该目标没有"生效中的等待条件"(waitChecker exit 0 才算条件已满足,
+#     满足即该驱动, 不满足则说明它在合法等待) ⇒ 判定为重复催办。
+# 为什么带 waitChecker 就豁免: 日期门/样本门目标本来就会累积若干次未采纳的唤醒, 那是设计而非空转。
+echo "[T171] 重复催办判据(连续未采纳且无生效等待即红)"
+t "active 目标不得连续 3 次唤醒未采纳且无生效等待条件" python3 -c '
+import json, os, subprocess, collections
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+pool = {}
+for line in open(os.path.join(D, "dormant-goals.jsonl"), encoding="utf8"):
+    if line.strip():
+        row = json.loads(line); pool[row.get("id")] = row
+trig = collections.defaultdict(list)
+for line in open(os.path.join(D, "goal-trigger-log.jsonl"), encoding="utf8"):
+    if line.strip():
+        r = json.loads(line); trig[r.get("goalId")].append(r)
+bad = []
+for gid, g in pool.items():
+    if g.get("status") != "active":
+        continue
+    rows = trig.get(gid) or []
+    streak = 0
+    for r in reversed(rows):
+        if r.get("adopted") is True:
+            break
+        streak += 1
+    checker = (g.get("waitChecker") or "").strip()
+    waiting = False
+    if checker:
+        waiting = subprocess.run(checker, shell=True, capture_output=True).returncode != 0   # 条件未满足=在等待
+    if streak >= 3 and not waiting:
+        bad.append("%s(连续 %d 次未采纳, 无生效等待: %s)" % (gid, streak, checker or "无 waitChecker"))
+assert not bad, "疑似重复催办(该目标的 nextAction 可能已完成或不可推进): %s" % bad
+print("active 目标均未出现\"连续未采纳且无等待\"的空转")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
