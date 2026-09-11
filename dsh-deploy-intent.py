@@ -67,9 +67,47 @@ def content_state(lib_glob):
 
 
 def service_start_epoch():
+    """服务启动时刻: 先问 systemd, 再用 /proc 退路(cl-238 加固)。
+
+    2026-09-11 09:1x-09:55 实测: 没有 systemd user 会话时(`systemctl --user` 连不上 bus)
+    这个函数返回 None, 监控每 5 分钟写一行"自检失败"却什么都不做 —— 判据在它最该工作的
+    环境里失明。systemd 之外还有一条**不依赖 dbus**的路: 进程的 /proc/<pid>/stat 里有
+    starttime(自开机起的时钟节拍), 配上 /proc/stat 的 btime 即可还原启动时刻。
+    """
     out = subprocess.run(["systemctl", "--user", "show", SERVICE, "-p", "ActiveEnterTimestamp", "--value"],
                          capture_output=True, text=True, timeout=30).stdout.strip()
-    if not out:
+    if out:
+        r = subprocess.run(["date", "-d", out, "+%s"], capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 and r.stdout.strip():
+            return int(r.stdout.strip())
+    return proc_start_epoch()
+
+
+def proc_start_epoch():
+    """/proc 口径的服务启动时刻(无 dbus 退路); 取 web 进程里**最早启动**的那个 pid。"""
+    try:
+        pids = subprocess.run(["pgrep", "-f", "bin.js web"], capture_output=True, text=True, timeout=30).stdout.split()
+        if not pids:
+            return None
+        hz = os.sysconf('SC_CLK_TCK')
+        btime = None
+        with open('/proc/stat', encoding='utf8') as f:
+            for line in f:
+                if line.startswith('btime'):
+                    btime = int(line.split()[1])
+                    break
+        if btime is None:
+            return None
+        stamps = []
+        for pid in pids:
+            try:
+                with open('/proc/%s/stat' % pid, encoding='utf8') as f:
+                    fields = f.read().rsplit(')', 1)[1].split()
+                stamps.append(btime + int(fields[19]) / hz)
+            except Exception:
+                continue
+        return int(min(stamps)) if stamps else None
+    except Exception:
         return None
     r = subprocess.run(["date", "-d", out, "+%s"], capture_output=True, text=True, timeout=30)
     if r.returncode != 0 or not r.stdout.strip():
