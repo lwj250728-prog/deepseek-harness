@@ -7597,6 +7597,45 @@ d3 = json.loads(r3.stdout.strip().splitlines()[-1])
 assert d3["verdict"] == "insufficient-undeclared-era", "缺时代声明却出了裁决: " + str(d3["verdict"])
 print("样本 4 ⇒ 不放行 / 样本 12 ⇒ 放行(可满足) / 缺时代声明 ⇒ 拒绝裁决")
 '
+# ── T196 条件门不得依赖"行动帧产出"(否则全部门挂上时会互相饿死) ──
+# 2026-09-12 07:1x 实测: 三个 active 目标全部挂上门之后, 驱动侧选目标返回 **[]**(功能验证过) ⇒
+# **不再产生任何行动帧**。此时若某个门的条件恰好是"再攒 N 个行动帧", 它永远等不到 —— 机制彼此饿死。
+# 本组守: ①池内每个 waitChecker 都不得读行动帧日志(不接受以帧为产出的条件); ②每个门必须挂在**外部产物**上
+# (池变更/审计/干预记录等由运行时或排程产出, 而不是等我下次开工)。
+echo "[T196] 条件门不得依赖行动帧(防饿死) + 必须挂在外部产物上"
+t "池内条件门不得依赖行动帧产出, 且必须挂在外部产物上" python3 -c '
+import json, os
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+pool = {}
+for l in open(os.path.join(D, "dormant-goals.jsonl"), encoding="utf8"):
+    if l.strip():
+        r = json.loads(l)
+        if r.get("id"): pool[r["id"]] = r
+checkers = [(gid, (row.get("waitChecker") or "").strip()) for gid, row in pool.items()
+            if row.get("status") == "active" and (row.get("waitChecker") or "").strip()]
+assert checkers, "池内没有 active 目标的 waitChecker —— 本断言前提不成立"
+FRAME_MARKERS = ("quiet-driver-frames", "action-frame")
+EXT = ("incubation-log", "retrieval-audit", "wake-interventions", "wake-intervention-readout",
+       "library-replay", "experiments", "candidates")
+# "挂在外部产物上"允许**委托**: 门脚本常把读数交给另一个脚本(如 wait-check-sweep 调 threshold-sweep,
+# 后者才读 retrieval-audit) ⇒ 引用任何 dsh-*.py/.tsx 也算外部依赖(关键是别只等我下次开工)。
+import re as _re
+bad_frame, no_ext = [], []
+for gid, cmd in checkers:
+    path = cmd.split()[0]
+    if not os.path.exists(path):
+        bad_frame.append(gid + ":脚本不存在")
+        continue
+    src = open(path, encoding="utf8").read()
+    if any(m in src for m in FRAME_MARKERS):
+        bad_frame.append(gid + ":读行动帧")
+    delegates = bool(_re.search(r"dsh-[a-z0-9-]+\.(py|tsx|sh)", src))
+    if not (any(m in src for m in EXT) or delegates):
+        no_ext.append(gid)
+assert not bad_frame, "条件门依赖行动帧产出(全部门挂上时会饿死): " + repr(bad_frame)
+assert not no_ext, "条件门没挂在任何外部产物上(可能在等我自己开工): " + repr(no_ext)
+print("池内 %d 个门: 均不读行动帧, 且都挂在外部产物上" % len(checkers))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
