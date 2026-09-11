@@ -135,6 +135,8 @@ def main() -> int:
     ap.add_argument('--root', default=SESSIONS_ROOT)
     ap.add_argument('--threshold-mb', type=float, default=float(os.environ.get('DSH_SESSION_LOG_ALERT_MB') or DEFAULT_THRESHOLD_MB))
     ap.add_argument('--deep', action='store_true', help='对超阈值会话做解压统计(默认只对它们自动做)')
+    ap.add_argument('--active-days', type=float, default=3.0,
+                    help='只对最近 N 天有写入的会话开火; 更旧的冷/归档会话只报数(否则归档后告警永不关闭)')
     ap.add_argument('--json', action='store_true')
     ap.add_argument('--no-alert', action='store_true')
     args = ap.parse_args()
@@ -144,7 +146,14 @@ def main() -> int:
         print('扫描失败: %s' % exc, file=sys.stderr)
         return 2
     threshold = args.threshold_mb * 1048576
-    over = [r for r in rows if r['logBytes'] > threshold]
+    import time as _time
+    cutoff = _time.time() - args.active_days * 86400
+    for r in rows:
+        logs = r['logs']
+        r['mtime'] = max([os.path.getmtime(os.path.join(r['dir'], l['file'])) for l in logs], default=0)
+        r['active'] = r['mtime'] >= cutoff
+    over = [r for r in rows if r['logBytes'] > threshold and r['active']]
+    cold_over = [r for r in rows if r['logBytes'] > threshold and not r['active']]
     for r in over:
         log = r['logs'][0]['file'] if r['logs'] else None
         if log and (args.deep or True):
@@ -153,6 +162,7 @@ def main() -> int:
         'ts': now_iso(), 'origin': os.environ.get('DSH_RUN_ORIGIN') or 'manual',
         'root': args.root, 'sessions': len(rows), 'thresholdMB': args.threshold_mb,
         'overCount': len(over),
+        'overCountCold': len(cold_over), 'activeDays': args.active_days,
         'top': [{'session': r['session'], 'logMB': round(r['logBytes'] / 1048576, 1),
                  'dirMB': round(r['totalBytes'] / 1048576, 1),
                  'chunkShare': (r.get('deep') or {}).get('chunkShare'),
@@ -175,7 +185,8 @@ def main() -> int:
     if args.json:
         print(json.dumps(payload, ensure_ascii=False))
     else:
-        print('会话 %d 个 | 超阈值(%.0fMB) %d 个' % (len(rows), args.threshold_mb, len(over)))
+        print('会话 %d 个 | 超阈值(%.0fMB)且活跃 %d 个 | 超阈值但已冷(只报数) %d 个'
+              % (len(rows), args.threshold_mb, len(over), len(cold_over)))
         for t in payload['top']:
             print('  %-40s 日志 %6.1fMB 目录 %6.1fMB 行数 %s chunk占比 %s%%' % (
                 t['session'][:40], t['logMB'], t['dirMB'], t['lines'],
