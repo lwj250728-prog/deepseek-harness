@@ -6862,6 +6862,47 @@ assert "pool_wait.get(gid)" in src or "pool_wait.get(r[\u0027goalId\u0027])" in 
 assert "r[\u0027noiseCandidate\u0027] = False" in src, "held 目标没有被从噪声候选里剔除"
 print("接线在册: 逐目标求值 + exit 0 语义 + 剔除")
 '
+# ── T184 门限扫描的前提纪律(cl-263) ──
+# 起因: 行动帧要求"离线扫过阈门限, 看可排序集占比能否上升"。执行中发现**前提不成立**: 审计只记**过阈后**的候选
+# (426 个候选中阈下 0 个, 最小相似度 0.502) ⇒ 放松门限能否多出可排序集在这份数据上**算不出来**; 而第一版工具
+# 照样打出了平坦的 75% 并判 `no-headroom` —— 把"没数据"讲成了"没空间"。第二版先修一处更隐蔽的自证缺陷:
+# 相关性取"排在最前的有标签候选" ⇒ MRR 恒 1.000(排序质量变成同义反复, cl-219 家族)。
+# 本组守三件: ①前提不成立必须报 inconclusive ②相关性定义必须独立于排序(与 replay 同口径, 数值须对得上)
+# ③预登记裁决规则必须写在工具里(而不是我事后解释)。
+echo "[T184] 门限扫描的前提纪律(inconclusive / 相关性独立于排序 / 预登记在册)"
+t "阈下候选未采集时不得给出门限结论(必须报 inconclusive)" python3 -c '
+import json, subprocess
+r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json"],
+                   capture_output=True, text=True, timeout=900)
+assert r.returncode == 0, "扫描工具失败: " + (r.stderr or r.stdout)[-200:]
+d = json.loads(r.stdout.strip().splitlines()[-1])
+assert "subGateDiagnostics" in d, "缺阈下诊断 —— 无法判前提是否成立"
+diag = d["subGateDiagnostics"]
+assert d.get("prereg"), "缺预登记裁决规则(结论不许事后解释)"
+if diag["belowGate"] == 0:
+    assert str(d["verdict"]).startswith("inconclusive"), "阈下候选一条都没记, 却给出了结论: " + str(d["verdict"])
+    print("阈下候选未采集 ⇒ 如实报 " + str(d["verdict"]))
+else:
+    assert d["verdict"] in ("widen-gate", "tradeoff-ceiling", "no-headroom"), "非法判读: " + str(d["verdict"])
+    print("阈下候选已采集(" + str(diag["belowGate"]) + " 个), 判读 " + str(d["verdict"]))
+'
+t "扫描工具的相关性定义必须独立于排序(与 replay 同口径, 数值须对得上)" python3 -c '
+import json, os, subprocess
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json"],
+                   capture_output=True, text=True, timeout=900)
+assert r.returncode == 0, "扫描工具失败"
+d = json.loads(r.stdout.strip().splitlines()[-1])
+cur = next(x for x in d["table"] if abs(x["threshold"] - d["currentGate"]) < 1e-9)
+rep = json.load(open(D + "/library-replay-result.json", encoding="utf8"))
+val = (rep.get("labelRobustness") or {}).get("valence") or {}
+assert val.get("armA_mrr") is not None, "replay 未产出 valence 档读数, 无法交叉核对"
+assert cur["armA_mrr"] is not None, "扫描未产出当前门限下的 A 档 MRR"
+assert abs(cur["armA_mrr"] - val["armA_mrr"]) < 1e-6, ("同口径下两工具 MRR 不一致: 扫描 %.6f vs replay %.6f"
+                                                       % (cur["armA_mrr"], val["armA_mrr"]))
+assert abs(cur["armA_top1"] - val["armA_top1"]) < 1e-6, "top-1 不一致(口径漂了)"
+print("与 replay 同口径核对通过: A档 MRR %.4f / top-1 %.4f" % (cur["armA_mrr"], cur["armA_top1"]))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
