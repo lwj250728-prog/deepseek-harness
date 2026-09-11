@@ -40,6 +40,15 @@ PREFIX = 60          # nextAction 前缀比较长度(足够区分不同步骤, �
 NOISE_MIN_FRAMES = 5
 NOISE_MAX_RATE = 0.20
 
+# 条件型等待(cl-252, 2026-09-12): "低归因"有两种完全不同的成因 —— ①提醒没用(噪声) ②目标**合法地被
+# 自己的条件门挡着**, 期间根本不会产生新的行动帧。原来的噪声判据只看帧数与归因率, 于是把②读成①:
+# 实测 goal-experience-library 是当时**唯一**的噪声候选(15 帧/1 归因/6.7%), 而它的 waitChecker
+# (`dsh-wait-check-ab-window.py --min-turns 40`)未满足 ⇒ 驱动侧按 cl-250 把它排除 ⇒ 样本门靠等待永远
+# 攒不到。若照噪声处置(降相似度权重/改写 focus), 就是**用错误读数拆掉一个正在按纪律等待的目标**。
+# 故: 逐目标跑它自己的 waitChecker, **与驱动侧同一语义**(exit 0 = 条件已满足 ⇒ 该干; 非 0/超时/测不出
+# = 未满足 ⇒ 不该干), 未满足者标 heldByCondition 并从噪声候选里剔除。
+WAIT_CHECK_TIMEOUT = 25.0
+
 
 
 # 由**别的机制拥有 nextAction** 的目标: 它们的 nextAction 会被那个机制直接改写, 于是"帧驱动的那一步被推进"
@@ -65,6 +74,24 @@ def load(path: str) -> list[dict]:
             except Exception:
                 continue
     return rows
+
+
+def wait_condition_met(cmd: str) -> bool | None:
+    """跑目标的 waitChecker —— 与 quiet-driver 的 waitConditionMet 同一语义。
+
+    exit 0 = 条件已满足(该驱动); 非 0 / 超时 / 命令为空 = 未满足(不该驱动)。
+    返回 None 表示"该目标没挂条件门"(而不是"条件未满足"), 两者在读数里必须分得开:
+    前者不参与 held 判定, 后者是 held 的**唯一**依据。
+    """
+    import subprocess
+    c = (cmd or '').strip()
+    if not c:
+        return None
+    try:
+        r = subprocess.run(c, shell=True, capture_output=True, timeout=WAIT_CHECK_TIMEOUT)
+        return r.returncode == 0
+    except Exception:
+        return False   # fail-closed: 测不出就不当条件已满足(与驱动侧一致)
 
 
 def ms_of(value) -> float | None:
@@ -111,6 +138,7 @@ def main() -> int:
     window_ms = args.window_min * 60 * 1000
     tol_ms = args.pre_tolerance_min * 60 * 1000
     pool_status = {}
+    pool_wait = {}
     try:
         pool_path = os.path.join(DIR, 'dormant-goals.jsonl')
         if os.path.exists(pool_path):
@@ -118,6 +146,7 @@ def main() -> int:
                 if line.strip():
                     row = json.loads(line)
                     pool_status[str(row.get('id'))] = row.get('status')      # last-wins
+                    pool_wait[str(row.get('id'))] = row.get('waitChecker')
     except Exception:
         pool_status = {}
 
@@ -178,11 +207,27 @@ def main() -> int:
             # 只有"现在仍可被驱动"(active)的目标才谈噪声候选; paused/dormant 的历史帧只作信息展示
             'noiseCandidate': bool(f >= NOISE_MIN_FRAMES and rate is not None and rate < NOISE_MAX_RATE
                                    and pool_status.get(gid) == 'active'),
+            'waitChecker': (pool_wait.get(gid) or '').strip() or None,
+            # 条件门未满足 ⇒ 期间不会新增行动帧 ⇒ "低归因"在这里不构成噪声证据(cl-252)
+            'heldByCondition': False,
             'unattributedSample': [u['driven'][:40] for u in slot['unattributedFrames'][-2:]],
         })
     for r in rows:
         r['governedElsewhere'] = r['goalId'] in GOVERNED_ELSEWHERE
         r['governedReason'] = GOVERNED_ELSEWHERE.get(r['goalId'])
+        # 只对"可能被判噪声"或"仍 active 且有帧"的目标真跑条件门: 其它目标(无帧/paused)没有判定价值,
+        # 而 waitChecker 是外部命令 —— 不该为了好看对全池都执行一遍。
+        if pool_status.get(r['goalId']) == 'active' and r['frames'] > 0:
+            met = wait_condition_met(str(pool_wait.get(r['goalId']) or ''))
+            r['waitConditionMet'] = met
+            if met is False:
+                r['heldByCondition'] = True
+                r['noiseCandidate'] = False
+        else:
+            r['waitConditionMet'] = None
+        # 自证: 被条件门挡住的目标必须能被指认出来, 否则剔除动作会变成静默的
+        r['noiseCandidateBasis'] = ('held-by-condition' if r['heldByCondition'] else
+                                    ('rate' if r['noiseCandidate'] else 'not-candidate'))
     measurable = [r for r in rows if r['frames'] > 0 and not r['governedElsewhere']]
     m_frames = sum(r['frames'] for r in measurable)
     m_attr = sum(r['attributed'] for r in measurable)
@@ -225,7 +270,9 @@ def main() -> int:
         'ts': now_iso(), 'origin': os.environ.get('DSH_RUN_ORIGIN') or 'manual',
         'since': args.since,
         'windowMin': args.window_min, 'preToleranceMin': args.pre_tolerance_min,
-        'noiseRule': 'frames>=%d 且 严格归因率<%d%% 且 目标当前 active' % (NOISE_MIN_FRAMES, int(NOISE_MAX_RATE * 100)),
+        'noiseRule': ('frames>=%d 且 严格归因率<%d%% 且 目标当前 active 且 **其 waitChecker 未拦着**'
+                      % (NOISE_MIN_FRAMES, int(NOISE_MAX_RATE * 100))),
+        'heldByCondition': [r['goalId'] for r in rows if r.get('heldByCondition')],
         'frames': total_frames, 'attributed': total_attr,
         'attributionRate': round(total_attr / total_frames, 3) if total_frames else None,
         'looseRate': round(total_loose / total_frames, 3) if total_frames else None,
@@ -250,12 +297,16 @@ def main() -> int:
         print('可严格测量口径(剔除 nextAction 由别的机制拥有的目标): %d 条行动帧 ⇒ **%.1f%%**'
               % (m_frames, 100 * (payload['measurableAttributionRate'] or 0)))
         print('噪声判据: %s' % payload['noiseRule'])
+        if payload.get('heldByCondition'):
+            print('被自身条件门挡住(不计入噪声, 期间不会新增行动帧): %s' % ', '.join(payload['heldByCondition']))
         print('%-32s %6s %8s %9s %8s %8s' % ('目标', '唤醒', '行动帧', '被推进', '严格率', '宽松率'))
         for r in driven_rows:
             print('%-32s %6d %8d %9d %8s %8s%s' % (r['goalId'], r['wakes'], r['frames'], r['attributed'],
                   ('%.1f%%' % (100 * r['attributionRate'])) if r['attributionRate'] is not None else '-',
                   ('%.1f%%' % (100 * r['looseRate'])) if r['looseRate'] is not None else '-',
-                  '  ← 噪声候选' if r['noiseCandidate'] else ('  ← 由别的机制拥有(量不了)' if r['governedElsewhere'] else '')))
+                  ('  ← 噪声候选' if r['noiseCandidate'] else
+                   ('  ← 被自身条件门挡着(不计噪声)' if r.get('heldByCondition') else
+                    ('  ← 由别的机制拥有(量不了)' if r['governedElsewhere'] else '')))))
         if reverse is not None:
             print('反向判据: 池推进 %d 次, 其中 **%d 次没有对应的唤醒**(%.1f%%) —— 未被唤醒也被推进 ⇒ 提醒不是推进的必要条件'
                   % (reverse['changes'], reverse['withoutWake'], 100 * (reverse['withoutWakeRate'] or 0)))

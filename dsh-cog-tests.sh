@@ -6766,6 +6766,74 @@ age = (datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisof
 assert age < 8 * 3600, "排程自愈已 " + str(round(age / 3600, 1)) + " 小时没有痕迹"
 print("排程自愈痕迹新鲜(" + str(round(age / 60)) + " 分钟前, 最近事件 " + str(cron_rows[-1].get("event")) + ")")
 '
+# ── T183 噪声判据不得把"条件型等待"当噪声(cl-252) ──
+# 起因: 噪声规则(frames>=5 且 严格率<20% 且 active)只看帧数与归因率, 于是把两种完全不同的成因读成一类:
+#   ①提醒没用(噪声) ②目标**合法地被自己的条件门挡着**, 期间根本不产生新的行动帧。实测 goal-experience-library
+#   是当时唯一噪声候选(15 帧/1 归因/6.7%), 而它的 waitChecker(`--min-turns 40`)未满足 ⇒ 驱动侧按 cl-250 排除它
+#   ⇒ 样本门靠等待永远攒不到。照噪声处置(降相似度权重/改写 focus)就是**用错误读数拆掉一个正在按纪律等待的目标**。
+# 修法: 逐目标跑它自己的 waitChecker(与驱动侧同一语义: exit 0=该干, 非 0/超时=不该干), 未满足者标
+#   heldByCondition 并从噪声候选剔除。本组守三件: ①合成三例(held 不入选 / 真噪声仍入选 / 条件满足后恢复可判)
+#   ②源码接线 ③真实读数里被条件门挡住的目标不得同时出现在噪声候选里。
+echo "[T183] 噪声判据须区分'条件型等待'与'真噪声'"
+t "合成池三例: 被条件门挡住的不算噪声, 条件满足/无门的仍算, 暂停的不算" python3 -c '
+import json, os, subprocess, tempfile, datetime
+tmp = tempfile.mkdtemp()
+TZ = datetime.timezone(datetime.timedelta(hours=8)); now = datetime.datetime.now(TZ)
+pool = [
+ {"id": "g-held", "status": "active", "nextAction": "等待型步骤 A", "waitChecker": "false"},
+ {"id": "g-met", "status": "active", "nextAction": "等待型步骤 B", "waitChecker": "true"},
+ {"id": "g-nochecker", "status": "active", "nextAction": "无门步骤 C"},
+ {"id": "g-paused", "status": "paused", "nextAction": "暂停目标不该入选"},
+]
+open(os.path.join(tmp, "dormant-goals.jsonl"), "w", encoding="utf8").write("\n".join(json.dumps(r, ensure_ascii=False) for r in pool) + "\n")
+frames = []
+for gid in ("g-held", "g-met", "g-nochecker", "g-paused"):
+    for i in range(6):
+        frames.append({"kind": "action-frame", "goalId": gid, "nextAction": "旧步骤 " + gid,
+                       "session": "s-probe", "ts": (now - datetime.timedelta(minutes=600 + i * 10)).isoformat()})
+open(os.path.join(tmp, "quiet-driver-frames.jsonl"), "w", encoding="utf8").write("\n".join(json.dumps(r, ensure_ascii=False) for r in frames) + "\n")
+open(os.path.join(tmp, "incubation-log.jsonl"), "w", encoding="utf8").write("\n")
+open(os.path.join(tmp, "goal-trigger-log.jsonl"), "w", encoding="utf8").write("\n")
+r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-wake-attribution.py", "--json", "--no-record"],
+                   capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=tmp), timeout=300)
+assert r.returncode == 0, "归因脚本失败: " + (r.stderr or r.stdout)[-200:]
+d = json.loads(r.stdout.strip().splitlines()[-1])
+per = {g["goalId"]: g for g in d["perGoal"]}
+held = per["g-held"]
+assert held["waitConditionMet"] is False and held["heldByCondition"] is True, "未满足的条件门未被标 heldByCondition"
+assert held["noiseCandidate"] is False, "被自身条件门挡住的目标仍被列为噪声候选(会拆掉合法等待的目标)"
+assert "g-held" not in d["noiseCandidates"], "held 目标出现在噪声候选列表里"
+assert per["g-met"]["waitConditionMet"] is True and per["g-met"]["noiseCandidate"] is True, "条件满足后目标未恢复可判(被永久豁免)"
+assert per["g-nochecker"]["noiseCandidate"] is True, "无等待条件的真噪声目标反而没被列为候选"
+assert per["g-paused"]["noiseCandidate"] is False, "暂停目标被列为噪声候选"
+print("held 不入选 / 条件满足后恢复可判 / 无门真噪声仍入选 / 暂停不入选")
+'
+t "真实读数: 被条件门挡住的目标不得同时出现在噪声候选里" python3 -c '
+import json, os, subprocess
+r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-wake-attribution.py", "--json", "--no-record"],
+                   capture_output=True, text=True, timeout=600)
+assert r.returncode == 0, "真实读数失败: " + (r.stderr or r.stdout)[-200:]
+d = json.loads(r.stdout.strip().splitlines()[-1])
+held = [g for g in d["perGoal"] if g.get("heldByCondition")]
+cands = set(d["noiseCandidates"])
+bad = [g["goalId"] for g in held if g["goalId"] in cands]
+assert not bad, "被条件门挡住却仍列为噪声候选: " + repr(bad)
+el = [g for g in d["perGoal"] if g["goalId"] == "goal-experience-library"]
+if el and el[0].get("waitConditionMet") is False:
+    assert el[0]["heldByCondition"] and "goal-experience-library" not in cands, "cl-252 的情形复发了"
+    print("goal-experience-library 被条件门挡着(不计噪声): 候选 " + repr(d["noiseCandidates"]) + " / held " + repr([g["goalId"] for g in held]))
+else:
+    print("读数成立: held " + repr([g["goalId"] for g in held]) + ", 候选 " + repr(d["noiseCandidates"]) + "(该目标此帧非 held, 只判结构)")
+'
+t "归因脚本必须真的跑目标自己的 waitChecker(不是只看字段存在)" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/dsh-wake-attribution.py"), encoding="utf8").read()
+assert "def wait_condition_met(" in src, "缺条件门求值函数"
+assert "shell=True" in src and "returncode == 0" in src, "求值语义与驱动侧不一致(必须以 exit 0 为条件已满足)"
+assert "pool_wait.get(gid)" in src or "pool_wait.get(r[\u0027goalId\u0027])" in src, "没有从池里取目标自己的 waitChecker"
+assert "r[\u0027noiseCandidate\u0027] = False" in src, "held 目标没有被从噪声候选里剔除"
+print("接线在册: 逐目标求值 + exit 0 语义 + 剔除")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
