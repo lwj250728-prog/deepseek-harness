@@ -95,8 +95,14 @@ def main() -> int:
     bin_ms = args.bin_min * 60 * 1000
 
     # 以"最后一个事件"为右端, 往前切等长时段(不含未来空段)
-    last = max([ms_of(f.get('ts')) or 0 for f in frames] + [ms_of(c.get('ts')) or 0 for c in changes])
-    start = max(cut, last - bin_ms * int((last - cut) // bin_ms))
+    # 2026-09-12 04:4x 修(合成数据当场抓到的偏差): 原先时段铺满整个 --hours 窗口, 而该目标的活动只占其中一段
+    # ⇒ 活动之前那些"目标还没动过"的空时段被算进**无唤醒段**, 把 idle 速率稀释到 0, 于是任何数据都会被判成
+    # catalyst(实测: 合成"独立"数据也报 ×9.15)。时段必须只铺在**该目标自己的观测期内**(首个事件→末个事件)。
+    all_ts = [ms_of(f.get('ts')) or 0 for f in frames] + [ms_of(c.get('ts')) or 0 for c in changes]
+    last = max(all_ts)
+    first_ev = min(t for t in all_ts if t > 0)
+    start = max(cut, first_ev)
+    start = last - bin_ms * max(1, int((last - start) // bin_ms))
     bins: dict[int, dict] = {}
     idx = 0
     t = last
@@ -125,12 +131,21 @@ def main() -> int:
     adv_i = sum(b['advances'] for b in idle)
     rate_w = adv_w / exp_w if exp_w else None
     rate_i = adv_i / exp_i if exp_i else None
-    ratio = (rate_w / rate_i) if (rate_w and rate_i) else None
+    # 2026-09-12 04:4x 修(实测的判别力缺口): 无唤醒段推进为 0 时原写法给出 ratio=None, 于是
+    # "推进全落在唤醒段"这种**最强的催化证据**反而掉进 no-signal 分支 —— 判据在最该开火的地方哑了。
+    if rate_w is None or rate_i is None:
+        ratio = None
+    elif rate_i == 0:
+        ratio = float('inf') if rate_w > 0 else None
+    else:
+        ratio = rate_w / rate_i
     p = binom_p(adv_w, adv_w + adv_i, exp_w / (exp_w + exp_i)) if (exp_w + exp_i) else 1.0
     if len(woken) < 5 or len(idle) < 5:
         verdict, reason = 'insufficient', '有唤醒段 %d / 无唤醒段 %d —— 对照太窄(各需 >=5 段), 不下结论' % (len(woken), len(idle))
     elif p >= 0.05:
         verdict, reason = 'no-signal', '两种时段推进速率无可测差异(p=%.3f)' % p
+    elif ratio is not None and ratio == float('inf'):
+        verdict, reason = 'catalyst', '无唤醒段推进为 0 而唤醒段有推进(p=%.3f) ⇒ 最强形态的催化(比值无穷)' % p
     elif ratio and ratio >= 1.5:
         verdict, reason = 'catalyst', '有唤醒时段推进更快(×%.2f, p=%.3f)' % (ratio, p)
     elif ratio and ratio <= 0.67:
@@ -141,12 +156,15 @@ def main() -> int:
     payload = {
         'ts': datetime.datetime.now().astimezone().isoformat(), 'goal': args.goal or 'ALL',
         'binMin': args.bin_min, 'hours': args.hours, 'bins': len(bins),
+        'eraStartIso': datetime.datetime.fromtimestamp(start / 1000).astimezone().isoformat(),
+        'eraHours': round((last - start) / 3600000.0, 2),
         'wokenBins': len(woken), 'idleBins': len(idle),
         'wokenHours': round(exp_w, 2), 'idleHours': round(exp_i, 2),
         'advancesInWoken': adv_w, 'advancesInIdle': adv_i,
         'rateWoken': round(rate_w, 4) if rate_w is not None else None,
         'rateIdle': round(rate_i, 4) if rate_i is not None else None,
-        'rateRatio': round(ratio, 3) if ratio else None, 'p': round(p, 4),
+        'rateRatio': (None if ratio is None else ('inf' if ratio == float('inf') else round(ratio, 3))),
+        'p': round(p, 4),
         'verdict': verdict, 'reason': reason,
         'confounds': ['行动帧由定时脉冲产生 ⇒ 因果方向可能与脉冲共线',
                       '无唤醒段往往是停顿期(我被别的事占住), 本身压低推进',

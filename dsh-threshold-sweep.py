@@ -38,7 +38,8 @@ CURRENT_GATE = 0.5          # directSimilarityThreshold 默认值(cognitive-inje
 PREREG = ('R1 widen-gate: 可排序集占比 +>=10pp 且 A 档 MRR/top-1 不降 >0.02 ⇒ 预登记判据后改配置; '
           'R2 tradeoff-ceiling: 占比升但 A 档质量降 >0.02 ⇒ 真实权衡, 停止在此旋钮上试; '
           'R3 no-headroom: 占比不随门限变化 ⇒ 天花板不在门限上; '
-          'R0 inconclusive: 审计未记阈下候选 ⇒ 本数据上不可判, 先补埋点')
+          'R0 inconclusive: 审计未记阈下候选 ⇒ 本数据上不可判, 先补埋点; '
+          'R-1 insufficient-post-instrumentation: 埋点后样本回合不足 ⇒ 只报数不出裁决')
 
 
 def load_replay():
@@ -106,6 +107,11 @@ def main() -> int:
     # 那么"离线扫门限"在这份数据上根本做不了 —— 必须先把阈下候选记下来, 否则只能在线试错。
     allsims = [c['similarity'] for r in records for c in r['candidateScores']]
     below = [s for s in allsims if s < CURRENT_GATE]
+    # 2026-09-12 04:3x **自查补闸(与 exp_298 同型: 先验总体定义再优化)**: 埋点 04:30 才上线, 而审计里
+    # 绝大多数回合是**上线前写的老行(根本没有 belowGate 字段)** ⇒ 只拿少数几行当全体, 会得出"阈下只占 1%,
+    # 所以门限不是瓶颈"这种**用截断样本冒充总体**的结论。故: 有 belowGate 的回合数不足(默认 <10)时,
+    # 一律报 insufficient-post-instrumentation, 只报数, 不出裁决。
+    rounds_with_bg = sum(1 for r in records if 'belowGate' in r)
     diag = {'candidates': len(allsims), 'min': min(allsims) if allsims else None,
             'max': max(allsims) if allsims else None,
             'belowGate': len(below), 'belowGateShare': round(len(below) / len(allsims), 4) if allsims else None}
@@ -155,6 +161,25 @@ def main() -> int:
     # 前提检验优先于结论(cl-263 实测): 审计只记**过阈后**的候选(426 个候选中阈下 0 个, 最小相似度 0.502),
     # 于是"放松门限能不能多出可排序集"在这份数据上**根本算不出来** —— 表格里那行平坦的 75% 是数据结构的
     # 产物, 不是关于门限的证据。此时必须报 inconclusive 而不是 no-headroom(后者会把"没数据"讲成"没空间")。
+    POST_MIN_ROUNDS = 10
+    if rounds_with_bg < POST_MIN_ROUNDS:
+        payload = {'ts': datetime.datetime.now().astimezone().isoformat(),
+                   'label': args.label, 'currentGate': CURRENT_GATE, 'turns': len(records),
+                   'subGateDiagnostics': diag, 'roundsWithBelowGate': rounds_with_bg,
+                   'table': table, 'verdict': 'insufficient-post-instrumentation',
+                   'reason': ('埋点(04:30 上线)之后只有 %d 个回合带 belowGate(需 >=%d) ⇒ 现在扫门限等于'
+                              '拿截断样本冒充总体: 表里"阈下仅占 %d/%d"是老行没有该字段造成的, 不是真相。'
+                              '按实测注入速率(近一小时约 5 分钟一次)约 %d 分钟后可裁决。'
+                              % (rounds_with_bg, POST_MIN_ROUNDS, diag['belowGate'], diag['candidates'],
+                                 max(1, (POST_MIN_ROUNDS - rounds_with_bg)) * 5)),
+                   'bestRow': None, 'prereg': PREREG}
+        json.dump(payload, open(out, 'w', encoding='utf8'), ensure_ascii=False, indent=1)
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False))
+            return 0
+        print('注入回合 %d | 埋点后回合 %d(需 >=%d) | 标签=%s' % (len(records), rounds_with_bg, POST_MIN_ROUNDS, args.label))
+        print('判读: %s —— %s' % (payload['verdict'], payload['reason']))
+        return 0
     if diag['belowGate'] == 0:
         payload = {'ts': datetime.datetime.now().astimezone().isoformat(),
                    'label': args.label, 'currentGate': CURRENT_GATE, 'turns': len(records),
@@ -196,7 +221,7 @@ def main() -> int:
             reason = '门限放松对可排序集占比没什么影响 ⇒ 天花板不在门限上, 转查候选召回端'
     payload = {'ts': datetime.datetime.now().astimezone().isoformat(),
                'label': args.label, 'currentGate': CURRENT_GATE, 'turns': len(records),
-               'subGateDiagnostics': diag,
+               'subGateDiagnostics': diag, 'roundsWithBelowGate': rounds_with_bg,
                'table': table, 'verdict': verdict, 'reason': reason, 'bestRow': best,
                'prereg': PREREG}
     json.dump(payload, open(out, 'w', encoding='utf8'), ensure_ascii=False, indent=1)

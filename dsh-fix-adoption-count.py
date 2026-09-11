@@ -24,6 +24,11 @@ for line in open(log_path, encoding='utf8'):
         # cl-182: 回填行(reconstructed)是 notes 的历史回填, 不计入真实采纳计数比对
         if entry.get('reconstructed'):
             continue
+        # cl-262(2026-09-12 04:5x): 目标池写入方补了归因通道后会写 pool-change —— 那些行不是插件的采纳记账,
+        # 计入会把"未记时间的采纳"差额抹平(实测该目标差额 2→1, 本脚本于是想把 adoptedCount 34→35 平账)。
+        # 判据侧(套件"计数与日志不倒退")已按同一 origin 排除; 本脚本必须同口径, 否则两侧会互相打架。
+        if entry.get('origin') == 'dsh-goal-pool-write.py':
+            continue
         gid = entry.get('goalId')
         logged[gid] = logged.get(gid, 0) + 1
 

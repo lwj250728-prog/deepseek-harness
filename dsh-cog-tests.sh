@@ -1531,7 +1531,11 @@ for g in goals:
     gid = g["id"]
     # cl-182: 回填行(reconstructed)不算"真实采纳日志"——它们是 notes 的历史回填, 用于修复双通道脱节,
     # 若计入, 差额判据会读出"日志多于计数"的假倒退。
-    logged = len([a for a in log if a.get("goalId") == gid and not a.get("reconstructed")])
+    # cl-262(2026-09-12 04:5x): 写入方(dsh-goal-pool-write.py)现在也会写 pool-change(补归因通道)——
+    # 那些行**不是**插件的采纳记账, 若计入会把"未记时间的采纳"差额抹平(实测该目标差额 2→1 而打红本判据)。
+    # 故按 origin 排除: 本判据量的是"插件采纳记账 vs 池计数"这一对通道, 我方记录行另属一条通道。
+    logged = len([a for a in log if a.get("goalId") == gid and not a.get("reconstructed")
+                  and a.get("origin") != "dsh-goal-pool-write.py"])
     counter = g.get("adoptedCount") or 0
     if gid in base:
         assert logged >= base[gid]["loggedAtBaseline"], "%s 日志条数倒退" % gid
@@ -6886,6 +6890,25 @@ else:
     assert d["verdict"] in ("widen-gate", "tradeoff-ceiling", "no-headroom"), "非法判读: " + str(d["verdict"])
     print("阈下候选已采集(" + str(diag["belowGate"]) + " 个), 判读 " + str(d["verdict"]))
 '
+t "埋点后样本不足时不得出门限裁决(截断样本不得冒充总体)" python3 -c '
+# 2026-09-12 04:3x 自查补闸(与 exp_298 同型): 埋点 04:30 才上线, 审计里绝大多数回合是**上线前的老行**
+# (根本没有 belowGate 字段)。第一版工具照样打出了平坦的占比并判 no-headroom —— 那是拿截断样本冒充总体。
+# 守: 带 belowGate 的回合数不足时, 判读必须是 insufficient-post-instrumentation(只报数), 且必须暴露 roundsWithBelowGate。
+import json, subprocess
+r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json"],
+                   capture_output=True, text=True, timeout=900)
+assert r.returncode == 0, "扫描工具失败: " + (r.stderr or r.stdout)[-200:]
+d = json.loads(r.stdout.strip().splitlines()[-1])
+assert "roundsWithBelowGate" in d, "读数没有暴露带埋点的回合数(无法判样本是否够)"
+n = d["roundsWithBelowGate"]
+if n < 10:
+    assert str(d["verdict"]).startswith("insufficient"), ("带 belowGate 的回合只有 %d 个, 却给出了门限裁决: %s"
+                                                          % (n, d["verdict"]))
+    print("埋点后回合 %d < 10 ⇒ 如实报 %s(不出裁决)" % (n, d["verdict"]))
+else:
+    assert d["verdict"] in ("widen-gate", "tradeoff-ceiling", "no-headroom"), "非法判读: " + str(d["verdict"])
+    print("埋点后回合 %d ⇒ 判读 %s" % (n, d["verdict"]))
+'
 t "阈下候选埋点必须真的在产物里(且只在记录路径上, 不参与选择)" python3 -c '
 # 2026-09-12 04:1x: 与 T178"写入点须在产物里"同型 —— 埋点加在**源码**却漏在**产物**里, 是最安静的一种失败:
 # 判据会一直报 inconclusive, 而我可能去怀疑判据本身。这里守三件: ①源码里有采集(过滤前留住被丢掉的候选)
@@ -7055,6 +7078,47 @@ assert row.get("evidence") == "pool-change" and row.get("goalId") == "g-probe", 
 assert row.get("before") == "旧步骤 A" and row.get("after") == "新步骤 B", "before/after 对不上: %s → %s" % (row.get("before"), row.get("after"))
 assert row.get("ts"), "记录缺 ts(按 ts 排序的消费方会读错)"
 print("笔记写入不记行 / 前进写入记 1 行(before→after 正确)")
+'
+# ── T186 唤醒→推进因果检验的判别力(cl-264) ──
+# 起因(2026-09-12 04:2x): 反向判据说"42% 的推进没有唤醒"⇒ 提醒不必要; 但"不必要"不等于"无用"。新工具
+# dsh-wake-causality.py 用"有唤醒时段 vs 无唤醒时段"的推进速率做对照, 预登记判读 catalyst/anti/no-signal/insufficient。
+# 这类工具的典型失效是**恒报 catalyst**(比如分组写错、事件被重复计数), 那会把"我恰好在干活时被唤醒"讲成因果 ——
+# 本组用合成沙箱两方向守住: 事件独立 ⇒ 不得报 catalyst; 推进集中在唤醒段 ⇒ 必须报 catalyst; 段数太少 ⇒ 必须报 insufficient。
+echo "[T186] 因果检验的判别力(独立数据不得报 catalyst / 集中数据必须报 catalyst)"
+t "速率对照须两方向可分: 独立 ⇒ 不报 catalyst; 集中 ⇒ 报 catalyst; 段少 ⇒ insufficient" python3 -c '
+import json, os, subprocess, tempfile, datetime
+TZ = datetime.timezone(datetime.timedelta(hours=8)); now = datetime.datetime.now(TZ)
+def build(tmp, wake_at, adv_at):
+    open(os.path.join(tmp, "quiet-driver-frames.jsonl"), "w", encoding="utf8").write("\n".join(
+        json.dumps({"kind": "action-frame", "goalId": "g-c", "nextAction": "步", "session": "s",
+                    "ts": (now - datetime.timedelta(minutes=m)).isoformat()}, ensure_ascii=False) for m in wake_at) + "\n")
+    open(os.path.join(tmp, "incubation-log.jsonl"), "w", encoding="utf8").write("\n".join(
+        json.dumps({"ts": (now - datetime.timedelta(minutes=m)).isoformat(), "goalId": "g-c", "sessionId": "s",
+                    "evidence": "pool-change", "before": "步", "after": "步2"}, ensure_ascii=False) for m in adv_at) + "\n")
+def run(tmp):
+    r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-wake-causality.py", "--json", "--bin-min", "60"],
+                       capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=tmp), timeout=600)
+    assert r.returncode == 0, "因果工具失败: " + (r.stderr or r.stdout)[-200:]
+    return json.loads(r.stdout.strip().splitlines()[-1])
+# ① 独立: 唤醒每 120 分钟一次(只覆盖一半时段), 推进每 24 分钟一次(均匀铺满) ⇒ 速率接近, 不得判 catalyst。
+#    注意: 首版合成用了"唤醒每 30 分钟 + 30 分钟分段"⇒ **每个段都有唤醒**, 对照消失却照样出判读;
+#    第二代又暴露工具自己的偏差(时段铺满 72h 而活动只占 20h ⇒ idle 被稀释成 0 ⇒ 任何数据都判 catalyst),
+#    故工具已改为**只在该目标的观测期内分段**。这条合成用例正是用来同时守住这两件事。
+tmp1 = tempfile.mkdtemp()
+build(tmp1, wake_at=[120 * i + 5 for i in range(10)], adv_at=[24 * i + 3 for i in range(50)])
+d1 = run(tmp1)
+assert d1["verdict"] != "catalyst", "独立数据被判成 catalyst(判别力失效): " + json.dumps(d1, ensure_ascii=False)[:180]
+# ② 集中: 推进只落在唤醒段 ⇒ 必须判 catalyst
+tmp2 = tempfile.mkdtemp()
+build(tmp2, wake_at=[120 * i + 5 for i in range(10)], adv_at=[120 * i + 6 for i in range(10)])
+d2 = run(tmp2)
+assert d2["verdict"] == "catalyst", "推进集中在唤醒段却没判 catalyst: " + json.dumps(d2, ensure_ascii=False)[:180]
+# ③ 段少: 只有 2 个小时段 ⇒ 不得下结论
+tmp3 = tempfile.mkdtemp()
+build(tmp3, wake_at=[5], adv_at=[10])
+d3 = run(tmp3)
+assert d3["verdict"] == "insufficient", "对照段太少却没报 insufficient: " + str(d3["verdict"])
+print("独立⇒%s / 集中⇒%s / 段少⇒%s" % (d1["verdict"], d2["verdict"], d3["verdict"]))
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
