@@ -205,6 +205,18 @@ def main() -> int:
                       'armA_mrr': a_mrr, 'armA_top1': a_top1,
                       'armB_mrr': b_mrr, 'armB_top1': b_top1})
     cur = next(row for row in table if row['threshold'] == CURRENT_GATE)
+
+    def _wilson(k: int, n: int) -> tuple[float, float]:
+        """占比的 Wilson 95% 区间 —— 用来问"这个差是真的还是噪声"。"""
+        if n == 0:
+            return (0.0, 1.0)
+        import math as _m
+        z = 1.96
+        p_ = k / n
+        d = 1 + z * z / n
+        c = p_ + z * z / (2 * n)
+        r = z * _m.sqrt(p_ * (1 - p_) / n + z * z / (4 * n * n))
+        return (max(0.0, (c - r) / d), min(1.0, (c + r) / d))
     # 前提检验优先于结论(cl-263 实测): 审计只记**过阈后**的候选(426 个候选中阈下 0 个, 最小相似度 0.502),
     # 于是"放松门限能不能多出可排序集"在这份数据上**根本算不出来** —— 表格里那行平坦的 75% 是数据结构的
     # 产物, 不是关于门限的证据。此时必须报 inconclusive 而不是 no-headroom(后者会把"没数据"讲成"没空间")。
@@ -267,16 +279,30 @@ def main() -> int:
     for row in table:
         if row['armA_mrr'] is None:
             continue
+        # 2026-09-12 07:4x **判据与样本量的自洽性**: "+>=10 个百分点"这条阈值在 n≈10 回合时的二项标准差就有
+        # ~13pp ⇒ 光看差值会把噪声当效应。故加一条硬要求: 与当前门限的**Wilson 95% 区间不得重叠**,
+        # 否则即使差值过 10pp 也只报 no-headroom(并说明差在噪声带内)。区间随表一起打印, 便于复核。
+        lo_cur, hi_cur = _wilson(cur['rankable'] - cur.get('skippedOut', 0), len(records))
+        lo_row, hi_row = _wilson(row['rankable'], len(records))
+        row['shareCI'] = [round(lo_row, 3), round(hi_row, 3)]
         if (row['rankableShare'] - cur['rankableShare'] >= 0.10
+                and lo_row > hi_cur
                 and row['armA_mrr'] >= (cur['armA_mrr'] or 0) - 0.02
                 and row['armA_top1'] >= (cur['armA_top1'] or 0) - 0.02):
             verdict, best = 'widen-gate', row
-            reason = ('门限 %.2f: 可排序集占比 %.0f%%→%.0f%%, A 档 MRR %.3f→%.3f, top-1 %.3f→%.3f'
+            reason = ('门限 %.2f: 可排序集占比 %.0f%%→%.0f%%(区间不重叠), A 档 MRR %.3f→%.3f, top-1 %.3f→%.3f'
                       % (row['threshold'], 100 * cur['rankableShare'], 100 * row['rankableShare'],
                          cur['armA_mrr'], row['armA_mrr'], cur['armA_top1'], row['armA_top1']))
             break
     if verdict == 'no-headroom':
+        cur_ci = _wilson(cur['rankable'], len(records))
         lower = [row for row in table if row['threshold'] < CURRENT_GATE and row['armA_mrr'] is not None]
+        # 若存在"差值过 10pp 但区间重叠"的行, 在理由里点明(免得下次又把它读成空间)
+        overlap = [row for row in lower if (row['rankableShare'] - cur['rankableShare'] >= 0.10)
+                   and not (row.get('shareCI', [0, 1])[0] > cur_ci[1])]
+        if overlap:
+            reason += ' | 注: 门限 %.2f 处占比差 %.0fpp 但 95%% 区间重叠(噪声带内), 不构成空间' % (
+                overlap[0]['threshold'], 100 * (overlap[0]['rankableShare'] - cur['rankableShare']))
         if lower and any((row['rankableShare'] - cur['rankableShare'] >= 0.05
                           and row['armA_mrr'] < (cur['armA_mrr'] or 0) - 0.02) for row in lower):
             verdict = 'tradeoff-ceiling'
