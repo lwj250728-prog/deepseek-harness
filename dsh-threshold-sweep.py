@@ -40,7 +40,7 @@ PREREG = ('R1 widen-gate: 可排序集占比 +>=10pp 且 A 档 MRR/top-1 不降 
           'R3 no-headroom: 占比不随门限变化 ⇒ 天花板不在门限上; '
           'R0 inconclusive: 审计未记阈下候选 ⇒ 本数据上不可判, 先补埋点; '
           'R-1 insufficient-post-instrumentation: 埋点后样本回合不足 ⇒ 只报数不出裁决; '
-          'R-2 insufficient-belowgate-capped: 阈下记录顶满上限 ⇒ 记录被截断, 需先抬高上限')
+          'R-2 insufficient-belowgate-capped: 阈下记录顶满上限 ⇒ 记录被截断, 需先抬高上限(2026-09-12: 上限 5→20→500, 因为前两次都被顶满)')
 
 
 def load_replay():
@@ -138,7 +138,7 @@ def main() -> int:
     rounds_with_bg = sum(1 for r in records if 'belowGate' in r)
     # 2026-09-12 05:0x 实测: 前两轮记录**都恰好等于当时的上限(5)** ⇒ 上限被顶满 = 样本被截断, 此时连
     # "阈下有多少候选"都答不出, 更谈不上扫门限(上限已抬到 20, 若仍顶满则同样判为截断)。
-    BELOW_GATE_CAP = 20
+    BELOW_GATE_CAP = 500
     capped_rounds = sum(1 for r in records
                         if isinstance(r.get('belowGate'), list) and len(r['belowGate']) >= BELOW_GATE_CAP)
 
@@ -266,8 +266,22 @@ def main() -> int:
             reason = '放松门限可提可排序集占比, 但 A 档 MRR 同步下降 >0.02 ⇒ 质量↔可排序集的真实权衡'
         else:
             reason = '门限放松对可排序集占比没什么影响 ⇒ 天花板不在门限上, 转查候选召回端'
+    # 2026-09-12 06:0x (tp-169): 裁决必须**消费**事先写死的期望(threshold-prereg.json) —— 否则预注册只是摆设,
+    # 而"期望对不对"这条最便宜的校准检验被浪费。不符时**不直接采信裁决**, 要求先给样本代表性复核的处置位。
+    prereg = None
+    prereg_path = os.path.join(os.environ.get('DSH_COG_DIR') or D, 'threshold-prereg.json')
+    try:
+        prereg = json.load(open(prereg_path, encoding='utf8'))
+    except Exception:
+        prereg = None
+    expected = (prereg or {}).get('expectedVerdict')
+    mismatch = bool(expected) and expected != verdict
     payload = {'ts': datetime.datetime.now().astimezone().isoformat(),
                'label': args.label, 'currentGate': CURRENT_GATE, 'turns': len(records),
+               'preregExpected': expected,
+               'preregExpectation': (prereg or {}).get('expectation'),
+               'preregMismatch': mismatch,
+               'representativenessReviewRequired': mismatch,
                'subGateDiagnostics': diag, 'roundsWithBelowGate': rounds_with_bg,
                'table': table, 'verdict': verdict, 'reason': reason, 'bestRow': best,
                'prereg': PREREG}
@@ -288,6 +302,11 @@ def main() -> int:
                  '%.3f' % row['armA_top1'] if row['armA_top1'] is not None else '-',
                  '%.3f' % row['armB_mrr'] if row['armB_mrr'] is not None else '-'))
     print('判读: %s —— %s' % (verdict, reason))
+    if expected:
+        print('预注册期望: %s %s' % (expected, '(**与裁决不符** ⇒ 先做样本代表性复核, 不得直接采信裁决)' if mismatch
+                                     else '(与裁决一致)'))
+    elif (prereg or {}).get('expectation'):
+        print('预注册期望(未含 expectedVerdict, 无法机械比对): %s' % str(prereg.get('expectation'))[:80])
     return 0
 
 

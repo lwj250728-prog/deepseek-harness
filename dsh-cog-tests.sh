@@ -7299,6 +7299,54 @@ assert d3["verdict"] == "contaminated", "窗口内仍被唤醒却没判 contamin
 assert "controls" in d1 and d1["controls"], "判读缺对照目标读数(判据要求与对照比)"
 print("降幅大⇒causal / 无降幅⇒no-effect / 窗口内仍唤醒⇒contaminated")
 '
+# ── T191 裁决必须消费事先写死的期望(tp-169) ──
+# 起因: 我在正式裁决前把期望写死(threshold-prereg.json: expectedVerdict=no-headroom)。若没人读它, 这次预注册
+# 就只是摆设, 而"期望对不对"是最便宜的校准检验被浪费。修法: 裁决读期望并机械比对; **不符时不直接采信裁决**,
+# 而是置 representativenessReviewRequired(要求先做样本代表性复核 —— 今天的期望本身就是在被截断的样本上算的)。
+echo "[T191] 预注册期望被消费(字段齐全 / 一致 / 不符须要求复核)"
+t "裁决须消费预注册期望: 一致则标注, 不符则要求代表性复核(不得直接采信)" python3 -c '
+import json, os, subprocess, tempfile, datetime
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+pre = json.load(open(os.path.join(D, "threshold-prereg.json"), encoding="utf8"))
+for k in ("ts", "table", "expectation"):
+    assert pre.get(k), "threshold-prereg.json 缺字段 " + k
+# 沙箱: 造一个能出**真裁决**的样本(>=10 个带 belowGate 的回合, 且不顶满上限)
+tmp = tempfile.mkdtemp(); ids = ["exp_%03d" % i for i in range(60)]
+open(os.path.join(tmp, "experiences.jsonl"), "w", encoding="utf8").write("\n".join(json.dumps(
+    {"expId": e, "sar": {"situation": "s", "action": "a", "outcome": "o",
+                         "outcomeUtility": {"materialGain": i % 10, "emotionalValence": i % 5}}},
+    ensure_ascii=False) for i, e in enumerate(ids)) + "\n")
+now = datetime.datetime.now().timestamp() * 1000
+rows = []
+# 数据源健全性需要 >=30 行审计(工具的下限只用于"数据源是否可用"); 时代内则要求 >=10 个带 belowGate 的回合。
+for k in range(18):     # 时代外(旧世界): 无 belowGate
+    rows.append({"stage": "injected", "t": now - (30 * 3600 * 1000) + k * 60000, "expIds": [ids[k]], "cited": False,
+                 "candidates": 2, "overThreshold": 1,
+                 "preTop": [{"expId": ids[k], "similarity": 0.6}, {"expId": ids[k + 1], "similarity": 0.55}]})
+for k in range(12):     # 时代内: 带 belowGate
+    rows.append({"stage": "injected", "t": now - (k + 1) * 600000, "expIds": [ids[k]], "cited": False,
+                 "candidates": 2, "overThreshold": 1,
+                 "preTop": [{"expId": ids[k], "similarity": 0.6}, {"expId": ids[k + 1], "similarity": 0.55}],
+                 "belowGate": [{"expId": ids[k + 2], "similarity": 0.45}, {"expId": ids[k + 3], "similarity": 0.35}]})
+open(os.path.join(tmp, "retrieval-audit.jsonl"), "w", encoding="utf8").write(
+    "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+era = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))) - datetime.timedelta(hours=6)
+def run(expect):
+    json.dump({"ts": "2026-09-12T00:00:00+08:00", "table": [], "expectation": "沙箱期望",
+               "expectedVerdict": expect}, open(os.path.join(tmp, "threshold-prereg.json"), "w", encoding="utf8"), ensure_ascii=False)
+    r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json",
+                        "--post-since", era.isoformat()],
+                       capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=tmp), timeout=900)
+    assert r.returncode == 0, "沙箱裁决失败: " + (r.stderr or r.stdout)[-200:]
+    return json.loads(r.stdout.strip().splitlines()[-1])
+d_ok = run("no-headroom")          # 与沙箱结果一致
+assert d_ok["verdict"] == "no-headroom", "沙箱样本没出真裁决: " + str(d_ok["verdict"])
+assert d_ok["preregMismatch"] is False and d_ok["representativenessReviewRequired"] is False, "一致时却报了不符"
+d_bad = run("widen-gate")          # 与沙箱结果不符
+assert d_bad["preregMismatch"] is True, "不符时没有标记 preregMismatch"
+assert d_bad["representativenessReviewRequired"] is True, "不符时没有要求样本代表性复核(会直接采信裁决)"
+print("字段齐备 / 一致⇒不报警 / 不符⇒要求复核(沙箱裁决 %s)" % d_ok["verdict"])
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
