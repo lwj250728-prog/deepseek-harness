@@ -6903,6 +6903,41 @@ assert abs(cur["armA_mrr"] - val["armA_mrr"]) < 1e-6, ("同口径下两工具 MR
 assert abs(cur["armA_top1"] - val["armA_top1"]) < 1e-6, "top-1 不一致(口径漂了)"
 print("与 replay 同口径核对通过: A档 MRR %.4f / top-1 %.4f" % (cur["armA_mrr"], cur["armA_top1"]))
 '
+# ── T185 池写入必须可归因, 且不得自灌水(cl-262) ──
+# 起因(2026-09-12 03:2x 三问帧): 归因读数只认**插件**写的 pool-change 行, 而按纪律我改池走 `dsh-goal-pool-write.py`
+# (唯一写入方) —— 它原先**不写**这种行 ⇒ 我真正执行过的步骤在归因里不存在(实测: 该写入口 02:52 推进过某目标
+# 的 nextAction, 而该目标的最后一条 pool-change 停在 09-11 20:02), 严格归因率被系统性低估。
+# 本组守两件, 第二件是**防自灌水**: 归因判据只核 `before` 前缀等于帧里的 nextAction, 所以"只加笔记、
+# nextAction 不变"的写入若也记一行, 就会把我的记录动作算成"这一步被推进了" —— 而我的目标正是更高的归因率,
+# 手里又握着记录通道, 这类自利偏差必须由判据挡住(实测我自己就这么写过一行, 已撤销并留备份)。
+echo "[T185] 池写入可归因(前进才记) / 笔记型写入不得记为推进"
+t "nextAction 真前进 ⇒ 写入方必须留下可归因的 pool-change; 仅加笔记 ⇒ 不得记" python3 -c '
+import json, os, shutil, subprocess, tempfile
+W = "/home/ubuntu/dsh-fork/dsh-goal-pool-write.py"
+tmp = tempfile.mkdtemp(); pool = os.path.join(tmp, "pool.jsonl")
+base = {"id": "g-probe", "status": "active", "nextAction": "旧步骤 A", "notes": "初始",
+        "lastActionAt": "2026-09-12T00:00:00+08:00", "lastProgressAt": "2026-09-12T00:00:00+08:00"}
+open(pool, "w", encoding="utf8").write(json.dumps(base, ensure_ascii=False) + "\n")
+inc = os.path.join(tmp, "incubation-log.jsonl")
+def run(args):
+    return subprocess.run(["python3", W, "g-probe", "--pool", pool, "--write"] + args,
+                          capture_output=True, text=True, timeout=300)
+# ① 仅加笔记(nextAction 不变) ⇒ 不得记行
+r = run(["--append-note", "只加笔记"])
+assert r.returncode == 0, "笔记写入失败: " + (r.stderr or r.stdout)[-160:]
+n_note = sum(1 for l in open(inc, encoding="utf8") if l.strip()) if os.path.exists(inc) else 0
+assert n_note == 0, "仅加笔记却记了 pool-change(自灌水: 会把记录动作算成推进)"
+# ② nextAction 真前进 ⇒ 必须记一行, 且 before/after 对得上
+r = run(["--next-action", "新步骤 B"])
+assert r.returncode == 0, "前进写入失败: " + (r.stderr or r.stdout)[-160:]
+rows = [json.loads(l) for l in open(inc, encoding="utf8") if l.strip()]
+assert len(rows) == 1, "前进后应恰好记 1 行, 实得 %d" % len(rows)
+row = rows[0]
+assert row.get("evidence") == "pool-change" and row.get("goalId") == "g-probe", "记录字段口径不对: " + json.dumps(row, ensure_ascii=False)[:160]
+assert row.get("before") == "旧步骤 A" and row.get("after") == "新步骤 B", "before/after 对不上: %s → %s" % (row.get("before"), row.get("after"))
+assert row.get("ts"), "记录缺 ts(按 ts 排序的消费方会读错)"
+print("笔记写入不记行 / 前进写入记 1 行(before→after 正确)")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

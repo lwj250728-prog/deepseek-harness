@@ -126,6 +126,32 @@ def main() -> int:
     shutil.copy(args.pool, '/tmp/dormant-goals.before-write-%s.jsonl' % datetime.datetime.now().strftime('%H%M%S'))
     with open(args.pool, 'a', encoding='utf8') as f:
         f.write(json.dumps(row, ensure_ascii=False) + '\n')
+    # cl-262(2026-09-12 03:2x 三问帧所得): **归因读数只认插件写的 pool-change**, 而我改池走的是这个写入口
+    # ⇒ 我真正执行过的步骤在归因读数里根本不存在, 严格归因率被系统性低估(实测: 02:52 本写入口推进过
+    # goal-experience-library 的 nextAction, 而该目标的最后一条 pool-change 停在 09-11 20:02)。故写入成功后
+    # **同写一条 pool-change**(与插件同一字段口径: ts/goalId/sessionId/evidence/before/after), 让两个写入方
+    # 在同一个账本里可归因。只加记录, 不改写入语义。
+    # **只在 nextAction 真的前进时记**(2026-09-12 03:2x 自查所得): 归因判据只核 `before` 前缀是否等于
+    # 帧里的 nextAction, 所以"只加笔记、nextAction 不变"的写入若也记一行, 会把自己的**记录动作**算成
+    # "这一步被推进了" —— 那就是自灌水(我的目标就是更高的归因率, 而我手里正握着记录通道)。故:
+    # nextAction 未变 ⇒ 不记(笔记不是推进)。
+    if str(cur.get('nextAction') or '') == str(row.get('nextAction') or ''):
+        print('[goal-pool-write] %s: nextAction 未变(仅笔记/字段更新) ⇒ 不记 pool-change(笔记不是推进)' % args.id)
+        return 0
+    try:
+        inc = os.path.join(os.path.dirname(args.pool), 'incubation-log.jsonl')
+        with open(inc, 'a', encoding='utf8') as f:
+            f.write(json.dumps({
+                'ts': now_iso(),
+                'goalId': args.id,
+                'sessionId': os.environ.get('DSH_SESSION_ID') or 'pool-writer',
+                'evidence': 'pool-change',
+                'before': str(cur.get('nextAction') or ''),
+                'after': str(row.get('nextAction') or ''),
+                'origin': 'dsh-goal-pool-write.py',
+            }, ensure_ascii=False) + '\n')
+    except Exception as exc:  # noqa: BLE001 —— 记录失败不得让写入本身失败
+        print('[goal-pool-write] 警告: pool-change 记录未写成(%s)' % exc, file=sys.stderr)
     print('[goal-pool-write] %s: 已追加(基于当前行 %s 打补丁%s)' % (args.id, stamp_now or '无时间戳', ', 含理由: ' + args.reason if args.reason else ''))
     return 0
 
