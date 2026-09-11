@@ -6555,6 +6555,198 @@ after = sum(1 for l in open(canon, encoding="utf8") if l.strip()) if os.path.exi
 assert after == before, "干跑污染了 canonical 账本(%d → %d 行)" % (before, after)
 print("干跑未写 canonical(仍 %d 行)" % after)
 '
+# ── T181 自动修补的触发必须**可达**(cl-259: 单样本 0.8 是死分支) ──
+# 起因: cl-257 修好了"紧急修补被结构性暂缓", 但没修"紧急修补根本没被触发过" —— 264 条已结算预测里
+# 0 条误差达到 0.8(实测 max 0.7231)。成因不是运气: 校准概率被压缩在 [0.145, 0.828], 单样本 ≥0.8 只剩
+# "p≤0.2 且观测=1.0"一条路, 264 条里这样的一对 0 个 ⇒ 阈值落在观测支撑之外, 那条自愈分支在磁盘上
+# 永远零痕迹。修法: ①快路径阈值降到历史极值之下(0.70) ②补一条**统计**触发(近 N 条平均误差过上界,
+# 带迟滞下界)。本组守四件: ①合成输入必须能顶到触发点(行为); ②两条触发在真实账本上**都有先例**
+# (可达性, 用源码里的默认值回放, 默认值一旦漂出可观测区间就转红); ③接线进源码与产物; ④账本口径。
+echo "[T181] 自动修补触发必须可达(合成的能触发 / 真实的有先例)"
+t "漂移触发器: 合成输入能顶到触发点, 且迟滞/未满窗口/低误差不得触发" python3 -c '
+import json, os, re, subprocess, tempfile, datetime
+root = os.path.expanduser("~/dsh-fork")
+src = open(os.path.join(root, "packages/cognition/cognitive-pipeline/src/service.ts"), encoding="utf8").read()
+def default_num(field, cast=float):
+    m = re.search(field + r": z\.number\(\)[^,]*\.default\(([0-9.]+)\)", src)
+    assert m, "源码里找不到 " + field + " 的 zod 默认值"
+    v = cast(m.group(1))
+    assert (field + " ?? " + str(v)) in src, field + " 的 zod 默认与 resolveConfig 的回落值不一致"
+    return v
+win = default_num("driftWindowSize", int)
+hi = default_num("driftMeanErrorThreshold")
+lo = default_num("driftDisarmErrorThreshold")
+emerg = default_num("emergencyErrorThreshold")
+tmp = tempfile.mkdtemp()
+script = os.path.join(tmp, "probe.mts")
+out = os.path.join(tmp, "out.json")
+open(script, "w", encoding="utf8").write(f"""
+import {{ readFileSync, writeFileSync }} from "node:fs"
+import {{ evaluateDriftTrigger }} from "{root}/packages/cognition/cognitive-pipeline/src/service.ts"
+const cfg = {{ windowSize: {win}, meanThreshold: {hi}, disarmThreshold: {lo} }}
+const hot = Array.from({{ length: {win} }}, (_, i) => (i % 3 === 0 ? 0.7 : 0.2))
+const mustFire = evaluateDriftTrigger(hot, true, cfg)
+const hysteresis = evaluateDriftTrigger([...hot, 0.7], mustFire.armed, cfg)
+const rearm = evaluateDriftTrigger(new Array({win}).fill(0.1), hysteresis.armed, cfg)
+const notFull = evaluateDriftTrigger(new Array({win - 1}).fill(0.9), true, cfg)
+const flatLow = evaluateDriftTrigger(new Array({win * 2}).fill(0.12), true, cfg)
+const rows = new Map<string, any>()
+for (const line of readFileSync("/home/ubuntu/.dsh/cognitive-pipeline/predictions.jsonl", "utf8").split("\\n")) {{
+  if (!line.trim()) continue
+  const o = JSON.parse(line)
+  rows.set(o.predictionId, o)
+}}
+const settled: number[] = [...rows.values()]
+  .filter((p: any) => p.predictionError !== null)
+  .sort((a: any, b: any) => (a.resolvedAt ?? 0) - (b.resolvedAt ?? 0))
+  .map((p: any) => Math.abs(p.predictionError))
+let armed = true
+let driftFires = 0
+let maxWindowMean = 0
+for (let i = 0; i < settled.length; i++) {{
+  const d = evaluateDriftTrigger(settled.slice(0, i + 1), armed, cfg)
+  armed = d.armed
+  if (d.windowMean !== null && d.windowMean > maxWindowMean) maxWindowMean = d.windowMean
+  if (d.fire) driftFires++
+}}
+writeFileSync(process.argv[2], JSON.stringify({{
+  mustFire, hysteresis, rearm, notFull, flatLow,
+  settledCount: settled.length, driftFires, maxWindowMean,
+  emergencyReachable: settled.filter(e => e >= {emerg}).length,
+  maxError: settled.length ? Math.max(...settled) : null,
+  cfg,
+}}))
+""")
+r = subprocess.run(["npx", "tsx", script, out], cwd=root, capture_output=True, text=True, timeout=600)
+assert r.returncode == 0, "回放脚本失败: " + (r.stderr or r.stdout)[-200:]
+d = json.loads(open(out, encoding="utf8").read())
+assert d["cfg"]["meanThreshold"] == hi, "回放没用源码默认阈值"
+assert d["mustFire"]["fire"] and not d["mustFire"]["armed"], "合成高误差窗口没能顶到触发点: " + json.dumps(d["mustFire"], ensure_ascii=False)
+assert not d["hysteresis"]["fire"], "迟滞失效: 已解防状态下同一坏窗口仍重复触发"
+assert not d["rearm"]["fire"] and d["rearm"]["armed"], "回落到下界以下未重新布防"
+assert not d["notFull"]["fire"] and d["notFull"]["windowMean"] is None, "窗口未满就触发"
+assert not d["flatLow"]["fire"], "平坦低误差序列触发了修补"
+assert d["settledCount"] >= 100, "已结算预测太少(" + str(d["settledCount"]) + "), 可达性无从判定"
+assert d["driftFires"] >= 1, "漂移触发在 " + str(d["settledCount"]) + " 条真实历史上一次都没触发 —— 又一个死分支(窗口均值上限 " + str(round(d["maxWindowMean"], 3)) + ")"
+assert d["emergencyReachable"] >= 1, "快路径阈值 " + str(emerg) + " 在真实历史上不可达(最大误差 " + str(d["maxError"]) + ") —— 阈值又漂到观测支撑之外"
+ev = os.path.expanduser("~/.dsh/cognitive-pipeline/drift-trigger-reachability.json")
+json.dump(dict(d, ts=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat(),
+               note="T181 可达性证据: 合成触发 + 真实账本回放(用源码默认值, 非事后副本)"),
+          open(ev, "w", encoding="utf8"), ensure_ascii=False, indent=1)
+print("合成能触发; 真实账本 " + str(d["settledCount"]) + " 条上漂移触发 " + str(d["driftFires"]) + " 次, 快路径先例 " + str(d["emergencyReachable"]) + " 次")
+'
+t "漂移路径接线进源码与产物, 且带 global 回退" python3 -c '
+import os
+svc = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts"), encoding="utf8").read()
+lib = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js"), encoding="utf8").read()
+assert "export function evaluateDriftTrigger(" in svc, "判据函数未导出(无法被合成输入顶到触发点)"
+assert "runRebuild(\u0027local\u0027, call?.sessionId, call?.signal, \u0027drift\u0027)" in svc, "漂移路径未标注 trigger=drift"
+assert "drift-fallback" in svc, "漂移路径没有 global 回退"
+assert "drift-fallback" in lib, "漂移回退未进产物"
+assert "evaluateDriftTrigger" in lib, "判据函数未进产物"
+print("漂移路径: 源码与产物均带 local → 回退 global")
+'
+t "账本: 出现 drift 尝试必须伴随回退或被接受的 global(无 drift 事件则本帧不判)" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/taxonomy-rebuild.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+drift = [r for r in rows if r.get("trigger") == "drift"]
+if not drift:
+    print("账本尚无 trigger=drift 行(漂移触发刚上线, 真实事件未到), 本帧不判")
+    raise SystemExit(0)
+last = drift[-1]
+window = [r for r in rows if r.get("ts") >= last["ts"]]
+assert any(r.get("trigger") == "drift-fallback" or (r.get("scope") == "global" and r.get("accepted")) for r in window), "最近一次漂移尝试后既无回退也无被接受的 global: " + json.dumps(last, ensure_ascii=False)
+print("最近一次漂移尝试后已伴随回退/被接受的 global")
+'
+# ── T182 账本写入侧自愈(cl-055: 约束只在审计侧 = 半个机制) ──
+# 起因: T33 落地后 21 分钟就抓到并发会话新增的 in-progress 项缺 reviewBy ⇒ 写入路径仍可产出不合规行,
+# 而"审计红 + 人工补"这条路有自锁风险: 一行缺字段就让判据转红, 红了又没有任何东西去修它(实测 T33 就这样
+# 红了两天)。cl-030 的老教训同型: 修复必须落在**写入路径**, 不是审计侧。
+# 修法: dsh-claims-ledger-heal.py(只追加一行修正副本, 留 reviewByAuto 痕迹, 不改判不关单)+ cron 每 30 分钟
+# 一次 + 套件在跑时跳过(avoids cl-243 型并发写)。本组守四件: ①合成的坏账本必须被补、终态/已声明的不许动;
+# ②套件在跑时不得动账本; ③排程驱动; ④痕迹新鲜且按 origin 分离。
+echo "[T182] 账本写入侧自愈(缺 reviewBy 自动补 / 不越权改判)"
+t "账本自愈: 未关项缺 reviewBy 必须被补, 终态项与已声明的项不得被改" python3 -c '
+import json, os, subprocess, tempfile
+heal = "/home/ubuntu/dsh-fork/dsh-claims-ledger-heal.py"
+tmp = tempfile.mkdtemp(); led = os.path.join(tmp, "led.jsonl"); log = os.path.join(tmp, "heal.log")
+base = [
+ {"id": "cl-a", "status": "open", "ts": "2026-09-01T00:00:00+08:00", "claim": "缺 reviewBy 的未关项", "disposition": "待办"},
+ {"id": "cl-b", "status": "done", "ts": "2026-09-01T00:00:00+08:00", "claim": "终态项不该被补"},
+ {"id": "cl-c", "status": "open", "ts": "2026-09-01T00:00:00+08:00", "claim": "已声明复核窗口", "reviewBy": "2026-09-20"},
+ {"id": "cl-d", "status": "in-progress", "ts": "2026-09-01T00:00:00+08:00", "claim": "进行中且缺 reviewBy"},
+]
+open(led, "w", encoding="utf8").write("\n".join(json.dumps(r, ensure_ascii=False) for r in base) + "\n")
+r = subprocess.run(["python3", heal, "--dry-run", "--force", "--ledger", led, "--log", log], capture_output=True, text=True, timeout=120)
+assert r.returncode == 0, "干跑失败: " + (r.stderr or r.stdout)[-160:]
+assert len([l for l in open(led, encoding="utf8") if l.strip()]) == len(base), "干跑写盘了"
+r = subprocess.run(["python3", heal, "--force", "--ledger", led, "--log", log], capture_output=True, text=True, timeout=120)
+assert r.returncode == 0, "自愈失败: " + (r.stderr or r.stdout)[-160:]
+lat = {}
+for l in open(led, encoding="utf8"):
+    if l.strip():
+        x = json.loads(l)
+        if x.get("id"): lat[x["id"]] = x
+assert lat["cl-a"].get("reviewBy"), "未关项缺 reviewBy 没被补上"
+assert lat["cl-a"].get("reviewByAuto") is True, "自愈没留痕迹(reviewByAuto)"
+# 2026-09-12 01:5x 实测踩到: 自愈首版**抄了原行的 ts** ⇒ 同 id 两行 ts 相等, 直接打红 T132
+# (消费方按 ts 取最新会读到随机状态)。故这里必须同时守 ts 语义: 状态被改写 ⇒ ts 必须换新且严格递增。
+assert lat["cl-a"].get("ts") != "2026-09-01T00:00:00+08:00", "自愈抄了原 ts(同 id 两行 ts 相等会打红 T132)"
+assert lat["cl-a"].get("ts") > "2026-09-01T00:00:00+08:00", "自愈后的 ts 没有严格递增"
+assert lat["cl-a"].get("createdTs") == "2026-09-01T00:00:00+08:00", "自愈没保留原创建时刻(createdTs)";
+assert lat["cl-a"].get("claim") == "缺 reviewBy 的未关项" and lat["cl-a"].get("disposition") == "待办", "自愈改动了原行字段(应只追加副本)"
+assert lat["cl-d"].get("reviewBy"), "in-progress 项缺 reviewBy 没被补上"
+assert not lat["cl-b"].get("reviewBy"), "终态项被自愈改动(越权)"
+assert lat["cl-c"].get("reviewBy") == "2026-09-20" and not lat["cl-c"].get("reviewByAuto"), "已声明 reviewBy 的项被改写"
+print("坏账本被补 2 项, 终态与已声明的 2 项未被改动")
+'
+t "账本自愈: 套件在跑时不得动账本(cl-243 型并发写)" python3 -c '
+import json, os, subprocess, tempfile, time
+heal = "/home/ubuntu/dsh-fork/dsh-claims-ledger-heal.py"
+tmp = tempfile.mkdtemp(); led = os.path.join(tmp, "led.jsonl"); log = os.path.join(tmp, "heal.log")
+open(led, "w", encoding="utf8").write(json.dumps({"id": "cl-a", "status": "open", "ts": "2026-09-01T00:00:00+08:00", "claim": "缺 reviewBy"}, ensure_ascii=False) + "\n")
+fake = subprocess.Popen(["bash", "-c", "exec -a dsh-cog-tests.sh sleep 12"])
+time.sleep(1.0)
+try:
+    r = subprocess.run(["python3", heal, "--ledger", led, "--log", log], capture_output=True, text=True, timeout=120)
+finally:
+    fake.kill()
+assert r.returncode == 3, "套件在跑时自愈没有跳过(exit=" + str(r.returncode) + ")"
+assert len([l for l in open(led, encoding="utf8") if l.strip()]) == 1, "跳过了却仍然写了账本"
+print("套件在跑时自愈 exit=3 且账本未被写")
+'
+t "账本自愈须由排程驱动且脚本在仓库里" python3 -c '
+import os, subprocess
+script = "/home/ubuntu/dsh-fork/dsh-claims-ledger-heal.py"
+assert os.path.exists(script), "自愈脚本不在仓库里"
+cron = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30).stdout
+line = [l for l in cron.splitlines() if "dsh-claims-ledger-heal.py" in l]
+assert line, "自愈未挂排程(机制必须自己发生, 不靠我记得跑)"
+assert "DSH_RUN_ORIGIN=cron" in line[0], "排程行没带 origin 标记(无法区分手工与排程痕迹)"
+print("自愈已挂排程: " + line[0].split("python3")[0].strip())
+'
+t "账本自愈须留下新鲜痕迹(只认 origin=cron 的行)" python3 -c '
+import json, os, time, datetime
+log = os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger-heal.log")
+if not os.path.exists(log):
+    print("自愈日志尚不存在(排程首班未到), 本帧不判")
+    raise SystemExit(0)
+rows = []
+for l in open(log, encoding="utf8"):
+    l = l.strip()
+    if l:
+        try: rows.append(json.loads(l))
+        except Exception: pass
+cron_rows = [r for r in rows if r.get("origin") == "cron"]
+if not cron_rows:
+    print("尚无 origin=cron 的自愈痕迹(排程首班未到), 本帧不判 —— 但排程本身由上一断言守")
+    raise SystemExit(0)
+ts = sorted(str(r.get("ts")) for r in cron_rows)[-1]
+age = (datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(ts).astimezone(datetime.timezone.utc)).total_seconds()
+assert age < 8 * 3600, "排程自愈已 " + str(round(age / 3600, 1)) + " 小时没有痕迹"
+print("排程自愈痕迹新鲜(" + str(round(age / 60)) + " 分钟前, 最近事件 " + str(cron_rows[-1].get("event")) + ")")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

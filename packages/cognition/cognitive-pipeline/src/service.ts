@@ -291,8 +291,22 @@ export interface CognitivePipelineConfig {
    * 'embedding' (semantic space; records without a stored embedding fall back
    * to the outcome vector per-record). */
   clusterVectorSource?: 'outcome' | 'embedding'
-  /** Feedback error at/above which an emergency local rebuild fires (default 0.8). */
+  /** Feedback error at/above which an emergency local rebuild fires (default 0.7).
+   * 2026-09-12 重标定(cl-259): 原默认 0.8 在 264 条已结算预测中**从未达到**(实测 max 0.7231)。
+   * 成因不是运气: 校准概率被压缩在 [0.145, 0.828], 单样本误差 ≥0.8 只剩一条路 —— p≤0.2 **且** 观测=1.0
+   * 同时成立; 264 条里 p≤0.2 的只有 19 条, 其中 0 条观测为 1.0。阈值落在观测支撑之外 ⇒ 分支不可观测。
+   * 改为 0.70: 落在历史极值(pred_129=0.7231)之下, 快路径"确有先例"而非纸面存在。 */
   emergencyErrorThreshold?: number
+  /** 持续漂移触发的窗口长度(默认 20 条已结算预测)。单样本阈值看不见"整体保真度下滑",
+   * 窗口均值才看得见 —— 这是 cl-259 选定的**可达**统计触发。 */
+  driftWindowSize?: number
+  /** 窗口平均误差 at/above 此值 ⇒ 触发修补(默认 0.28)。
+   * 0.28 ≈ 全史平均误差(0.155)的 1.8 倍; 取 0.28 而非 0.30 是因为离线回测出的**平台**在 [0.25, 0.28]
+   * (264 条上触发 2 次), 而 0.30 只有 1 次、0.32 起归零 —— 把默认值放在平台上而不是悬崖边。 */
+  driftMeanErrorThreshold?: number
+  /** 窗口平均误差 at/below 此值 ⇒ 重新布防(迟滞下界, 默认 0.20)。
+   * 无迟滞则一次坏窗口会在其后每条预测上重复触发(离线回测: 264 条中上穿 9 次、迟滞合并为 2 个事件)。 */
+  driftDisarmErrorThreshold?: number
   /** Real-embedding seam (roadmap R3): when set, the semantic retrieval
    * channel uses an OpenAI-compatible `/embeddings` endpoint and experiences
    * store their action embedding at write time; the hash-bag cosine remains
@@ -309,6 +323,32 @@ export interface CognitivePipelineConfig {
   }
 }
 
+/** 持续漂移触发器(cl-259)。纯函数, 无副作用 —— 判据必须能被**合成输入**顶到触发点,
+ * 否则"这个 guard 会不会响"只能等真实世界碰巧出现极端误差(实测 264 条里 0 次)。
+ * @param errors - 按时间升序的已结算预测误差(含本次那条)。
+ * @param armed - 上次判定后的布防状态(迟滞: 触发解防, 回落到下界以下再布防)。
+ * @param cfg - 窗口长度与上下界。
+ * @returns 是否触发、新的布防状态、窗口均值(窗口未满时为 null)。
+ */
+export function evaluateDriftTrigger(
+  errors: readonly number[],
+  armed: boolean,
+  cfg: { readonly windowSize: number; readonly meanThreshold: number; readonly disarmThreshold: number },
+): { readonly fire: boolean; readonly armed: boolean; readonly windowMean: number | null; readonly samples: number } {
+  const win = errors.slice(Math.max(0, errors.length - Math.max(2, cfg.windowSize)))
+  if (win.length < Math.max(2, cfg.windowSize)) {
+    return { fire: false, armed, windowMean: null, samples: win.length }
+  }
+  let sum = 0
+  for (const e of win) sum += e
+  const mean = sum / win.length
+  const samples = win.length
+  // 迟滞下界优先: 落到下界以下即重新布防(即使同时满足触发条件也不触发 —— 低误差窗口不该触发)。
+  if (mean <= cfg.disarmThreshold) return { fire: false, armed: true, windowMean: mean, samples }
+  if (armed && mean >= cfg.meanThreshold) return { fire: true, armed: false, windowMean: mean, samples }
+  return { fire: false, armed, windowMean: mean, samples }
+}
+
 /** Resolved configuration with every optional field materialized. */
 export interface ResolvedCognitivePipelineConfig {
   readonly root: string
@@ -319,6 +359,9 @@ export interface ResolvedCognitivePipelineConfig {
   readonly tempStrategyHitThreshold: number
   readonly tempStrategyPositiveRatio: number
   readonly emergencyErrorThreshold: number
+  readonly driftWindowSize: number
+  readonly driftMeanErrorThreshold: number
+  readonly driftDisarmErrorThreshold: number
   readonly simulationFastTrackThreshold: number
   readonly simulationPermanentThreshold: number
   readonly simulationTtlMs: number
@@ -444,7 +487,10 @@ export const Config: z<CognitivePipelineConfig> = z.object({
   clusterMergeCosine: z.number().min(0).max(1).default(0.4),
   clusterMatchCosine: z.number().min(0).max(1).default(0.3),
   clusterVectorSource: z.union([z.const('outcome'), z.const('embedding')]).default('outcome'),
-  emergencyErrorThreshold: z.number().min(0).max(1).default(0.8),
+  emergencyErrorThreshold: z.number().min(0).max(1).default(0.7),
+  driftWindowSize: z.number().step(1).min(2).max(500).default(20),
+  driftMeanErrorThreshold: z.number().min(0).max(1).default(0.28),
+  driftDisarmErrorThreshold: z.number().min(0).max(1).default(0.2),
   embedding: z.object({
     baseUrl: z.string().default('https://api.deepseek.com'),
     model: z.string().default('deepseek-embedding'),
@@ -508,7 +554,10 @@ export function resolveConfig(config: CognitivePipelineConfig): ResolvedCognitiv
     }),
     tempStrategyHitThreshold: config.tempStrategyHitThreshold ?? 3,
     tempStrategyPositiveRatio: config.tempStrategyPositiveRatio ?? 0.667,
-    emergencyErrorThreshold: config.emergencyErrorThreshold ?? 0.8,
+    emergencyErrorThreshold: config.emergencyErrorThreshold ?? 0.7,
+    driftWindowSize: config.driftWindowSize ?? 20,
+    driftMeanErrorThreshold: config.driftMeanErrorThreshold ?? 0.28,
+    driftDisarmErrorThreshold: config.driftDisarmErrorThreshold ?? 0.2,
     simulationFastTrackThreshold: config.simulationFastTrackThreshold ?? 0.8,
     simulationPermanentThreshold: config.simulationPermanentThreshold ?? 2,
     simulationTtlMs: config.simulationTtlMs ?? 30 * 24 * 60 * 60 * 1000,
@@ -713,6 +762,9 @@ export class CognitivePipelineService extends Service {
    * In-memory throttle: repeated idle ticks stay cheap; a restart simply
    * allows the next consolidation to run. */
   private lastOfflineConsolidation: number | null = null
+
+  /** 持续漂移触发器的布防状态(cl-259)。内存态: 重启即重新布防, 最多多触发一次, 不写盘。 */
+  private driftArmed = true
 
   private readonly readinessPromise: Promise<void>
 
@@ -1399,6 +1451,32 @@ export class CognitivePipelineService extends Service {
       const local = await this.cold.runRebuild('local', call?.sessionId, call?.signal, 'emergency')
       if (!local.accepted) {
         await this.cold.runRebuild('global', call?.sessionId, call?.signal, 'emergency-fallback')
+      }
+    }
+
+    // cl-259: 单样本阈值看不见"整体保真度下滑"—— 264 条已结算预测里 0 条达到 0.8, 而窗口(近 20 条)均值
+    // 曾在两个区间升到 0.28 以上。故补一条**可达**的统计触发: 窗口均值过上界即修补(local 未接受则回退
+    // global, 标签 drift/drift-fallback), 落回迟滞下界以下才重新布防 —— 无迟滞会在坏窗口后每条预测重复触发。
+    if (!triggerRebuild) {
+      const settled = this.store.predictionsSnapshot()
+        .filter(p => p.predictionError !== null && p.predictionId !== prediction.predictionId)
+        .map(p => ({ at: p.resolvedAt ?? p.timestamp, err: Math.abs(p.predictionError as number) }))
+        .sort((a, b) => a.at - b.at)
+        .map(p => p.err)
+      settled.push(error) // 本次那条(快照里可能尚未写入, 统一按"排除后追加"处理, 避免重复计数)
+      const decision = evaluateDriftTrigger(settled, this.driftArmed, {
+        windowSize: this.resolved.driftWindowSize,
+        meanThreshold: this.resolved.driftMeanErrorThreshold,
+        disarmThreshold: this.resolved.driftDisarmErrorThreshold,
+      })
+      this.driftArmed = decision.armed
+      if (decision.fire) {
+        triggerRebuild = true
+        rebuildReason = `近 ${decision.samples} 条已结算预测平均误差 ${decision.windowMean?.toFixed(3)} ≥ 漂移阈值 ${this.resolved.driftMeanErrorThreshold}，触发修补`
+        const local = await this.cold.runRebuild('local', call?.sessionId, call?.signal, 'drift')
+        if (!local.accepted) {
+          await this.cold.runRebuild('global', call?.sessionId, call?.signal, 'drift-fallback')
+        }
       }
     }
 
