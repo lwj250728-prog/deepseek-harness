@@ -6489,6 +6489,38 @@ assert cold.count("recordTaxonomyAttempt(") >= 1, "cold-engine 没有调用写�
 assert "await this.runRebuildCore(" in cold, "runRebuild 未包装 runRebuildCore"
 print("写入点已定义且被调用(store 定义 + cold-engine 调用)")
 '
+# ── T179 自动重建不得被结构性暂缓(cl-257/tp-159) ──
+# 起因: 自动路径(report_outcome 里预测误差 ≥ 紧急阈值时)固定调 runRebuild('local'), 而 local 在小样本下
+# **数学不可达**(validationSize = max(1, floor(n×0.2)) < minValidationCount=3 ⇒ 需 n≥15) ⇒ 紧急修补从不
+# 落地, 整合层的自动刷新被结构性禁用(实测: 同一时刻 local 暂缓 / global 被接受, 误差 -21.9%)。
+# 本组守两件: ①回退接线在源码与产物里(结构判定); ②账本里一旦出现自动(emergency)尝试, 就必须伴随
+# 回退尝试或一次被接受的 global —— 没有自动事件时写明"本帧不判", 不空过也不假红。
+echo "[T179] 自动重建不得被结构性暂缓(local 未接受须回退 global)"
+t "紧急路径须在 local 未接受时回退 global, 且账本可分清自动/手动" python3 -c '
+import os
+svc = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts"), encoding="utf8").read()
+cold = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/cold-engine.ts"), encoding="utf8").read()
+lib = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js"), encoding="utf8").read()
+assert "runRebuild(\u0027local\u0027, call?.sessionId, call?.signal, \u0027emergency\u0027)" in svc, "紧急路径未标注 trigger=emergency"
+assert "emergency-fallback" in svc, "紧急路径没有 global 回退"
+assert "trigger" in cold and "recordTaxonomyAttempt" in cold, "尝试记录未带 trigger 标签"
+assert "emergency-fallback" in lib, "回退未进产物"
+print("紧急路径: local 未接受 → 回退 global, 账本带 trigger")
+'
+t "账本: 出现自动尝试后必须伴随回退或被接受的 global(无自动事件则本帧不判)" python3 -c '
+import json, os
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/taxonomy-rebuild.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+auto = [r for r in rows if r.get("trigger") == "emergency"]
+if not auto:
+    print("账本尚无 trigger=emergency 行(自动路径自本判据上线后未触发), 本帧不判")
+    raise SystemExit(0)
+last = auto[-1]
+same_window = [r for r in rows if r.get("ts") >= last["ts"]]
+assert any(r.get("trigger") == "emergency-fallback" or (r.get("scope") == "global" and r.get("accepted"))
+           for r in same_window), "最近一次自动尝试后既无回退也无被接受的 global: %s" % last
+print("最近一次自动尝试后已伴随回退/被接受的 global")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

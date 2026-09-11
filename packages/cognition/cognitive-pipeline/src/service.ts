@@ -1392,7 +1392,14 @@ export class CognitivePipelineService extends Service {
     if (error >= this.resolved.emergencyErrorThreshold) {
       triggerRebuild = true
       rebuildReason = `预测误差 ${error.toFixed(3)} 超过紧急阈值 ${this.resolved.emergencyErrorThreshold}，触发局部修补`
-      await this.cold.runRebuild('local', call?.sessionId, call?.signal)
+      // cl-257: 局部修补在**小样本下数学不可达** —— validationSize = max(1, floor(n×0.2)) 而
+      // minValidationCount 默认 3 ⇒ n < 15 时永远判"验证样本不足(暂缓)"。于是紧急修补从不落地,
+      // 整合层的自动刷新被结构性禁用(实测: 同一时刻 local 暂缓 / global 被接受, 误差 -21.9%)。
+      // 故: 局部未接受即回退全库重建, 并让账本记下这次回退(trigger 标签)。
+      const local = await this.cold.runRebuild('local', call?.sessionId, call?.signal, 'emergency')
+      if (!local.accepted) {
+        await this.cold.runRebuild('global', call?.sessionId, call?.signal, 'emergency-fallback')
+      }
     }
 
     await this.store.flush()

@@ -280,6 +280,7 @@ export class ColdEngine {
     scope: 'local' | 'global',
     sessionId?: GenerateOptions['sessionId'],
     signal?: AbortSignal,
+    trigger: string = 'manual',
   ): Promise<RebuildResult> {
     const result = await this.runRebuildCore(scope, sessionId, signal)
     // cl-256/tp-156: 每次重建都留一行尝试记录(接受/拒绝/暂缓都算) —— 判据「摘要陈旧时必须有近期重建尝试」
@@ -292,6 +293,9 @@ export class ColdEngine {
     }
     this.store.recordTaxonomyAttempt({
       scope,
+      // cl-257/tp-159: 账本里必须能分清"自动(紧急)触发"与"手动调用" —— 否则守"自动路径不得长期被
+      // 结构性暂缓"的判据无从下手(第一版记录没有这个字段, 自动与手动混在一起)。
+      trigger,
       accepted: result.accepted,
       deferred: result.deferred,
       reason: result.reason,
