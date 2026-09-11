@@ -5960,6 +5960,75 @@ for name, hist, anchors, adopted_hours, expect in cases:
 assert not bad, "推进判据三态不成立: %s" % bad
 print("五态一致(含待观察不计 0%)")
 '
+# ── T165 孵化三率不得自欺(cl-077 / cl-241 / cl-242 的固化) ──
+# 三率是孵化目标的验收指标, 而它自己两次撒谎: 先是**虚高**(全局锚: 机器在动就算任何目标推进 —— 被用户
+# 暂停的小说目标也判 100%, cl-077), 后是**虚低**(窗口没走完就记 0% 推进, cl-242)。判据被审之后必须
+# 把"不得自欺"的三条约束**常驻**下来, 否则下次换个人/换个方向又会歪回去:
+#   ①专属见证不得静默回退到全局锚(active 目标必须逐一声明自己的见证);
+#   ②推进率的分母只能是**已裁决**采纳(advanced/decided), 全待观察时必须给 None 而不是 0%;
+#   ③全局锚只作对照列, 源码里不得用它出结论。
+echo "[T165] 孵化三率(专属见证齐备 / 分母口径 / 全局锚只作对照)"
+t "每个 active 目标都必须声明**专属**见证(不得静默回退到全局锚)" python3 -c '
+import ast, json, os, re
+src = open(os.path.expanduser("~/dsh-fork/dsh-incubation-stats.py"), encoding="utf8").read()
+m = re.search(r"GOAL_WITNESS = (\{.*?\n\})", src, re.S)
+assert m, "找不到 GOAL_WITNESS"
+witness = ast.literal_eval(m.group(1))
+pool = {}
+for line in open(os.path.expanduser("~/.dsh/cognitive-pipeline/dormant-goals.jsonl"), encoding="utf8"):
+    if line.strip():
+        row = json.loads(line); pool[row.get("id")] = row
+active = [gid for gid, g in pool.items() if g.get("status") == "active"]
+assert active, "池里没有 active 目标, 断言前提不成立"
+missing = [gid for gid in active if gid not in witness]
+assert not missing, "这些 active 目标没有专属见证, 会被静默按全局锚判推进(cl-077 的成因): %s" % missing
+print("active 目标 %d 个, 专属见证齐备" % len(active))
+'
+t "推进率分母只能是已裁决采纳(全待观察给 None 而非 0%)" python3 -c '
+import json, os, subprocess
+r = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-incubation-stats.py"), "--json"],
+                   capture_output=True, text=True, timeout=300)
+assert r.returncode == 0, "度量器运行失败: %s" % r.stderr[-160:]
+rows = json.loads(r.stdout)
+assert rows, "度量器没有任何行"
+bad = []
+for row in rows:
+    adopted, pending = row.get("adopted") or 0, row.get("pending") or 0
+    undecidable, advanced = row.get("undecidable") or 0, row.get("advanced") or 0
+    decided = adopted - pending - undecidable
+    rate = row.get("advance_rate")
+    if decided > 0:
+        want = round(advanced / decided * 100, 1)
+        if rate != want:
+            bad.append("%s: 推进率 %s != advanced/decided %s (待观察 %s 必须不进分母)" % (row.get("goalId"), rate, want, pending))
+    elif rate is not None:
+        bad.append("%s: 无已裁决样本却给了推进率 %s(应为 None)" % (row.get("goalId"), rate))
+assert not bad, "推进率分母口径不对: %s" % bad
+print("%d 个目标的推进率分母口径一致(待观察/不可判定均不进分母)" % len(rows))
+'
+t "全局锚只作对照: 判据必须用专属见证, 报告须标注对照列" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/dsh-incubation-stats.py"), encoding="utf8").read()
+assert "def advanced(goal_id, adopted_at)" in src and "GOAL_WITNESS.get(goal_id, GLOBAL_WITNESS)" in src, \
+    "advanced() 不再用专属见证"
+assert "def advanced_global(" in src and "旧的全局锚判据(仅作对照, 不作结论)" in src, \
+    "全局锚缺少\"仅作对照\"的显式声明"
+assert "推进率(全局锚对照)" in src, "报告头没有把全局锚标成对照列"
+print("判据用专属见证; 全局锚显式标注为对照且声明不作结论")
+'
+# ── T166 部署史不得被 --log 改道出 canonical 账本 ──
+# 起因(2026-09-11 20:0x 自查): 我几次排程部署都传了 `--log /tmp/deploy-*.log`, 于是 canonical
+# `deploy-log.jsonl` 停在 15:57 —— 18:08/19:40 两次真实部署在**唯一权威记录里不存在**。判据与复盘
+# 读的正是它, 于是"部署史"被我自己的参数悄悄改道。记录通道不该可被重定向出账本(已回填 6 条)。
+echo "[T166] 部署史必落 canonical 账本"
+t "部署史必须落 canonical 账本(--log 只能额外留一份)" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/dsh-deploy-window.sh"), encoding="utf8").read()
+assert "CANONICAL_LOG=" in src, "部署脚本没有 canonical 账本常量"
+seg = src[src.index("emit() {"):src.index("if [ \"$PLAN_ONLY\" = 1 ]")]
+assert "for target in (canonical, log)" in seg, "emit 未同时写 canonical 与 --log"
+print("部署记录恒落 canonical 账本")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

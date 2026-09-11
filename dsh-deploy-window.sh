@@ -42,10 +42,16 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# 记录通道: 部署史**永远**写 canonical 账本 $COG/deploy-log.jsonl; --log 只额外留一份。
+# 起因(2026-09-11 20:0x 自查): 我几次排程部署都传了 `--log /tmp/deploy-*.log`, 于是 canonical 账本
+# 停在 15:57 —— 18:08/19:40 两次真实部署在**唯一权威记录里不存在**。判据与复盘读的正是它, 于是
+# "部署史"被我自己的参数悄悄改道。记录通道不该可被重定向出账本。
+CANONICAL_LOG="$COG/deploy-log.jsonl"
+
 emit() { # emit <phase> <status> [extra-json]
-  python3 - "$LOG" "$1" "$2" "$ORIGIN" "$DELAY" "$POST_WAIT" "${3:-{}}" <<'PY'
+  python3 - "$CANONICAL_LOG" "$LOG" "$1" "$2" "$ORIGIN" "$DELAY" "$POST_WAIT" "${3:-{}}" <<'PY'
 import datetime, json, os, sys, socket
-log, phase, status, origin, delay, postwait, extra = sys.argv[1:8]
+canonical, log, phase, status, origin, delay, postwait, extra = sys.argv[1:9]
 row = {"ts": datetime.datetime.now().astimezone().isoformat(), "phase": phase, "status": status,
        "origin": origin, "delaySeconds": int(delay), "postWaitSeconds": int(postwait),
        "host": socket.gethostname(), "script": "dsh-deploy-window.sh"}
@@ -53,9 +59,13 @@ try:
     row.update(json.loads(extra))
 except Exception:
     pass
-os.makedirs(os.path.dirname(log), exist_ok=True)
-with open(log, "a", encoding="utf8") as f:
-    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+line = json.dumps(row, ensure_ascii=False) + "\n"
+for target in (canonical, log):        # canonical 必写; --log 额外一份(内容相同)
+    if not target:
+        continue
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "a", encoding="utf8") as f:
+        f.write(line)
 PY
 }
 
