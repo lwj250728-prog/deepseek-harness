@@ -29,6 +29,17 @@ EXP_FRAMES = os.path.join(D, 'experiences-frames.jsonl')
 OUT = os.path.join(D, 'library-replay-result.json')
 
 
+def channel_weights() -> dict:
+    """学习到的通道权重(cl-173 的消费对象; 由引用反馈训练)。"""
+    p = os.path.join(D, 'channel_weights.json')
+    if not os.path.exists(p):
+        return {}
+    try:
+        return json.load(open(p, encoding='utf8'))
+    except Exception:
+        return {}
+
+
 def utility_map() -> dict:
     """效用映照: **任务经验 + 帧层经验都要收**。
     cl-200 实测: 39 条带得分记录里, 只查任务经验时只有 18 条"候选全有效用", 可排序集 5;
@@ -74,6 +85,8 @@ def main() -> int:
         vals, hits, n = [], 0, 0
         for rec in records:
             cands = [c for c in rec['candidateScores'] if c.get('expId') in util]
+            if arm == 'C':
+                cands = [c for c in cands if isinstance(c.get('channels'), dict)]
             if len(cands) < 2:
                 continue          # 单候选集无排序可言
             n += 1
@@ -82,7 +95,14 @@ def main() -> int:
             elif arm == 'B':
                 key = lambda c: c['similarity'] * (0.7 + 0.06 * util[c['expId']])   # 效用项(线性加权)
             else:
-                key = lambda c: c['similarity']                 # C 档待分通道得分补齐后再实现
+                # C 档(cl-173/cl-185): 用**学习到的通道权重**替换注入路径里写死的常数。
+                # 现行打分 = semantic + symptom + axis(三个成分直接相加); 这里给前两个成分各乘上
+                # channel_weights 里对应的学习权重(axis 不是学习通道, 保持原样)。
+                key = lambda c: (
+                    c['channels']['semantic'] * float(W.get('semantic', 1.0))
+                    + c['channels']['symptom'] * float(W.get('symptom', 1.0))
+                    + c['channels']['axis']
+                )
             ranked = sorted(cands, key=key, reverse=True)
             best = max(util[c['expId']] for c in cands)
             for idx, c in enumerate(ranked, start=1):
@@ -95,8 +115,13 @@ def main() -> int:
             return None, None
         return sum(vals) / n, hits / n
 
+    W = channel_weights()
     a, a1 = mrr('A')
     b, b1 = mrr('B')
+    c_arm, c1 = mrr('C')
+    c_rankable = sum(1 for rec in records
+                     if len([x for x in rec['candidateScores']
+                             if x.get('expId') in util and isinstance(x.get('channels'), dict)]) >= 2)
     # cl-200: 可排序集 = 候选数>=2 且效用已知的集。**这才是 MRR 的 n**；
     # 之前把"带 candidateScores 的记录数"当成样本量打印(39/30), 而真正的可排序集只有 5 —— 口径错了整整一个数量级。
     rankable = sum(1 for rec in records
@@ -107,7 +132,11 @@ def main() -> int:
         'minSample': base['minSample'],
         'armA_mrr': a, 'armA_top1': a1,
         'armB_mrr': b, 'armB_top1': b1,
-        'armC_status': 'unavailable: candidateScores 只有整体 similarity, 缺分通道得分(需扩展埋点)',
+        'armC_mrr': c_arm, 'armC_top1': c1, 'armC_rankableSets': c_rankable,
+        'armC_status': ('ok' if c_rankable >= base['minSample']
+                        else 'insufficient: 带分通道得分的可排序集 %d < %d(埋点已于 2026-09-11 09:0x 上线, 等部署后累积)'
+                             % (c_rankable, base['minSample'])),
+        'channelWeights': W,
         'lift': (round((b - a) / a, 4) if a and b is not None else None),
         'conclusion': None,
     }
@@ -127,7 +156,8 @@ def main() -> int:
         print('带得分记录 %d | **可排序集 %d**/%d | A档 MRR %s top1 %s | B档 MRR %s top1 %s | lift %s'
               % (payload['sampleCount'], rankable, payload['minSample'], a, a1, b, b1, payload['lift']))
         print('结论: %s | %s' % (payload['conclusion'], payload.get('note', '')))
-        print('C 档: %s' % payload['armC_status'])
+        print('C 档(学习权重替换常数): MRR %s top1 %s(可排序集 %d) | %s'
+              % (c_arm, c1, c_rankable, payload['armC_status']))
     return 0
 
 
