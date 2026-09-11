@@ -6911,6 +6911,34 @@ print("与 replay 同口径核对通过: A档 MRR %.4f / top-1 %.4f" % (cur["arm
 # nextAction 不变"的写入若也记一行, 就会把我的记录动作算成"这一步被推进了" —— 而我的目标正是更高的归因率,
 # 手里又握着记录通道, 这类自利偏差必须由判据挡住(实测我自己就这么写过一行, 已撤销并留备份)。
 echo "[T185] 池写入可归因(前进才记) / 笔记型写入不得记为推进"
+t "池写入的两道守卫必须在场(时间戳不得回退 / 旧 nextAction 不得复活)" python3 -c '
+import json, os, subprocess, tempfile
+W = "/home/ubuntu/dsh-fork/dsh-goal-pool-write.py"
+tmp = tempfile.mkdtemp(); pool = os.path.join(tmp, "pool.jsonl")
+base = {"id": "g-probe", "status": "active", "nextAction": "步骤 B", "notes": "n",
+        "lastActionAt": "2026-09-12T02:00:00+08:00", "lastProgressAt": "2026-09-12T02:00:00+08:00"}
+# 更早的一行(用于复活守卫): 旧意图 A 已被 B 取代
+older = dict(base, nextAction="步骤 A", lastActionAt="2026-09-12T01:00:00+08:00", lastProgressAt="2026-09-12T01:00:00+08:00")
+open(pool, "w", encoding="utf8").write("\n".join(json.dumps(r, ensure_ascii=False) for r in (older, base)) + "\n")
+def run(args):
+    return subprocess.run(["python3", W, "g-probe", "--pool", pool, "--write"] + args, capture_output=True, text=True, timeout=300)
+# ① 时间戳回退 ⇒ 必须拒收(exit != 0) 且不追加
+n0 = len([l for l in open(pool, encoding="utf8") if l.strip()])
+r = run(["--next-action", "步骤 C", "--set", "lastActionAt=2026-09-12T00:30:00+08:00"])
+n1 = len([l for l in open(pool, encoding="utf8") if l.strip()])
+assert r.returncode != 0, "时间戳回退被接受了(守卫失效): " + (r.stdout or "")[-120:]
+assert n1 == n0, "被拒的写入仍然追加了行"
+# ② 复活已被取代的旧 nextAction ⇒ 必须拒收
+r2 = run(["--next-action", "步骤 A"])
+n2 = len([l for l in open(pool, encoding="utf8") if l.strip()])
+assert r2.returncode != 0, "把已被取代的旧 nextAction 写回去被接受了(复活守卫失效): " + (r2.stdout or "")[-120:]
+assert n2 == n0, "被拒的复活写入仍然追加了行"
+# ③ 对照: 合法前进仍须通过(否则前两条可能是"一律拒绝"的假绿)
+r3 = run(["--next-action", "步骤 C"])
+n3 = len([l for l in open(pool, encoding="utf8") if l.strip()])
+assert r3.returncode == 0 and n3 == n0 + 1, "合法前进被拒(守卫变成一律拒绝)"
+print("时间戳回退被拒 / 旧意图复活被拒 / 合法前进通过")
+'
 t "nextAction 真前进 ⇒ 写入方必须留下可归因的 pool-change; 仅加笔记 ⇒ 不得记" python3 -c '
 import json, os, shutil, subprocess, tempfile
 W = "/home/ubuntu/dsh-fork/dsh-goal-pool-write.py"
