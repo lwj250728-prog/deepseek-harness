@@ -6886,9 +6886,56 @@ else:
     assert d["verdict"] in ("widen-gate", "tradeoff-ceiling", "no-headroom"), "非法判读: " + str(d["verdict"])
     print("阈下候选已采集(" + str(diag["belowGate"]) + " 个), 判读 " + str(d["verdict"]))
 '
+t "扫描工具必须真的消费 belowGate(有则走真判读 / 无则报 inconclusive)" python3 -c '
+# 2026-09-12 04:0x: 埋点(belowGate)落地后, 通道还差**消费**那一半 —— 若扫描工具不并进阈下候选,
+# 埋点就是个摆设。用合成沙箱两方向验证(不碰真库): 带 belowGate ⇒ 走真判读分支; 去掉 ⇒ 报 inconclusive。
+# 顺带一条硬教训: 两个脚本原先把数据目录**硬编码**成 ~/.dsh/cognitive-pipeline, 于是沙箱根本没生效,
+# 合成读数被写进了真实 threshold-sweep.json(cl-243 家族的自污染) ⇒ 已让两者都认 DSH_COG_DIR, 产物也随之进沙箱。
+import json, os, subprocess, tempfile
+tmp = tempfile.mkdtemp()
+ids = ["exp_%03d" % i for i in range(40)]
+open(os.path.join(tmp, "experiences.jsonl"), "w", encoding="utf8").write("\n".join(
+    json.dumps({"expId": e, "sar": {"situation": "s", "action": "a", "outcome": "o",
+                                    "outcomeUtility": {"materialGain": i % 10, "emotionalValence": i % 5}}},
+               ensure_ascii=False) for i, e in enumerate(ids)) + "\n")
+def build(with_bg):
+    audit, k = [], 0
+    for t in range(35):
+        pre = [{"expId": ids[k % 40], "similarity": 0.60, "channels": {"semantic": 0.4, "symptom": 0.05, "axis": 0.02}}]
+        k += 1
+        pre.append({"expId": ids[k % 40], "similarity": 0.55, "channels": {"semantic": 0.4, "symptom": 0.05, "axis": 0.02}})
+        k += 1
+        row = {"stage": "injected", "t": 1789150000000 + t * 60000, "expIds": [pre[0]["expId"]], "cited": False,
+               "preTop": pre, "candidates": 2, "overThreshold": 1}
+        if with_bg:
+            row["belowGate"] = [{"expId": ids[k % 40], "similarity": 0.42}, {"expId": ids[(k + 1) % 40], "similarity": 0.35}]
+            k += 2
+        audit.append(row)
+    open(os.path.join(tmp, "retrieval-audit.jsonl"), "w", encoding="utf8").write(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in audit) + "\n")
+env = dict(os.environ, DSH_COG_DIR=tmp)
+def run():
+    r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json"],
+                       capture_output=True, text=True, env=env, timeout=900)
+    assert r.returncode == 0, "沙箱扫描失败: " + (r.stderr or r.stdout)[-200:]
+    return json.loads(r.stdout.strip().splitlines()[-1])
+build(True);  d1 = run()
+build(False); d2 = run()
+assert d1["subGateDiagnostics"]["belowGate"] > 0, "沙箱未生效(读的不是沙箱数据?): " + json.dumps(d1["subGateDiagnostics"])
+assert not str(d1["verdict"]).startswith("inconclusive"), "有 belowGate 却仍报 inconclusive(消费侧没接): " + str(d1["verdict"])
+assert d2["subGateDiagnostics"]["belowGate"] == 0 and str(d2["verdict"]).startswith("inconclusive"), "无 belowGate 时未如实报 inconclusive"
+assert os.path.exists(os.path.join(tmp, "threshold-sweep.json")), "沙箱产物没落在沙箱里(会污染真库的读数文件)"
+print("消费侧接通: 有 belowGate ⇒ %s / 无 ⇒ %s" % (d1["verdict"], d2["verdict"]))
+'
 t "扫描工具的相关性定义必须独立于排序(与 replay 同口径, 数值须对得上)" python3 -c '
 import json, os, subprocess
 D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+# 2026-09-12 04:0x 修脆性: 原先拿"扫描(live)"与"replay 的**旧快照文件**"比 —— 审计每来一条新注入回合,
+# 两个读数就差一条, 断言随机转红(它抓到的其实是我自己的过时产物, 不是口径漂移)。改为**先重算 replay 再比**,
+# 两边读同一时刻的同一份数据, 这才是"同口径"的真正含义。
+r0 = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-library-replay.py"],
+                    capture_output=True, text=True, timeout=900)
+assert r0.returncode == 0, "replay 重算失败: " + (r0.stderr or r0.stdout)[-200:]
 r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json"],
                    capture_output=True, text=True, timeout=900)
 assert r.returncode == 0, "扫描工具失败"

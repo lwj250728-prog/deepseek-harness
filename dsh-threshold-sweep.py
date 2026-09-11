@@ -42,10 +42,21 @@ PREREG = ('R1 widen-gate: 可排序集占比 +>=10pp 且 A 档 MRR/top-1 不降 
 
 
 def load_replay():
-    """以模块方式加载 replay 工具, 复用它的加载/标签函数(同一口径)。"""
+    """以模块方式加载 replay 工具, 复用它的加载/标签函数(同一口径)。
+
+    2026-09-12 04:0x 实测踩到: 两个脚本的 D 都是 `expanduser('~/.dsh/cognitive-pipeline')` **硬编码**,
+    于是 `DSH_COG_DIR=<tmp>` 的沙箱测试**根本没读到沙箱数据** —— 它读的是真库, 却把合成的判读写进了
+    真实的 threshold-sweep.json(合成污染真产物, cl-243 家族)。故这里显式支持 DSH_COG_DIR, 并让 OUT 也随之走沙箱。
+    """
     spec = importlib.util.spec_from_file_location('dsh_library_replay', REPLAY)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)   # 该脚本 main() 受 __main__ 保护, 不会被执行
+    override = os.environ.get('DSH_COG_DIR')
+    if override:
+        mod.D = override
+        mod.AUDIT = os.path.join(override, 'retrieval-audit.jsonl')
+        mod.EXP = os.path.join(override, 'experiences.jsonl')
+        mod.EXP_FRAMES = os.path.join(override, 'experiences-frames.jsonl')
     return mod
 
 
@@ -60,6 +71,7 @@ def main() -> int:
         print('缺 replay 工具(口径来源): ' + REPLAY, file=sys.stderr)
         return 1
     mod = load_replay()
+    out = os.path.join(os.environ.get('DSH_COG_DIR') or D, 'threshold-sweep.json')
     try:
         util = mod.utility_map()
         labels = mod.label_map(args.label)
@@ -73,6 +85,9 @@ def main() -> int:
             cands = r.get('preTop') or r.get('candidateScores')
             if not cands:
                 continue
+            # cl-263: 把**阈下候选**(belowGate, 2026-09-12 03:5x 起由审计落盘)并进候选集 —— 门限扫描要问的
+            # 正是"门限放到 t 时这些被丢掉的候选会不会回来"; 没有它们就只能如实报 inconclusive。
+            cands = list(cands) + list(r.get('belowGate') or [])
             # 只保留有相似度且在我们的效用表里可用的候选 —— 与 replay 的候选可用性口径一致
             c2 = [c for c in cands if isinstance(c.get('similarity'), (int, float)) and c.get('expId') in util]
             if not c2:
@@ -150,7 +165,7 @@ def main() -> int:
                               '要判必须先采集阈下候选(审计加 belowGate 字段或放宽 preTop 捕获)'
                               % (diag['belowGate'], diag['candidates'], diag['min'] or 0)),
                    'bestRow': None, 'prereg': PREREG}
-        json.dump(payload, open(OUT, 'w', encoding='utf8'), ensure_ascii=False, indent=1)
+        json.dump(payload, open(out, 'w', encoding='utf8'), ensure_ascii=False, indent=1)
         if args.json:
             print(json.dumps(payload, ensure_ascii=False))
             return 0
@@ -184,7 +199,7 @@ def main() -> int:
                'subGateDiagnostics': diag,
                'table': table, 'verdict': verdict, 'reason': reason, 'bestRow': best,
                'prereg': PREREG}
-    json.dump(payload, open(OUT, 'w', encoding='utf8'), ensure_ascii=False, indent=1)
+    json.dump(payload, open(out, 'w', encoding='utf8'), ensure_ascii=False, indent=1)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False))
         return 0

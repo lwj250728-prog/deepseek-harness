@@ -422,13 +422,14 @@ async function retrieve(
 ): Promise<{ hits: readonly RankedHit[], rotated: boolean, rawHits: number,
   topHits: readonly number[], textChars: number,
   preTop: readonly { expId: string, similarity: number,
-    channels?: { semantic: number, symptom: number, axis: number } }[] }> {
+    channels?: { semantic: number, symptom: number, axis: number } }[],
+  belowGate: readonly { expId: string, similarity: number }[] }> {
   const vector = actionVector(situation, [])
   const situationVec = situationVector(situation)
   const embedder = service.embedder
   const queryEmbedding = embedder === null ? null : await embedder.embed(situation)
   const FUSION = fusion
-  const hits = service.store.experiencesSnapshot()
+  const scoredBeforeThreshold = service.store.experiencesSnapshot()
     .filter(exp => !isTaskRestatement(exp))
     // cl-102: 帧生记录不回注帧——自我回声(帧→关于帧的经验→再注入帧)是实测
     // 注入集最大的噪声源(最近 200 条注入 21.5% 含帧生经验, 历史 13 条被引用
@@ -464,8 +465,17 @@ async function retrieve(
         ...exp.selfReflexive === true ? { selfReflexive: true } : {},
       }
     })
-    .filter(hit => hit.similarity >= minSimilarity)   // 阈值判据不变(cl-218: 融合不得泄漏进过阈判定)
     .sort((a, b) => (b.rankKey ?? b.similarity) - (a.rankKey ?? a.similarity))
+  // cl-263(测量侧, 不改变注入行为): 门限(下方 .filter)把 minSimilarity 以下的候选整体丢掉, 于是
+  // dsh-threshold-sweep.py 想回答"放松门限能不能多出可排序集"时**无数据可判**(实测记录的 426 个候选
+  // 最小相似度 0.502, 阈下 0 个)。这里把**被丢掉的**前 5 名另存一份(fixed 4 位小数, 与 preTop 同口径),
+  // 只记录不参与任何选择 —— 有了它, 门限扫描才能在这份数据上真的扫起来。
+  const droppedByThreshold = scoredBeforeThreshold
+    .filter(hit => hit.similarity < minSimilarity)
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, 5)
+    .map(hit => ({ expId: hit.expId, similarity: Number(hit.similarity.toFixed(4)) }))
+  const hits = scoredBeforeThreshold.filter(hit => hit.similarity >= minSimilarity)   // 阈值判据不变(cl-218: 融合不得泄漏进过阈判定)
   // cl-122: 记录**过阈后的原始候选数**与头部相似度——三个调度杠杆接连被"候选供给"卡住,
   // 但这条供给从来没被记过: 审计里的 candidates 是 coverViewpoints 之后的结果(恒为 2),
   // 看不到"到底有几条过阈可选"。没有这个数, topK/轮换/退避的空间都只能靠猜。
@@ -502,7 +512,7 @@ async function retrieve(
       },
     }),
   }))
-  return { hits: covered, rotated, rawHits, topHits, textChars: textChars(covered), preTop }
+  return { hits: covered, rotated, rawHits, topHits, textChars: textChars(covered), preTop, belowGate: droppedByThreshold }
 }
 
 /**
@@ -922,7 +932,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (record.sessionId !== agent.session.id) continue
       for (const expId of record.expIds) sessionCounts.set(expId, (sessionCounts.get(expId) ?? 0) + 1)
     }
-    const { hits, rotated, rawHits, topHits, textChars, preTop } = await retrieve(ctx.cognitivePipeline, situation, threshold, topK,
+    const { hits, rotated, rawHits, topHits, textChars, preTop, belowGate } = await retrieve(ctx.cognitivePipeline, situation, threshold, topK,
       expId => sessionCounts.get(expId) ?? 0, resolved.noveltyMargin,
       { enabled: config.utilityFusion?.enabled === true,
         base: config.utilityFusion?.base ?? 0.7,
@@ -940,6 +950,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       + (gate === 'inject-strict' ? resolved.actionFrameMarginBoost : 0)
     if (gateScore < gateThreshold) {
       audit({ stage: 'below-gate', candidates: hits.length, topHit, gateScore, gateThreshold, rotated, rawHits, topHits, textChars,
+        belowGate,
         triggerSource: verdict.triggerSource, triggerScore: verdict.score, matched: verdict.matched })
       return decision
     }
@@ -1008,6 +1019,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       candidateScores: cooled.map(hit => ({ expId: hit.expId, similarity: hit.similarity })),
       // cl-200: 截断前的候选清单(只记录不改变注入) —— 影子对照的可排序集靠它才够样本
       preTop,
+      // cl-263: 被 minSimilarity 丢掉的候选(阈下), 让门限扫描可判
+      belowGate,
         triggerScore: verdict.score, matched: verdict.matched })
       return {
         kind: 'enter',
@@ -1072,6 +1085,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       candidateScores: cooled.map(hit => ({ expId: hit.expId, similarity: hit.similarity })),
       // cl-200: 截断前的候选清单(只记录不改变注入) —— 影子对照的可排序集靠它才够样本
       preTop,
+      // cl-263: 被 minSimilarity 丢掉的候选(阈下), 让门限扫描可判
+      belowGate,
       triggerScore: verdict.score, matched: verdict.matched })
     return {
       kind: 'enter',
