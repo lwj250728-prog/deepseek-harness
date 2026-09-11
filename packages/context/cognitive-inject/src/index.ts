@@ -327,6 +327,8 @@ const SYMPTOM_BONUS = 0.3
 /** One retrieved candidate with its outcome polarity (for viewpoint coverage). */
 interface RankedHit extends ExperienceHit {
   readonly polarity: OutcomePolarity
+  /** 分通道成分(cl-185, 测量用): semantic 余弦 / symptom 症状加成 / axis 判别轴加成。 */
+  readonly channels?: { semantic: number, symptom: number, axis: number }
 }
 
 /**
@@ -400,7 +402,8 @@ async function retrieve(
   noveltyMargin = 0,
 ): Promise<{ hits: readonly RankedHit[], rotated: boolean, rawHits: number,
   topHits: readonly number[], textChars: number,
-  preTop: readonly { expId: string, similarity: number }[] }> {
+  preTop: readonly { expId: string, similarity: number,
+    channels?: { semantic: number, symptom: number, axis: number } }[] }> {
   const vector = actionVector(situation, [])
   const situationVec = situationVector(situation)
   const embedder = service.embedder
@@ -419,13 +422,17 @@ async function retrieve(
           cosine(vector, exp.actionVector),
           cosine(situationVec, situationVector(exp.sar.situation)),
         )
+      // cl-185/cl-173(测量侧, 不改变任何选择行为): 把 similarity 的**三个成分**一并带出。
+      // 影子对照的 C 档要试"用学习到的 channel_weights 替换这些常数", 但审计此前只落整体
+      // similarity ⇒ 离线无法重建同一候选集的分通道得分, C 档一直 unavailable。
+      const symptomPart = symptomOverlap(situation, text) * SYMPTOM_BONUS * semantic
+      const axisPart = axisBoost(service, situation, exp, exp.clusterId)
       return {
         expId: exp.expId,
         text,
         polarity: outcomePolarity(exp.sar.outcomeUtility),
-        similarity: semantic
-          + symptomOverlap(situation, text) * SYMPTOM_BONUS * semantic
-          + axisBoost(service, situation, exp, exp.clusterId),
+        similarity: semantic + symptomPart + axisPart,
+        channels: { semantic, symptom: symptomPart, axis: axisPart },
         ...exp.selfReflexive === true ? { selfReflexive: true } : {},
       }
     })
@@ -450,7 +457,18 @@ async function retrieve(
   // cl-200(测量侧, 不改行为): 审计此前只落 coverViewpoints **之后**的候选(恒为 2),
   // 于是离线影子对照的可排序集只有 11(<30), 判据无法裁决。这里额外落**截断前**的 top-5
   // (只记录, 不改变注入什么): 排名对照需要的是"有多少条过阈可选", 而不是"最终注入了哪条"。
-  const preTop = hits.slice(0, 5).map(hit => ({ expId: hit.expId, similarity: Number(hit.similarity.toFixed(4)) }))
+  const preTop = hits.slice(0, 5).map(hit => ({
+    expId: hit.expId,
+    similarity: Number(hit.similarity.toFixed(4)),
+    // exactOptionalPropertyTypes: 不能显式写 channels: undefined, 用条件展开
+    ...(hit.channels === undefined ? {} : {
+      channels: {
+        semantic: Number(hit.channels.semantic.toFixed(4)),
+        symptom: Number(hit.channels.symptom.toFixed(4)),
+        axis: Number(hit.channels.axis.toFixed(4)),
+      },
+    }),
+  }))
   return { hits: covered, rotated, rawHits, topHits, textChars: textChars(covered), preTop }
 }
 
