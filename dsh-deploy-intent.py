@@ -113,6 +113,41 @@ def ledger_carriers(ledger_path, now=None):
     return hits
 
 
+def raise_env_alert(n: int) -> None:
+    """连续自检失败 ⇒ 写言行账本告警(不是只写日志: 日志没人读)。"""
+    p = LEDGER
+    rows = []
+    if os.path.exists(p):
+        rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+    existing = next((r for r in reversed(rows)
+                     if r.get("id") == "cl-deploy-intent-env" and r.get("status") not in TERMINAL), None)
+    row = dict(existing or {})
+    row.update({
+        "id": "cl-deploy-intent-env", "status": "open",
+        "claim": "部署意图核查连续 %d 次自检失败(读不到 systemd 服务时间戳) —— 该机制在静默失效, 不是'无部署意图'" % n,
+        "source": "dsh-deploy-intent.py 自检",
+        "reviewBy": time.strftime("%Y-%m-%d", time.localtime(time.time() + 86400)),
+    })
+    row["ts"] = now_iso()
+    with open(p, "a", encoding="utf8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def close_env_alert() -> None:
+    p = LEDGER
+    if not os.path.exists(p):
+        return
+    rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+    open_row = next((r for r in reversed(rows)
+                     if r.get("id") == "cl-deploy-intent-env" and r.get("status") not in TERMINAL), None)
+    if open_row is None:
+        return
+    row = dict(open_row)
+    row.update({"status": "done", "doneNote": "自检已恢复(能读到服务时间戳)", "ts": now_iso()})
+    with open(p, "a", encoding="utf8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 def write_alert(message):
     rows = []
     if os.path.exists(LEDGER):
@@ -165,8 +200,28 @@ def main():
     if args.service_ts is not None:
         svc_ts = args.service_ts
     if lib_ts is None or svc_ts is None:
-        print("[deploy-intent] 自检失败: lib_ts=%s svc_ts=%s(读不到) " % (lib_ts, svc_ts), file=sys.stderr)
+        # cl-213(2026-09-11 10:0x): 这条自检失败**每 5 分钟**写进 deploy-intent-watch.log, 但没有任何人/机制读它
+        # —— 实测从 07:5x 起连续失败数小时(cron 环境没有 systemd user 会话 ⇒ systemctl --user "Failed to connect to bus"),
+        # 于是"部署意图核查"整条机制静默失效。现在: 连续失败达阈值就写言行账本告警(帧自查可见), 恢复后自动关单。
+        fails = os.path.join(os.path.dirname(args.state), "deploy-intent-env-fails")
+        n = 0
+        try:
+            n = int(open(fails, encoding="utf8").read().strip() or 0) + 1
+        except Exception:
+            n = 1
+        open(fails, "w", encoding="utf8").write(str(n))
+        print("[deploy-intent] 自检失败(第 %d 次): lib_ts=%s svc_ts=%s(读不到) "
+              "—— 多半是运行环境没有 systemd user 会话(cron 缺 XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS)"
+              % (n, lib_ts, svc_ts), file=sys.stderr)
+        if n >= 3:
+            raise_env_alert(n)
         return 3
+    # 自检恢复正常 ⇒ 清零计数并关闭遗留告警
+    try:
+        os.remove(os.path.join(os.path.dirname(args.state), "deploy-intent-env-fails"))
+    except Exception:
+        pass
+    close_env_alert()
 
     pending = lib_ts >= svc_ts
     sched = scheduled_carriers(args.units_file) if pending else []

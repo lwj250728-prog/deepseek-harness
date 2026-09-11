@@ -603,7 +603,11 @@ import json, os, re
 d = os.path.expanduser("~/.dsh/cognitive-pipeline")
 rows = [json.loads(l) for l in open(os.path.join(d, "experiences.jsonl")) if l.strip()]
 label = re.compile(r"^\s*(?:情境|situation|动作|行动|action|结果|outcome)\s*[:：]", re.I)
-bad, fabricated = [], []
+IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_\-]{3,}|\d{3,}|/[A-Za-z0-9_\-./]{3,}")
+def cjk_ratio(t):
+    if not t: return 0.0
+    return sum(1 for ch in t if "\u4e00" <= ch <= "\u9fff") / len(t)
+bad, fabricated, cross = [], [], 0
 for r in rows:
     raw = r.get("rawText")
     if not isinstance(raw, str) or not raw:
@@ -613,11 +617,31 @@ for r in rows:
         v = sar.get(f) or ""
         if label.search(v):
             bad.append("%s.%s" % (r.get("expId"), f))
-        chars = set(ch for ch in v if not ch.isspace())
-        if chars and len(chars & set(raw)) / len(chars) < 0.5:
-            fabricated.append("%s.%s" % (r.get("expId"), f))
+            continue
+        # ① 硬判据: 字段里的标识符/数字/路径必须能在 rawText 里找到 —— 这才是"捏造"的真实风险
+        missing = [tok for tok in IDENT.findall(v) if tok not in raw]
+        if len(missing) > max(1, len(IDENT.findall(v)) // 3):
+            fabricated.append("%s.%s(标识符找不到: %s)" % (r.get("expId"), f, missing[:2]))
+            continue
+        # ② 字符重叠判据**只在 rawText 本身是中文时成立**: 中文原文该被引用字符; 英文/代码原文下
+        #    中文摘要是**翻译/改写**, 字符重叠天然低(实测 exp_328 英文原文+中文摘要 47% 被误判成捏造)。
+        #    (第一版按"字段与原文是否跨语种"判断, 但混合文本 cjk 比例 0.30 落在 0.5 阈值之下 ⇒ 仍误判;
+        #     改为只按**原文语种**决定用哪条判据。)
+        raw_cjk = cjk_ratio(raw[:600]) > 0.5
+        if raw_cjk:
+            chars = set(ch for ch in v if not ch.isspace())
+            if chars and len(chars & set(raw)) / len(chars) < 0.5:
+                fabricated.append("%s.%s(中文原文但重叠仅 %.0f%%)"
+                                  % (r.get("expId"), f, 100 * len(chars & set(raw)) / len(chars)))
+            continue
+        # 非中文原文: 用"至少一个 4+ 拉丁词/标识符能在原文找到"作下限(翻译允许, 凭空造词不允许)
+        cross += 1
+        toks = re.findall(r"[A-Za-z][A-Za-z0-9_\-]{3,}", v)
+        if toks and not any(t in raw for t in toks):
+            fabricated.append("%s.%s(英文原文下字段无任何词可回溯)" % (r.get("expId"), f))
 assert not bad, "字段残留结构标记(互串): %s" % bad[:3]
 assert not fabricated, "字段内容无法回溯到 rawText(疑似捏造): %s" % fabricated[:3]
+print("SAR 字段可回溯(跨语种摘要 %d 项按标识符判据放行)" % cross)
 '
 
 # ── T24 L1 可重抽(2026-09-08 22:1x 固化——cl-038: 抽取失败回退绕过结构标记, 启动时按 rawText 修复) ──
@@ -5380,6 +5404,86 @@ r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-goal-wait-lint.py",
 assert r.returncode == 1, "合成的不可解析等待没被判红(exit=%d): %s" % (r.returncode, r.stdout + r.stderr)
 assert "无法解析" in r.stderr, "红是红了, 理由不对: " + r.stderr[:120]
 print("合成不可解析等待: 开火")
+'
+# ── T150 目标轨迹树数据源(能力须可核查) ──
+# 起因: 用户要"目标已完成/执行/规划的精简轨迹树"。数据源 dsh-goal-trajectory.py 是新能力,
+# 它的分类会被 UI 直接读走 —— 一旦静默降级(等待判据没跑成却把目标全标'执行中'), 图上就会说谎。
+echo "[T150] 轨迹树数据源(结构完整 / 车道可复核 / 判据失败不得静默降级)"
+t "轨迹树 JSON 结构完整且时间戳带偏移" python3 -c '
+import json, os, re
+p = os.environ.get("DSH_GOAL_TRAJECTORY") or os.path.expanduser("~/.dsh/cognitive-pipeline/goal-trajectory.json")
+assert os.path.exists(p), "缺 goal-trajectory.json(先跑 dsh-goal-trajectory.py)"
+d = json.load(open(p, encoding="utf8"))
+assert re.match(r"^\d{4}-\d{2}-\d{2}T.*\+08:00$", d["generatedAt"]), "generatedAt 非 +08:00: " + str(d["generatedAt"])
+assert d.get("goals"), "没有目标 —— 前提不成立"
+for g in d["goals"]:
+    for k in ("id", "title", "lane", "counts", "steps", "wakes", "adopted"):
+        assert k in g, "目标缺字段 " + k
+    assert g["lane"] in ("executing", "planned", "completed"), "车道取值非法: " + str(g["lane"])
+    for k in ("completed", "executing", "planned", "blocked"):
+        assert k in g["counts"], "counts 缺 " + k
+print("目标 %d 个, 车道与字段齐备" % len(d["goals"]))
+'
+t "每步的 kind 必须与账本独立复算一致" python3 -c '
+import json, os
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+TERMINAL = {"done", "retired", "closed"}
+DISP = ("reviewBy", "disposition", "unblockPlan", "nextAction", "blockedReason")
+ind = {}
+for l in open(D + "/claims-ledger.jsonl", encoding="utf8"):
+    if l.strip():
+        r = json.loads(l)
+        if r.get("id"): ind[r["id"]] = r
+d = json.load(open(os.environ.get("DSH_GOAL_TRAJECTORY") or (D + "/goal-trajectory.json"), encoding="utf8"))
+bad, checked = [], 0
+for g in d["goals"]:
+    for s in g["steps"]:
+        c = ind.get(s["id"])
+        assert c is not None, "轨迹里的 %s 不在账本里" % s["id"]
+        if c.get("status") in TERMINAL:
+            want = "completed"
+        elif not any(c.get(f) for f in DISP):
+            want = "blocked"
+        else:
+            continue          # executing/planned 取决于目标的等待态, 这里只独立复核两端
+        checked += 1
+        if s["kind"] != want:
+            bad.append("%s: 轨迹=%s 账本=%s" % (s["id"], s["kind"], want))
+assert not bad, "分类与账本不一致: " + repr(bad[:4])
+assert checked >= 3, "只复核到 %d 步 —— 判据前提不成立" % checked
+print("独立复核 %d 步(终态/阻塞两端), 全部一致" % checked)
+'
+t "等待判据失败时必须显式降级标记(不得静默当成可执行)" python3 -c '
+import json, os
+p = os.environ.get("DSH_GOAL_TRAJECTORY") or os.path.expanduser("~/.dsh/cognitive-pipeline/goal-trajectory.json")
+d = json.load(open(p, encoding="utf8"))
+assert "waitingEvaluated" in d, "缺 waitingEvaluated 标记 —— 判据失败时无法与正常输出区分"
+assert isinstance(d["waitingEvaluated"], bool), "waitingEvaluated 必须是布尔"
+assert d["waitingEvaluated"] is True, "本次等待判据未跑成(降级输出), 请先修判据调用"
+print("等待判据正常执行(waitingEvaluated=true)")
+'
+# ── T151 排程环境的 systemd 会话(cl-213) ──
+# 起因: cron 环境没有 systemd user 会话 ⇒ `systemctl --user` 报 "Failed to connect to bus"。
+# 实测 06:20 的 cron 运行 **4 项失败**, 其中 3 项(lib早于服务启动/部署意图检测器/载体判据探针)**纯粹是环境导致**,
+# 却写进账本成了告警 —— 排程跑的套件因此长期系统性假红, 而真缺陷会被淹没在噪声里。
+echo "[T151] 排程环境须带 systemd 会话(依赖 systemctl 的 cron 条目 / 缺失时须显式失败)"
+t "依赖 systemctl 的 cron 条目须带 systemd 会话环境" python3 -c '
+import re, subprocess
+out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30).stdout
+need = [l for l in out.splitlines() if ("dsh-cog-tests.sh" in l or "dsh-deploy-intent.py" in l)]
+assert need, "找不到依赖 systemd 的排程条目 —— 前提不成立"
+bad = [l[:60] for l in need if "XDG_RUNTIME_DIR=" not in l or "DBUS_SESSION_BUS_ADDRESS=" not in l]
+assert not bad, "这些 cron 条目缺 systemd 会话环境(会在 cron 下系统性假红): " + repr(bad)
+print("%d 条依赖 systemd 的 cron 条目均带环境" % len(need))
+'
+t "无 systemd 会话时判据须显式说明环境缺失(不得静默)" python3 -c '
+import os, subprocess
+r = subprocess.run(["env", "-i", "HOME=" + os.path.expanduser("~"), "PATH=/usr/bin:/bin",
+                    "python3", "/home/ubuntu/dsh-fork/dsh-deploy-intent.py", "--state", "/tmp/t151-intent.json"],
+                   capture_output=True, text=True, timeout=120)
+assert r.returncode == 3, "裸环境下应判自检失败(exit 3), 实得 %d" % r.returncode
+assert "systemd user" in (r.stdout + r.stderr), "失败理由里没点明 systemd 会话: " + (r.stderr or r.stdout)[:120]
+print("裸环境: 显式报自检失败并点明 systemd 会话")
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。

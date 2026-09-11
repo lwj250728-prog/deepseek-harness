@@ -83,9 +83,11 @@ if [ "$SKIP_SUITE" != 1 ]; then
   DSH_COG_ORIGIN=deploy bash "$REPO/dsh-cog-tests.sh" >/dev/null 2>&1
   SUITE_EXIT=$?
   VERDICT="$(grep -o '累计裁决: [0-9]* 通过 / [0-9]* 失败' "$COG/.cog-tests.log" 2>/dev/null | tail -1)"
-  emit done "$([ "$SUITE_EXIT" -eq 0 ] && echo ok || echo failed)" \
-       "{\"stage\": \"suite\", \"suiteExit\": $SUITE_EXIT, \"verdict\": \"${VERDICT:-unknown}\"}"
-  exit "$SUITE_EXIT"
+  # cl-214: status 只描述**部署本身**。原先套件红就写 status=failed, 于是台账上"最近四次部署全失败",
+  # 而事实是四次重启都成功了、只是套件当时有真红 —— 把两件事混成一个字段会让台账撒谎。
+  # 套件结果单独放 suiteStatus, 不改写部署的成败。
+  emit done ok "{\"stage\": \"suite\", \"suiteStatus\": \"$([ "$SUITE_EXIT" -eq 0 ] && echo green || echo red)\", \"suiteExit\": $SUITE_EXIT, \"verdict\": \"${VERDICT:-unknown}\"}"
+  exit 0
 fi
 
 emit done ok '{"stage": "no-suite"}'
