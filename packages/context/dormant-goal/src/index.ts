@@ -242,8 +242,22 @@ const NOT_WAITING = /^(?:待办|待修|待补|待验证|待测试|待评估|待�
  * @param goal - 池内目标(可带 waitChecker)。
  * @returns true 表示"条件已满足, 不应算等待"。
  */
-function waitConditionMet(goal: { waitChecker?: string }): boolean {
-  const cmd = typeof goal.waitChecker === 'string' ? goal.waitChecker.trim() : ''
+function shouldSkipAsWaiting(
+  goal: { nextAction?: string, waitChecker?: string },
+  isWaiting: (text: string, now: Date) => boolean = isWaitingNextActionLocal,
+  runChecker: (cmd: string) => boolean = waitConditionMet,
+  now: Date = new Date(),
+): boolean {
+  // 抽出成纯函数(可注入 isWaiting/runChecker), 使它能在套件里被逐例验证 ——
+  // 内联在唤醒闭包里时"接线是否真的生效"只能等真实条件到点才验, 太晚。
+  if (!isWaiting(String(goal.nextAction ?? ''), now)) return false
+  if (runChecker(String(goal.waitChecker ?? ''))) return false   // 条件已满足 ⇒ 不算等待
+  return true
+}
+
+function waitConditionMet(goal: { waitChecker?: string } | string): boolean {
+  const raw = typeof goal === 'string' ? goal : goal.waitChecker
+  const cmd = typeof raw === 'string' ? raw.trim() : ''
   if (cmd === '') return false
   try {
     execSync(cmd, { timeout: 20_000, stdio: 'ignore' })
@@ -442,13 +456,8 @@ function parseWaitingMomentLocal(text: string, now: Date = new Date()): Date | n
     for (const h of hits) set.set(h.goal.id, poolSnapshot(h.goal))
     pending.set(agent.session.id, set)
     bumpMany(new Map(hits.map(h => [h.goal.id, false])),
-      new Map(hits.filter(h => {
-        const g = h.goal as { nextAction?: string, waitChecker?: string }
-        if (!isWaitingNextActionLocal(String(g.nextAction ?? ''))) return false
-        // cl-215: 语法上是等待, 但**条件可能已经满足** —— 让 checker 现场回答一次。
-        if (waitConditionMet(g)) return false
-        return true
-      }).map(h => [h.goal.id, 'waiting'])))
+      new Map(hits.filter(h => shouldSkipAsWaiting(h.goal as { nextAction?: string, waitChecker?: string }))
+        .map(h => [h.goal.id, 'waiting'])))
     return { kind: 'enter', messages: [...decision.messages, block] }
   }, 'dormant-goal sentinel')
 

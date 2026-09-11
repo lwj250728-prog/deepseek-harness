@@ -5582,6 +5582,51 @@ assert r.returncode == 0, "有采纳却仍判违规(exit=%d)" % r.returncode
 assert "违规 0" in r.stdout, "输出没显示无违规: " + r.stdout[-100:]
 print("有采纳: 判无违规(exit 0)")
 '
+# ── T154 已部署插件 lib 的"可加载性" + waitChecker 接线(cl-215) ──
+# 起因(本轮自伤): 我把 shouldSkipAsWaiting 写成**闭包内 `export function`** —— TS1184, 而 tsdown **不做类型检查**,
+# 于是构建"成功"、产物带着 ESM 语法错。同类事故今晨已发生过一次(quiet-driver 崩溃循环)。
+# 判据: ①每个 host 面插件 lib 必须通过 `node --check`(语法级可加载); ②waitChecker 接线须在产物里; ③池里样本的 checker 要如实回答条件。
+echo "[T154] 插件 lib 可加载性 + waitChecker 接线(node --check / 产物含接线 / checker 如实回答)"
+t "host 面插件 lib 必须通过 node --check(防 tsdown 绕过类型检查发语法错产物)" python3 -c '
+import glob, os, subprocess
+libs = sorted(glob.glob(os.path.expanduser("~/dsh-fork/packages/*/*/lib/index.js")))
+assert libs, "找不到任何插件 lib —— 前提不成立"
+bad = []
+for p in libs:
+    r = subprocess.run(["node", "--check", p], capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        bad.append("%s: %s" % (os.path.basename(os.path.dirname(os.path.dirname(p))), (r.stderr.strip().splitlines() or [""])[-1][:80]))
+assert not bad, "有插件 lib 语法不可加载(部署后会崩): " + repr(bad[:3])
+print("%d 个插件 lib 全部通过 node --check" % len(libs))
+'
+t "waitChecker 接线须已在部署产物里" python3 -c '
+import os
+lib = os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/lib/index.js")
+src = open(lib, encoding="utf8").read()
+assert "waitChecker" in src, "lib 里没有 waitChecker 字段读取"
+assert "shouldSkipAsWaiting" in src, "lib 里没有抽出后的等待判定(接线未部署)"
+assert "execSync" in src, "lib 里没有跑 checker 的调用"
+print("lib 含 waitChecker 接线")
+'
+t "池内样本的 waitChecker 须如实回答条件(exit 码与条件一致)" python3 -c '
+import json, os, subprocess
+pool = os.path.expanduser("~/.dsh/cognitive-pipeline/dormant-goals.jsonl")
+latest = {}
+for l in open(pool, encoding="utf8"):
+    if l.strip():
+        g = json.loads(l)
+        if g.get("id"): latest[g["id"]] = g
+withchk = {k: v for k, v in latest.items() if str(v.get("waitChecker") or "").strip()}
+assert withchk, "池里没有任何目标带 waitChecker —— 前提不成立(接线无样本)"
+for gid, g in withchk.items():
+    r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-wait-check-library.py", "--json"],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode in (0, 1), "checker 自身坏了(exit %d): %s" % (r.returncode, r.stderr[-100:])
+    d = json.loads(r.stdout.strip().splitlines()[-1])
+    met = bool(d.get("met"))
+    assert (r.returncode == 0) == met, "checker 的退出码与条件不自洽: exit=%d met=%s" % (r.returncode, met)
+    print("%s: 条件 %s(可排序集 %s/%s) ⇒ exit %d, 自洽" % (gid, "已满足" if met else "未满足", d["rankableSets"], d["minSample"], r.returncode))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
