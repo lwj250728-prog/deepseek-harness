@@ -8,7 +8,7 @@
  * refresh button re-runs the generator and re-fetches, and nothing polls. The
  * panel is dense by design — this is a trajectory tree, not a report.
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { clsx } from 'clsx'
 import { StateDot, type StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { GoalStep, GoalStepKind, GoalTrajectoryGoal } from './contract/goal-trajectory.ts'
@@ -81,18 +81,39 @@ export function GoalTree({ wide, useStore, actions, refresh, t }: GoalTreeProps)
   const [openStep, setOpenStep] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
 
-  // Fetch on the first open, then re-stamp the staleness label once a minute
-  // for as long as the panel is open (no network activity).
+  // Latest values behind refs: the fetch effect must NOT depend on them, or its
+  // own request would cancel itself (see below).
+  const statusRef = useRef(status)
+  statusRef.current = status
+  const refreshRef = useRef(refresh)
+  refreshRef.current = refresh
+
+  // Fetch on open. This effect depends on `open` ALONE. It used to list `status`
+  // and `refresh` too, which made the request abort itself: `refresh` calls
+  // `actions.begin()`, that flips status `idle → loading`, the changed dep runs
+  // this effect's cleanup — `controller.abort()` — on the request it just
+  // started, and the abort is swallowed by `if (signal.aborted) return` in the
+  // inject face. Observed live as a panel pinned at the loading ellipsis with
+  // exactly one `POST /goal-tree/trajectory/overview` cancelled (`ERR_ABORTED`).
   useEffect(() => {
     if (!open) return
-    if (status === 'idle') {
-      const controller = new AbortController()
-      void refresh(controller.signal)
-      return () => { controller.abort() }
+    const controller = new AbortController()
+    // 'loading' with no live request means a previous open was closed mid-flight
+    // (closing aborts it, so nothing could ever settle the state): refetch
+    // rather than show a permanent ellipsis.
+    if (statusRef.current === 'idle' || statusRef.current === 'loading') {
+      void refreshRef.current(controller.signal)
     }
+    return () => { controller.abort() }
+  }, [open])
+
+  // Re-stamp the staleness label once a minute while the panel is open (no
+  // network activity of its own).
+  useEffect(() => {
+    if (!open) return
     const timer = setInterval(() => { setNow(Date.now()) }, 60_000)
     return () => { clearInterval(timer) }
-  }, [open, status, refresh])
+  }, [open])
 
   const goals = overview?.snapshot.goals ?? []
   const lanes = useMemo(() => groupLanes(goals), [goals])

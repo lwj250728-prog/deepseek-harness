@@ -200,6 +200,10 @@ def main() -> int:
     recent_frame_experiences = [e['expId'] for e in experiences.values()
                                 if is_frame_born(e)
                                 and now_ms - (e.get('timestamp') or 0) < 24 * 3600 * 1000]
+    # 拆开两类(2026-09-11 16:4x 实测): 前缀 '检索路由歧义' 既标记"帧回合自述被存成普通经验"
+    # (cl-102 要压制的泄漏), 也标记**按设计**产生的元经验(低余量真实回合 → rememberMeta,
+    # meta=True, 且已被累计门排除)。原来的单一计数把后者的正常产生算成泄漏: 构建后只要出现一次
+    # 低余量预测, 套件就红 —— 判据比设计更严, 红的原因却不是泄漏。
     since_build_frame_experiences = [e['expId'] for e in experiences.values()
                                      if is_frame_born(e) and build_ms is not None
                                      and (e.get('timestamp') or 0) > build_ms]
@@ -221,6 +225,14 @@ def main() -> int:
         'frameBornExperiencesLast24h': len(recent_frame_experiences),
         'frameBornExperiencesSinceBuild': len(since_build_frame_experiences),
         'frameBornExperiencesSinceBuildIds': since_build_frame_experiences[:10],
+        # 真泄漏 = 帧味情境却以**普通经验**入库(meta 非真) —— 这才是 cl-102 要断的源。
+        'frameBornNonMetaSinceBuild': len([i for i in since_build_frame_experiences
+                                           if experiences[i].get('meta') is not True]),
+        'frameBornNonMetaSinceBuildIds': [i for i in since_build_frame_experiences
+                                          if experiences[i].get('meta') is not True][:10],
+        # 按设计产生的元经验(低余量真实回合 / 验收准则偏差), 只报数不判红。
+        'frameBornMetaSinceBuild': len([i for i in since_build_frame_experiences
+                                        if experiences[i].get('meta') is True]),
         'frameBornExperiencesLast24hIds': recent_frame_experiences[:10],
         'buildCutoffMs': build_ms,
         'injectionsSinceBuild': len(since_build),

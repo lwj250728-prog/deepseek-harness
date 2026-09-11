@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
 import {
   IconChevronDownOutline14, IconChevronRightOutline14, IconListPenOutline16,
@@ -73,15 +73,25 @@ export function LearningArea({
   const expanded = useStore(state => state.expanded)
 
   // A fetch on first expand; the inject face owns the wire and the store
-  // transition, so the component only asks once per open.
-  const [asked, setAsked] = useState(false)
+  // transition. The "already asked" flag is a REF, not state: as state it sat in
+  // this effect's deps, so setting it re-ran the effect and its cleanup aborted
+  // the request it had just sent (same self-cancel shape as LifeStrip; live
+  // evidence: `POST /api/cognition.list` came back `ERR_ABORTED`).
+  const askedRef = useRef(false)
+  const refreshRef = useRef(refresh)
+  refreshRef.current = refresh
   useEffect(() => {
-    if (!wide || !expanded || asked) return
-    setAsked(true)
+    if (!wide || !expanded || askedRef.current) return
+    askedRef.current = true
     const controller = new AbortController()
-    void refresh(controller.signal)
-    return () => { controller.abort() }
-  }, [wide, expanded, asked, refresh])
+    let settled = false
+    void refreshRef.current(controller.signal).finally(() => { settled = true })
+    return () => {
+      controller.abort()
+      // 取消的是"还没问完"的那次: 下一轮展开必须还能再问, 否则面板永远停在未取数状态。
+      if (!settled) askedRef.current = false
+    }
+  }, [wide, expanded])
 
   const rows = useMemo(() => ordered(tasks), [tasks])
   const filtered = filter === 'all' ? rows : rows.filter(task => task.status === filter)
@@ -159,7 +169,8 @@ export function LearningArea({
           </div>
 
           {status === 'error' ? <p className={css.note}>{t('error.load')}</p> : null}
-          {status !== 'error' && filtered.length === 0 ? (
+          {/* 只有拿到答案(status==='ready')才能断言"没有任务"; 加载中不得先下结论。 */}
+          {status === 'ready' && filtered.length === 0 ? (
             <p className={css.note}>{totalCount === 0 ? t('empty') : t('empty.filtered')}</p>
           ) : null}
 

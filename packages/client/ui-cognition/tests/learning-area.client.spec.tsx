@@ -129,3 +129,40 @@ describe('LearningArea', () => {
     expect(screen.getByText('1')).toBeTruthy()
   })
 })
+
+describe('LearningArea: fetch lifecycle', () => {
+  it('does not abort the request its own asked-flag transition just started (慢 RPC)', async () => {
+    const signals: AbortSignal[] = []
+    const store = createLearningStore().create()
+    const slow = vi.fn<LearningAreaProps['refresh']>((signal) => {
+      store.actions.begin()
+      signals.push(signal)
+      return new Promise<void>(() => {})
+    })
+    render(<LearningArea
+      wide expandSidebar={vi.fn()} useSessions={vi.fn()} useWorkspaces={vi.fn()}
+      useStore={bindSnapshotSelector(store)} actions={store.actions} refresh={slow} t={t}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: /学习会话/ }))
+    await waitFor(() => { expect(slow).toHaveBeenCalledTimes(1) })
+    await waitFor(() => { expect(store.getSnapshot().status).toBe('loading') })
+    expect(signals).toHaveLength(1)
+    expect(signals[0]?.aborted).toBe(false)
+  })
+
+  it('加载中不得断言"暂无学习任务"', async () => {
+    const store = createLearningStore().create()
+    const slow = vi.fn<LearningAreaProps['refresh']>((signal) => {
+      store.actions.begin()
+      void signal
+      return new Promise<void>(() => {})
+    })
+    render(<LearningArea
+      wide expandSidebar={vi.fn()} useSessions={vi.fn()} useWorkspaces={vi.fn()}
+      useStore={bindSnapshotSelector(store)} actions={store.actions} refresh={slow} t={t}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: /学习会话/ }))
+    await waitFor(() => { expect(store.getSnapshot().status).toBe('loading') })
+    expect(screen.queryByText('暂无学习任务')).toBeNull()
+  })
+})

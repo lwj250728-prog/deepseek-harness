@@ -29,6 +29,7 @@ LIB_GLOB = "/home/ubuntu/dsh-fork/packages/*/*/lib/index.js"
 LEDGER = os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
 STATE = os.path.expanduser("~/.dsh/cognitive-pipeline/deploy-intent.json")
 SERVICE = "dsh-web.service"
+HASH_TOOL = "/home/ubuntu/dsh-fork/dsh-deploy-lib-hashes.py"
 # 排程/会话来源标记: cron 行给 DSH_COG_ORIGIN, 统一机制台账的检查器认 DSH_RUN_ORIGIN —— 两个都认,
 # 免得"标了名却读不到"。落进状态文件与 watch 日志行, 便于按来源分段核验。
 ORIGIN = os.environ.get("DSH_RUN_ORIGIN") or os.environ.get("DSH_COG_ORIGIN") or "manual"
@@ -49,6 +50,20 @@ def lib_max_mtime(pattern):
         return None, None
     newest = max(files, key=lambda p: os.path.getmtime(p))
     return os.path.getmtime(newest), newest
+
+
+def content_state(lib_glob):
+    """产物内容是否真的变了(cl-224): mtime 只是线索, 内容才是事实。
+
+    只改客户端源码时, 构建命令会顺带重产出 host 面 lib/index.js —— 源码未动、内容逐字节相同,
+    仅 mtime 变新。此时按 mtime 判"待部署"会让套件转红并推动一次毫无必要的重启。
+    """
+    try:
+        r = subprocess.run(["python3", HASH_TOOL, "--check", "--glob", lib_glob, "--json"],
+                           capture_output=True, text=True, timeout=120)
+        return json.loads(r.stdout.strip() or "{}")
+    except Exception as exc:  # 读不到就保守算待部署(fail-closed), 并把原因带出去
+        return {"verdict": "unverifiable", "reason": "内容基线核对失败: %s" % exc}
 
 
 def service_start_epoch():
@@ -223,7 +238,11 @@ def main():
         pass
     close_env_alert()
 
-    pending = lib_ts >= svc_ts
+    mtime_newer = lib_ts >= svc_ts
+    # 合成时间戳(测试/探针)不做内容比对: 那些世界里的产物就是现场的, 比对只会把判据本身测模糊。
+    content = {"verdict": "skipped", "reason": "合成时间戳, 不做内容比对"} if args.lib_ts is not None \
+        else content_state(args.lib_glob)
+    pending = bool(mtime_newer and content.get("verdict") != "identical")
     sched = scheduled_carriers(args.units_file) if pending else []
     ledg = ledger_carriers(args.ledger) if pending else []
     carried = bool(sched) or (args.carrier_policy == "scheduled-or-ledger" and bool(ledg))
@@ -238,6 +257,8 @@ def main():
         "ts": now_iso(), "origin": ORIGIN, "pending": pending, "verdict": verdict,
         "carrierPolicy": args.carrier_policy,
         "libTs": lib_ts, "libPath": lib_path, "serviceStartTs": svc_ts,
+        "mtimeNewer": mtime_newer, "contentVerdict": content.get("verdict"),
+        "contentReason": content.get("reason"), "hashBaselineTs": content.get("baselineTs"),
         "driftSeconds": int(lib_ts - svc_ts) if pending else int(svc_ts - lib_ts),
         "scheduledCarriers": sched, "ledgerMentions": ledg,
     }

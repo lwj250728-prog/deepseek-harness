@@ -2581,12 +2581,13 @@ grep -q 'isSelfFrameExperience' '$HOME/dsh-fork/packages/cognition/cognitive-pip
 grep -q 'isSelfFrameExperience' '$HOME/dsh-fork/packages/context/cognitive-inject/lib/index.js' &&
 test \$(grep -c 'isSelfFrameExperience({ sar' '$HOME/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js') -ge 2
 "
-t "源头断流: 构建后新增帧生经验 = 0" python3 -c '
+t "源头断流: 构建后帧生经验不得以普通经验入库(meta 元经验按设计可产生)" python3 -c '
 import json, os
 m = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/injection-noise.json"), encoding="utf8"))
-n = m.get("frameBornExperiencesSinceBuild")
-assert isinstance(n, int), "指标缺 frameBornExperiencesSinceBuild"
-assert n == 0, "构建后仍新增 %d 条帧生经验(前 5: %s)" % (n, m.get("frameBornExperiencesSinceBuildIds"))
+n = m.get("frameBornNonMetaSinceBuild")
+assert isinstance(n, int), "指标缺 frameBornNonMetaSinceBuild(又退回只看总数)"
+assert n == 0, "构建后 %d 条帧味情境以普通经验入库(真泄漏, 前 5: %s)" % (n, m.get("frameBornNonMetaSinceBuildIds"))
+print("构建后真泄漏 0 条(按设计产生的元经验 %s 条, 只报数: 低余量真实回合/验收准则偏差)" % m.get("frameBornMetaSinceBuild"))
 '
 t "注入侧断回注: 构建后注入含帧生经验 = 0" python3 -c '
 import json, os
@@ -3070,12 +3071,22 @@ assert isinstance(last.get("topHits"), list) and last["topHits"], "缺 topHits"
 print("最近一次供给: rawHits=%s topHits=%s candidates=%s"
       % (last.get("rawHits"), last.get("topHits"), last.get("candidates")))
 '
-t "供给量自洽: rawHits >= candidates, topHits 单调不增" python3 -c '
-import json, os
-p = os.path.expanduser("~/.dsh/cognitive-pipeline/retrieval-audit.jsonl")
+t "供给量自洽: rawHits >= candidates, 本纪元 topHits 单调不增" python3 -c '
+import json, os, subprocess
+D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+p = os.path.join(D, "retrieval-audit.jsonl")
+# cl-220: 审计账本只追加, 全域扫描会把**修复前**的非单调行永远算成红 —— 判据域写错(证据域含修复前史)。
+# 不变式只对"当前纪元"成立: 以部署边界(max(lib mtime, 服务启动))为界, 边界前的行是历史, 不改写也不判。
+try:
+    after = int(subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-deploy-boundary.py")],
+                               capture_output=True, text=True, timeout=60).stdout.strip() or 0)
+except Exception:
+    after = 0
 rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+scoped = [r for r in rows if not after or (r.get("t") or 0) > after]
+skipped = len(rows) - len(scoped)
 bad = []
-for r in rows:
+for r in scoped:
     raw, cand = r.get("rawHits"), r.get("candidates")
     if isinstance(raw, int) and isinstance(cand, int) and raw < cand:
         # coverViewpoints 只能收窄候选, 不可能放大 => rawHits < candidates 即记账错位
@@ -3084,7 +3095,8 @@ for r in rows:
     if isinstance(top, list) and len(top) > 1:
         if any(top[i] < top[i + 1] for i in range(len(top) - 1)):
             bad.append((r.get("stage"), "topHits 非降序", top))
-assert not bad, "供给量记账不自洽: %s" % bad[:3]
+assert not bad, "供给量记账不自洽(本纪元 %d 行): %s" % (len(scoped), bad[:3])
+print("本纪元 %d 行自洽(历史 %d 行不判)" % (len(scoped), skipped))
 '
 t "供给量与选择结果的落差被记录(防再次误读为供给不足)" python3 -c '
 import json, os
@@ -5678,6 +5690,75 @@ for cs in sets:
         diff += 1
 assert diff > 0, "部署后 %d 个多候选集里融合从未改变顺序 —— 开关没生效或恒等" % len(sets)
 print("%d/%d 个多候选集里融合改变了顺序" % (diff, len(sets)))
+'
+# ── T156 目标轨迹面板: 取数生命周期 + 渲染(cl-221) ──
+# 起因: 用户报"目标轨迹 ui 没有内容"。当时宿主 RPC 200/17834B、客户端清单已注册、构建产物含全部代码
+#   —— 状态证据全绿, 面板却是空的。用真实浏览器(CDP, dsh-ui-probe.mjs)实测才看清: 面板确实渲染并在
+#   点击后发出 1 个 POST /goal-tree/trajectory/overview, 随即被**自己**取消(ERR_ABORTED/canceled),
+#   12s 后仍停在"…"。根因: 取数 effect 的依赖数组里含 status, 而 refresh 自己会 begin() 把 status 翻成
+#   loading ⇒ 依赖变化触发该 effect 的 cleanup ⇒ abort 掉刚发出的请求; abort 又被 inject 面的
+#   `if (signal.aborted) return` 静默吞掉 ⇒ 永久 loading、永久 0 goals。
+# 本组守两件: ①取数 effect 不得依赖 status/refresh(自取消的形状), 且修法必须真的进了产物;
+#            ②面板的渲染+生命周期测试必须绿(该测试对修复前的代码是**红的**——已自证必须开火)。
+echo "[T156] 目标轨迹面板(取数 effect 不得自取消 / 渲染与生命周期测试)"
+t "取数 effect 不得依赖 status/refresh(自取消形状), 修法须已入产物" python3 -c '
+import os, re
+base = os.path.expanduser("~/dsh-fork/packages/client/ui-goal-tree")
+src = open(base + "/src/client/GoalTree.tsx", encoding="utf8").read()
+lib = open(base + "/lib/client.js", encoding="utf8").read()
+assert "[open, status, refresh]" not in src, "取数 effect 又依赖 status/refresh —— 它会 abort 掉自己刚发出的请求"
+assert re.search(r"void refreshRef\.current\(controller\.signal\)", src), "取数未走 ref(说明依赖又回到了会变化的量)"
+assert re.search(r"\}, \[open\]\)", src), "取数 effect 的依赖不是只有 open"
+assert "refreshRef" in lib and "statusRef" in lib, "修法未进构建产物(浏览器拿到的仍是自取消版本)"
+print("effect 仅依赖 open, ref 修法已在产物")
+'
+t "三个面板的渲染+取数生命周期测试全绿(修复前各有一条为红)" python3 -c '
+import subprocess, os
+specs = ["packages/client/ui-goal-tree/tests/panel.client.spec.tsx",
+         "packages/client/ui-cognition/tests/life-strip.client.spec.tsx",
+         "packages/client/ui-cognition/tests/learning-area.client.spec.tsx"]
+r = subprocess.run(["./node_modules/.bin/vitest", "run", "--reporter=dot", *specs],
+                   cwd=os.path.expanduser("~/dsh-fork"), capture_output=True, text=True, timeout=900)
+if r.returncode != 0:
+    print(r.stdout[-2000:]); print(r.stderr[-800:])
+raise SystemExit(r.returncode)
+print("3 个 spec 全绿")
+'
+# ── T157 客户端"取数 effect 自取消"形状闸(cl-221/cl-222 的广度) ──
+# 一个 bug 有三个实例(ui-goal-tree / ui-cognition×2), 说明它是**被复制的形状**, 不是偶发:
+#   effect 里建 AbortController 发请求, 依赖数组里却放着"这次请求自己会改的量"——
+#   ① status/loading/error: refresh 的第一步 actions.begin() 就把它翻成 loading;
+#   ② asked 这类 flag: effect 自己 setAsked(true);
+#   ③ refresh: 注入面在真实注册里会被重建, 且它自己会触发 begin()。
+#   依赖一变 ⇒ React 跑上一轮 effect 的 cleanup ⇒ abort 掉刚发出的请求; 而 abort 又被注入面的
+#   `if (signal.aborted) return` 静默吞掉 ⇒ 永久 loading(用户看到的"没有内容")。
+# 本组是静态形状闸: 三个已知实例已修, 新写的取数 effect 不许再出现这个形状。
+echo "[T157] 取数 effect 不得依赖自变状态(自取消形状静态闸)"
+t "全客户端插件: 取数 effect 不得依赖自变状态(形状闸工具)" python3 "$HOME/dsh-fork/dsh-client-effect-shape-check.py"
+# ── T158 部署意图的内容基线(cl-224: 不得只凭 mtime 制造部署意图) ──
+# 起因: 本轮只改了客户端源码, 构建命令却顺带重产出 host 面 lib/index.js —— 源码一字未动、内容逐字节
+# 相同, 只是 mtime 变新。检测器按 mtime 判 pending ⇒ 套件"有部署意图必须有排程载体"转红, 并推动
+# 一次毫无必要的重启(拿"状态看起来对"换"真的做了什么")。
+# 判据: 部署意图 = 产物内容 != 服务启动时所用内容; mtime 只是线索, 内容才是事实。
+echo "[T158] 部署意图的内容基线(仅 mtime 变新不算意图 / 内容变才算)"
+t "只凭 mtime 不得制造部署意图(基线一致即无意图)" python3 -c '
+import json, os, subprocess
+out = "/tmp/t158-state.json"
+subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-deploy-intent.py", "--state", out, "--quiet"],
+               capture_output=True, text=True, timeout=120)
+s = json.load(open(out, encoding="utf8"))
+assert "contentVerdict" in s and "contentReason" in s, "检测器没有内容比对仪表(又回到只看 mtime)"
+if s.get("mtimeNewer") and s["contentVerdict"] == "identical":
+    assert s["pending"] is False, "内容与基线逐字节一致却仍判待部署 —— 只凭 mtime 制造意图: " + str(s.get("contentReason"))
+    print("mtime 新但内容一致 ⇒ 不判待部署: " + str(s["contentReason"])[:60])
+else:
+    print("本帧不判(内容确实变了或无基线): %s" % s.get("contentVerdict"))
+'
+t "内容基线工具须分得开仅改 mtime 与内容已变(探针现场开火)" python3 -c '
+import subprocess
+r = subprocess.run(["bash", "/home/ubuntu/dsh-fork/dsh-guard-t158-probe.sh"], capture_output=True, text=True, timeout=180)
+assert r.returncode == 1, "开火探针未按预期开火(exit=%d): %s" % (r.returncode, r.stderr[-160:])
+print("探针开火: " + r.stderr.strip().splitlines()[-1][:80])
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。

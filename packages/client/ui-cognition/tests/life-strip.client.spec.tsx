@@ -115,3 +115,40 @@ describe('LifeStrip', () => {
     expect(await screen.findByText(/生命状态链尚未开始/)).toBeTruthy()
   })
 })
+
+describe('LifeStrip: fetch lifecycle', () => {
+  it('does not abort the request its own begin() just started (慢 RPC)', async () => {
+    const signals: AbortSignal[] = []
+    const store = createLifeStore().create()
+    const slow = vi.fn<LifeStripProps['refresh']>((signal) => {
+      store.actions.begin()          // 真实 inject 面就是先 begin() 再发请求
+      signals.push(signal)
+      return new Promise<void>(() => { /* 一直in flight, 像真实 RPC */ })
+    })
+    render(<LifeStrip
+      wide expandSidebar={vi.fn()} useSessions={vi.fn()} useWorkspaces={vi.fn()}
+      useStore={bindSnapshotSelector(store)} actions={store.actions} refresh={slow} t={t}
+    />)
+    await waitFor(() => { expect(slow).toHaveBeenCalledTimes(1) })
+    // 此刻 store 已因 begin() 翻成 loading —— 曾经的 bug 就是这一步 abort 掉自己刚发的请求
+    await waitFor(() => { expect(store.getSnapshot().status).toBe('loading') })
+    expect(signals).toHaveLength(1)
+    expect(signals[0]?.aborted).toBe(false)
+  })
+
+  it('加载中不得断言"生命状态链尚未开始"', async () => {
+    const store = createLifeStore().create()
+    const slow = vi.fn<LifeStripProps['refresh']>((signal) => {
+      store.actions.begin()
+      void signal
+      return new Promise<void>(() => {})
+    })
+    render(<LifeStrip
+      wide expandSidebar={vi.fn()} useSessions={vi.fn()} useWorkspaces={vi.fn()}
+      useStore={bindSnapshotSelector(store)} actions={store.actions} refresh={slow} t={t}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: '生命' }))
+    await waitFor(() => { expect(store.getSnapshot().status).toBe('loading') })
+    expect(screen.queryByText(/生命状态链尚未开始/)).toBeNull()   // 答案没到就不能下结论
+  })
+})

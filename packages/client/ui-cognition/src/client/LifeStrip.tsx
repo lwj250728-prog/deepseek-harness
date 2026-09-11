@@ -5,7 +5,7 @@
  * RPC (fetch on mount/expand, manual refresh) — read-only, like the learning
  * area. Collapsed to the sidebar rail it becomes a lone life icon.
  */
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import type { LifeStripProps } from './contract/slots.ts'
 import { ageLabel } from './life-age.ts'
 import css from './LifeStrip.module.css'
@@ -39,13 +39,29 @@ export function LifeStrip({ wide, expandSidebar, useStore, actions, refresh, t }
   const error = useStore(s => s.error)
   const expanded = useStore(s => s.expanded)
 
-  // Fetch on first mount (wide content mounts when the column expands).
+  // Latest values behind refs: the fetch effect must NOT depend on them, or its
+  // own request cancels itself. `refresh` calls `actions.begin()`, which flips
+  // status `idle → loading`; with `status` in the deps that transition ran this
+  // effect's cleanup — `controller.abort()` — on the request just sent, and the
+  // abort is swallowed by `if (signal.aborted) return` in the inject face. Live
+  // evidence: the strip's `POST /api/life.overview` came back `ERR_ABORTED`
+  // (canceled) while a direct call returned a populated chain head, and the
+  // strip sat on "the life state chain has not started yet" forever.
+  const statusRef = useRef(status)
+  statusRef.current = status
+  const refreshRef = useRef(refresh)
+  refreshRef.current = refresh
+
+  // Fetch on first mount (wide content mounts when the column expands). Deps are
+  // empty on purpose: only unmount/remount may cancel, and 'loading' means a
+  // previous mount was cancelled mid-flight, so refetch instead of hanging.
   useEffect(() => {
-    if (status !== 'idle') return
     const controller = new AbortController()
-    void refresh(controller.signal)
+    if (statusRef.current === 'idle' || statusRef.current === 'loading') {
+      void refreshRef.current(controller.signal)
+    }
     return () => { controller.abort() }
-  }, [status, refresh])
+  }, [])
 
   if (!wide) {
     return (
@@ -90,9 +106,12 @@ export function LifeStrip({ wide, expandSidebar, useStore, actions, refresh, t }
         <div className={css.body}>
           {status === 'error'
             ? <div className={css.error}>{t('error.load')}：{error}</div>
-            : head === null && trace.length === 0
-              ? <div className={css.empty}>{t('life.empty')}</div>
-              : (
+            // 加载中不得断言"链尚未开始": 那个结论要等答案到了才能下。
+            : status === 'loading' && head === null && trace.length === 0
+              ? <div className={css.empty}>…</div>
+              : head === null && trace.length === 0
+                ? <div className={css.empty}>{t('life.empty')}</div>
+                : (
                 <>
                   {head !== null && (
                     <div className={css.stateCard}>

@@ -77,6 +77,9 @@ if [ "$SKIP_RESTART" != 1 ]; then
   # 只有真的重启过才需要等服务起来; 干跑(--skip-restart)不该白等 90 秒
   # (实测踩过: 干跑被 60s 超时杀掉, 记录只写了一半 —— 干跑必须快)。
   sleep "$POST_WAIT"
+  # cl-224: 重启成功后记录"本次进程所用产物"的内容基线。检测器据此把"仅 mtime 变新"(重建但内容
+  # 逐字节相同 ⇒ 无需重启)与"内容真的变了"(需要部署)分开; 不记录的话下次重建会被保守判成待部署。
+  python3 "$REPO/dsh-deploy-lib-hashes.py" --record --origin deploy-window >/dev/null 2>&1 || true
 fi
 
 if [ "$SKIP_SUITE" != 1 ]; then
