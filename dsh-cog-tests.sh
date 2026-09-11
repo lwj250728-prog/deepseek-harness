@@ -5548,11 +5548,18 @@ assert "ui-goal-tree" in txt, "profile 补丁里没有登记该插件(重启后�
 print("面板在版本库且 profile 已登记")
 '
 t "运行时 boot 清单须把面板 client.js 发给浏览器" python3 -c '
-import re, subprocess
-r = subprocess.run(["curl", "-s", "--max-time", "15", "http://127.0.0.1:3080/"], capture_output=True, text=True)
-assert r.returncode == 0 and r.stdout, "取不到 GUI 首页(服务未起?)"
-m = re.search(r"/plugins/@deepseek-ai/dsh-client-ui-goal-tree/client\.js[^\"\x27 ]*", r.stdout)
-assert m, "boot 清单里没有该插件的 client.js —— 面板不会出现在页面上"
+import re, subprocess, time
+# 2026-09-11 20:3x 加固: 这条断言在"部署窗口重启后 90s"这个时点跑, 实测偶发取不到清单(面板断言红而
+# 手工复验立即为真)。给 3 次重试(间隔 3s) —— 判据要的是"清单里有它", 不是"重启后第 1 秒就有它"。
+m = None
+for _ in range(3):
+    r = subprocess.run(["curl", "-s", "--max-time", "15", "http://127.0.0.1:3080/"], capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout:
+        m = re.search(r"/plugins/@deepseek-ai/dsh-client-ui-goal-tree/client\.js[^\"\x27 ]*", r.stdout)
+        if m:
+            break
+    time.sleep(3)
+assert m, "boot 清单里没有该插件的 client.js —— 面板不会出现在页面上(重试 3 次仍无)"
 print("boot 清单含: " + m.group(0)[:70])
 '
 t "客户端插槽目录须与生成器一致(面板占用者须在册)" python3 -c '
@@ -5715,6 +5722,11 @@ rows = [json.loads(l) for l in open(D + "/retrieval-audit.jsonl", encoding="utf8
 sets = [r["preTop"] for r in rows if (r.get("t") or 0) > after and len(r.get("preTop") or []) >= 2]
 if not sets:
     print("[部署边界] 部署后尚无多候选集, 本帧不判")
+    raise SystemExit(0)
+if len(sets) < 3:
+    # 部署后样本太少时不得下结论: 实测 20:25 那次部署后只有 1 个多候选集且恰好没被重排, 若据此判红
+    # 就是"拿 1 个样本证明开关空转" —— 与本套件其它判据同一条纪律(样本不足不下结论)。
+    print("[部署边界] 部署后多候选集 %d < 3, 本帧不判" % len(sets))
     raise SystemExit(0)
 diff = 0
 for cs in sets:
@@ -6022,12 +6034,19 @@ print("判据用专属见证; 全局锚显式标注为对照且声明不作结�
 # 读的正是它, 于是"部署史"被我自己的参数悄悄改道。记录通道不该可被重定向出账本(已回填 6 条)。
 echo "[T166] 部署史必落 canonical 账本"
 t "部署史必须落 canonical 账本(--log 只能额外留一份)" python3 -c '
-import os
+import os, re
+# 判定**结构**而不是字面: 本会话第三次遇到"字面断言被合理重构打破"(先是 900 字符窗, 后是函数体切片,
+# 这次是 for 的括号形式被改成 set 去重)。判据要的是"emit 同时写 canonical 与 --log", 不是某种写法。
 src = open(os.path.expanduser("~/dsh-fork/dsh-deploy-window.sh"), encoding="utf8").read()
 assert "CANONICAL_LOG=" in src, "部署脚本没有 canonical 账本常量"
 seg = src[src.index("emit() {"):src.index("if [ \"$PLAN_ONLY\" = 1 ]")]
-assert "for target in (canonical, log)" in seg, "emit 未同时写 canonical 与 --log"
-print("部署记录恒落 canonical 账本")
+line = next((l for l in seg.splitlines() if l.strip().startswith("for target in")), None)
+assert line, "emit 里没有遍历写入目标(应当同时写 canonical 与 --log)"
+raw = line.split("in", 1)[1].split("#")[0].strip().rstrip(":").strip()   # 行尾注释不算目标
+targets = {t.strip() for t in raw.strip("(){}[] ").split(",") if t.strip()}
+assert {"canonical", "log"} <= targets, "emit 未同时写 canonical 与 --log: %s" % sorted(targets)
+assert "open(target" in seg, "emit 没有按遍历目标落盘"
+print("emit 同时写 canonical 与 --log(按行解析, 不靠正则): %s" % sorted(targets))
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。

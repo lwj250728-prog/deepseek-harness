@@ -60,7 +60,7 @@ try:
 except Exception:
     pass
 line = json.dumps(row, ensure_ascii=False) + "\n"
-for target in (canonical, log):        # canonical 必写; --log 额外一份(内容相同)
+for target in {canonical, log}:        # set 去重: --log 缺省时 canonical 与 log 是同一路径, 否则每条写两遍
     if not target:
         continue
     os.makedirs(os.path.dirname(target), exist_ok=True)
