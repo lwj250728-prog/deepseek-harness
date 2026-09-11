@@ -515,7 +515,12 @@ def main() -> int:
                 print('  [%s] %s — %s' % (item['ts'][:16], item['kind'], item['note'][:60]))
         keys = ('decisions', 'injections', 'injectedCountDistribution', 'distinctExperiences',
                 'candidatesMedian', 'vetoJudgedTotal', 'vetoSilentTotal', 'injectedCharsMean')
+        # 2026-09-12 03:0x 实测踩过的读法坑(cl-212 追查时间损失约 10 分钟): `injectedCountDistribution` 数的是
+        # **实际注入条数 len(expIds)**(1/2/3 条), 而 `candidatesMedian` 数的是**原始候选数**(恒 2-3) ——
+        # 两个数不是一回事, 名字却都像在说"候选"。混读会得出"58% 只有 1 个候选"这种错结论(而真相是"过阈候选只有 1 个")。
+        # 故把口径直接印在读数里: 判据的可读性也是判据的一部分。
         print('  %-28s %-22s %-22s' % ('指标', '加宽前', '加宽后'))
+        print('  %-28s %-22s %-22s' % ('(injectedCountDist = 实际注入', '条数 len(expIds);', 'candidatesMedian = 原始候选数)'))
         for key in keys:
             print('  %-28s %-22s %-22s' % (key, payload['before'].get(key), payload['after'].get(key)))
         print('  %-28s %-22s %-22s' % ('-- 新鲜度 --', '', ''))
