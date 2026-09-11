@@ -12,6 +12,9 @@ rm -rf "$TMP"; mkdir -p "$TMP"
 OLD=$(python3 -c 'import datetime;print((datetime.datetime.now()-datetime.timedelta(hours=96)).astimezone().isoformat())')
 printf '{"id":"cl-probe","ts":"%s","status":"open","claim":"合成的停滞项","disposition":"无"}\n' "$OLD" > "$TMP/claims-ledger.jsonl"
 
+# 自 2026-09-12 02:2x 起判据口径 = min(ts, createdTs, tsBackfilled): 自愈/回填换新 ts **不是**推进。
+# 第三例就是守这一点: ts 刚换新、createdTs 在 96h 前的未关项, 必须仍然判红 —— 否则"自愈"自身
+# 会把停滞洗白(cl-052 实测: ts 1.1h / 真实 73.1h)。
 run() { # run <waivers-json>  → 打印判据退出码
   printf '%s' "$1" > "$TMP/stall-waivers.json"
   DSH_COG_LEDGER="$TMP/claims-ledger.jsonl" DSH_STALL_WAIVERS="$TMP/stall-waivers.json" \
@@ -29,7 +32,14 @@ tz = datetime.timezone(datetime.timedelta(hours=8)); now = datetime.datetime.now
 oldest = []
 for k, v in lat.items():
     if v.get("status") in T or not k.startswith("cl-"): continue
-    age = (now - datetime.datetime.fromisoformat(str(v.get("ts"))[:19]).replace(tzinfo=tz)).total_seconds() / 3600.0
+    cands = []
+    for f in ("ts", "createdTs", "tsBackfilled"):
+        t = v.get(f)
+        if t:
+            try: cands.append(datetime.datetime.fromisoformat(str(t)[:19]).replace(tzinfo=tz))
+            except Exception: pass
+    if not cands: continue
+    age = (now - min(cands)).total_seconds() / 3600.0
     oldest.append((age, k))
 oldest.sort(reverse=True)
 assert oldest, "前提不成立"
@@ -51,10 +61,15 @@ run '{"waivers":[]}';           NO_WAIVER=$?
 FUTURE=$(python3 -c 'import datetime;print((datetime.datetime.now()+datetime.timedelta(days=7)).date().isoformat())')
 run "{\"waivers\":[{\"id\":\"cl-probe\",\"reason\":\"合成的证据型等待\",\"until\":\"$FUTURE\"}]}"; WITH_WAIVER=$?
 
-echo "无豁免 exit=$NO_WAIVER (期望非 0=判红) | 有效豁免 exit=$WITH_WAIVER (期望 0=放行)" >&2
+# 第三例: ts 是"刚刚"(自愈/回填换新), 而 createdTs 在 96h 前 ⇒ 判据必须仍然判红(不得被自愈洗白)
+NOW_TS=$(python3 -c 'import datetime;print(datetime.datetime.now().astimezone().isoformat())')
+printf '{"id":"cl-probe2","ts":"%s","createdTs":"%s","status":"open","claim":"自愈换新 ts 的停滞项"}\n' "$NOW_TS" "$OLD" > "$TMP/claims-ledger.jsonl"
+run '{"waivers":[]}'; HEALED_STALE=$?
 
-if [ "$NO_WAIVER" -ne 0 ] && [ "$WITH_WAIVER" -eq 0 ]; then
-  exit 1   # 开火: 判据既抓得住停滞, 也认得有效豁免
+echo "无豁免 exit=$NO_WAIVER (期望非 0=判红) | 有效豁免 exit=$WITH_WAIVER (期望 0=放行) | 自愈换新 ts exit=$HEALED_STALE (期望非 0=判红)" >&2
+
+if [ "$NO_WAIVER" -ne 0 ] && [ "$WITH_WAIVER" -eq 0 ] && [ "$HEALED_STALE" -ne 0 ]; then
+  exit 1   # 开火: 抓得住停滞, 认得有效豁免, 且不被自愈换新的 ts 洗白
 fi
-echo "判据行为不符(无豁免 exit=$NO_WAIVER / 有豁免 exit=$WITH_WAIVER)" >&2
+echo "判据行为不符(无豁免 exit=$NO_WAIVER / 有豁免 exit=$WITH_WAIVER / 自愈换新 ts exit=$HEALED_STALE)" >&2
 exit 4

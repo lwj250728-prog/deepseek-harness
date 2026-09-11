@@ -5200,10 +5200,19 @@ now = datetime.datetime.now(tz)
 oldest = []
 for k, v in lat.items():
     if v.get("status") in TERMINAL or not k.startswith("cl-"): continue
-    try:
-        age = (now - datetime.datetime.fromisoformat(str(v.get("ts"))[:19]).replace(tzinfo=tz)).total_seconds() / 3600.0
-    except Exception:
+    # 2026-09-12 02:2x(cl-055 自愈上线后自查所得): 原来只看 ts, 而**自愈与 ts 回填都会把 ts 换新**
+    # ⇒ 一个停滞数周的项只要被自动流程碰一下, 就在判据眼里变成"刚被人推进过"。这不是假想:
+    #   cl-052 的 ts 是 1.1h(刚被换新), 而它的真实创建/回填时刻是 73.1h 前 —— 旧口径下它整个逃出 72h 窗口。
+    # 口径改为 min(三个时刻都在则取最早): 自动改状态 ≠ 有人推进, 停滞判据必须看"最早那一刻"。
+    cands = []
+    for f in ("ts", "createdTs", "tsBackfilled"):
+        t = v.get(f)
+        if t:
+            try: cands.append(datetime.datetime.fromisoformat(str(t)[:19]).replace(tzinfo=tz))
+            except Exception: pass
+    if not cands:
         continue
+    age = (now - min(cands)).total_seconds() / 3600.0
     oldest.append((age, k))
 oldest.sort(reverse=True)
 assert oldest, "无未关单 cl 项 —— 本断言前提不成立, 不得算通过"
@@ -5224,6 +5233,16 @@ for a, k in stale:
         bad.append(k + "(豁免已过期/无到期日)")
 assert not bad, "未关单 cl 项停滞超过 " + str(WINDOW_H) + "h 且无有效豁免: " + repr(bad[:5])
 print("最老未关单 " + oldest[0][1] + " " + str(round(oldest[0][0], 1)) + "h(窗口 " + str(WINDOW_H) + "h), 豁免 " + str(len(waivers)) + " 项")
+'
+t "自愈/回填换新 ts 不得洗白停滞(探针第三例须开火)" python3 -c '
+# 起因(2026-09-12 02:2x): 我给账本加了写入侧自愈(cl-055), 而自愈会把 ts 换成"状态写入时刻"。
+# 停滞判据若只看 ts, 那么**自动流程碰过一下就等于被人推进过** —— 一个停滞数周的项会因此隐身
+# (实测 cl-052: ts 1.1h / 真实 73.1h, 旧口径下整个逃出窗口)。这里守的是"判据不得被自己的自愈机制洗白":
+# 合成一个 ts 刚换新、而 createdTs 在 96h 前的未关项, 判据必须仍然判红。
+import subprocess
+r = subprocess.run(["bash", "/home/ubuntu/dsh-fork/dsh-guard-t143-probe.sh"], capture_output=True, text=True, timeout=180)
+assert r.returncode == 1, "探针未开火(exit=" + str(r.returncode) + "): 自愈换新的 ts 把停滞洗白了"
+print("探针开火: " + (r.stderr.strip().splitlines() or [""])[-1][:110])
 '
 t "停滞判据须能开火(合成 96h 旧账本)" python3 -c '
 import subprocess
