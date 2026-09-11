@@ -7668,6 +7668,62 @@ assert "new Map(skipHits.map(h => [h.goal.id, \u0027waiting\u0027]))" in src, "s
 assert "skipHits" in lib and "remindHits" in lib, "改动没进产物(重启后仍是旧行为)"
 print("源码与产物均已排除等待型提醒, 且 skipped 计数保留")
 '
+# ── T198 门限裁决的判据必须与样本量自洽(cl-263) ──
+# 起因: 预登记 R1 只说"可排序集占比 +>=10 个百分点", 而样本门只要 >=10 回合 —— n≈10 时该占比的二项标准差
+# 就有 ~13pp ⇒ 判据阈值落在噪声带里, 会把噪声当效应。修法: R1 追加"与当前门限的 Wilson 95% 区间不得重叠"。
+# 本组用**同一份额模式、不同样本量**的沙箱证明这条闸真的在起作用: 小样本 ⇒ 不许判 widen-gate; 大样本 ⇒ 才允许。
+echo "[T198] 门限裁决判据与样本量自洽(区间重叠不得判出空间)"
+t "同一份额模式: 小样本(区间重叠)不得判 widen-gate, 大样本(区间不重叠)才可" python3 -c '
+import json, os, subprocess, tempfile, datetime
+TZ = datetime.timezone(datetime.timedelta(hours=8))
+def build(tmp, n_a, n_b):
+    # 两类经验: HI(高 valence, 放在过阈候选里 ⇒ 相关项总是排第 1, A 档 MRR 不掉) /
+    # LO(低 valence ⇒ 阈下候选永远不是"相关项", 加进来也不改变 MRR)。
+    hi = ["hi_%03d" % i for i in range(60)]
+    lo = ["lo_%03d" % i for i in range(60)]
+    rows_exp = ([{"expId": e, "sar": {"situation": "s", "action": "a", "outcome": "o",
+                                      "outcomeUtility": {"materialGain": 5, "emotionalValence": 5}}} for e in hi]
+                + [{"expId": e, "sar": {"situation": "s", "action": "a", "outcome": "o",
+                                        "outcomeUtility": {"materialGain": 1, "emotionalValence": 0}}} for e in lo])
+    open(os.path.join(tmp, "experiences.jsonl"), "w", encoding="utf8").write(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows_exp) + "\n")
+    now = datetime.datetime.now().timestamp() * 1000
+    rows = []
+    for i in range(n_a):     # A 型: 过阈 2 个候选(相关项 0.60 排第 1)
+        rows.append({"stage": "injected", "t": now - (i + 1) * 60000, "expIds": [hi[i % 60]], "cited": False,
+                     "candidates": 2, "overThreshold": 2,
+                     "preTop": [{"expId": hi[i % 60], "similarity": 0.6}, {"expId": lo[i % 60], "similarity": 0.58}],
+                     "belowGate": [{"expId": lo[(i + 7) % 60], "similarity": 0.30}]})
+    for i in range(n_b):     # B 型: 过阈 1 个; 门限降到 0.45 时多出 2 个**低 valence** 候选(可排序但不改 MRR)
+        rows.append({"stage": "injected", "t": now - (n_a + i + 1) * 60000, "expIds": [hi[(i + 20) % 60]], "cited": False,
+                     "candidates": 1, "overThreshold": 1,
+                     "preTop": [{"expId": hi[(i + 20) % 60], "similarity": 0.60}],
+                     "belowGate": [{"expId": lo[(i + 30) % 60], "similarity": 0.47},
+                                   {"expId": lo[(i + 40) % 60], "similarity": 0.46}]})
+    for i in range(25):      # 数据源健全性: >=30 行审计(这些行无候选记录, 会被时代与有效总体双双排除)
+        rows.append({"stage": "injected", "t": now - 30 * 3600 * 1000 + i * 60000, "expIds": [hi[i % 60]],
+                     "cited": False, "candidates": 2, "overThreshold": 1})
+    open(os.path.join(tmp, "retrieval-audit.jsonl"), "w", encoding="utf8").write(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+    json.dump({"ts": "2026-09-12T00:00:00+08:00", "table": [], "expectation": "沙箱"},
+              open(os.path.join(tmp, "threshold-prereg.json"), "w", encoding="utf8"), ensure_ascii=False)
+    era = datetime.datetime.now(TZ) - datetime.timedelta(hours=6)
+    json.dump({"since": era.isoformat(), "reason": "沙箱"},
+              open(os.path.join(tmp, "sweep-era.json"), "w", encoding="utf8"), ensure_ascii=False)
+def verdict(n_a, n_b):
+    tmp = tempfile.mkdtemp(); build(tmp, n_a, n_b)
+    r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json"],
+                       capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=tmp), timeout=900)
+    assert r.returncode == 0, "扫描失败: " + (r.stderr or r.stdout)[-200:]
+    return json.loads(r.stdout.strip().splitlines()[-1])
+d_small = verdict(8, 2)      # 10 回合: 占比 0.80→1.00(差 20pp), 但 Wilson 区间重叠
+assert d_small["verdict"] != "widen-gate", ("小样本(区间重叠)却判出空间: %s"
+                                            % json.dumps(d_small.get("bestRow"), ensure_ascii=False)[:160])
+assert d_small["verdict"] == "no-headroom", "小样本应按 no-headroom 结案(差在噪声带内): " + str(d_small["verdict"])
+d_big = verdict(75, 25)      # 100 回合: 同一份额模式, 区间不重叠
+assert d_big["verdict"] == "widen-gate", "大样本(区间不重叠)却没判出空间: " + str(d_big["verdict"])
+print("小样本(%d 回合)⇒%s / 大样本(%d 回合)⇒%s" % (d_small["turns"], d_small["verdict"], d_big["turns"], d_big["verdict"]))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
