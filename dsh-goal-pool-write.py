@@ -86,6 +86,15 @@ def main() -> int:
             print('--set 需要 KEY=VALUE: %r' % kv, file=sys.stderr)
             return 3
         k, v = kv.split('=', 1)
+        # 2026-09-12 05:2x: --set 原先把一切值当字符串 —— 而干预实验要靠 `triggerThresholds={"kernel":1.01,...}`
+        # 这类**结构化字段**生效; 若落成字符串, 插件读到的是 str 而不是对象(干预静默无效, 甚至污染池)。
+        # 只对 JSON 容器(以 { 或 [ 开头)做解析, 标量语义保持不变(避免 '5' 变 5 之类的影响面)。
+        if v.strip()[:1] in ('{', '['):
+            try:
+                row[k] = json.loads(v)
+                continue
+            except Exception:
+                pass
         row[k] = v
     for field in args.bump:
         row[field] = int(cur.get(field) or 0) + 1

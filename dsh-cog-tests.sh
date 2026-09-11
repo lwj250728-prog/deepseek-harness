@@ -7178,6 +7178,40 @@ assert "全史读数(下限)" in (r3.stderr + r3.stdout), "缺时代声明时没
 print("时代读数 %d 帧/%.0f%% vs 全史 %d 帧/%.0f%%; 缺声明时已显式警告"
       % (d["frames"], 100 * (d["attributionRate"] or 0), d2["frames"], 100 * (d2["attributionRate"] or 0)))
 '
+# ── T188 唤醒干预工具(cl-264/cl-265) ──
+# 观测分不开因果(唤醒与推进共线于活动期) ⇒ 唯一出路是干预: 关掉某目标的唤醒看推进是否下降。
+# 干预若要可信, 开关必须①真的改到池字段且**类型正确**(--set 传 JSON 原先落成字符串 ⇒ 干预静默无效)
+# ②原值落盘(回滚不靠记忆) ③无原值时拒绝猜测。本组用沙箱守这三件事。
+echo "[T188] 唤醒开关(关得掉 / 类型对 / 回滚有据 / 无据不猜)"
+t "干预开关必须真改池字段且类型正确, 回滚有据, 无据拒绝" python3 -c '
+import json, os, subprocess, tempfile
+W = "/home/ubuntu/dsh-fork/dsh-wake-intervention.py"
+tmp = tempfile.mkdtemp(); pool = os.path.join(tmp, "dormant-goals.jsonl")
+open(pool, "w", encoding="utf8").write(json.dumps({"id": "g-i", "status": "active", "nextAction": "步",
+                                                   "triggerThresholds": {"kernel": 0.6, "focus": 0.55}}, ensure_ascii=False) + "\n")
+env = dict(os.environ, DSH_COG_DIR=tmp)
+def run(*a):
+    return subprocess.run(["python3", W] + list(a), capture_output=True, text=True, env=env, timeout=300)
+def cur():
+    r = None
+    for l in open(pool, encoding="utf8"):
+        if l.strip():
+            x = json.loads(l)
+            if x.get("id") == "g-i": r = x
+    return r
+# ① 无 disable 记录 ⇒ 拒绝回滚(不猜)
+assert run("restore", "g-i").returncode == 2, "无原始阈值可依时仍执行了回滚(在猜)"
+# ② 关闭 ⇒ 阈值必须是**对象**且值为 1.01(命不中任何相似度)
+assert run("disable", "g-i", "--hours", "24", "--reason", "沙箱").returncode == 0, "关闭失败"
+th = cur().get("triggerThresholds")
+assert isinstance(th, dict), "--set 传 JSON 容器落成了 " + type(th).__name__ + "(干预会静默无效)"
+assert th.get("kernel") == 1.01 and th.get("focus") == 1.01, "阈值没抬到命不中的值: " + json.dumps(th, ensure_ascii=False)
+# ③ 恢复 ⇒ 原值回来
+assert run("restore", "g-i").returncode == 0, "恢复失败"
+back = cur().get("triggerThresholds")
+assert back == {"kernel": 0.6, "focus": 0.55}, "恢复的不是原值: " + json.dumps(back, ensure_ascii=False)
+print("关闭 ⇒ {kernel:1.01,focus:1.01}(对象) / 恢复 ⇒ 原值 / 无据拒绝")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
