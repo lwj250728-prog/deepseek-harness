@@ -361,7 +361,13 @@ function parseWaitingMomentLocal(text: string, now: Date = new Date()): Date | n
   const reload = async (): Promise<void> => {
     try {
       const raw = await readFile(poolPath, 'utf8')
-      const loaded = raw.split('\n').filter(Boolean).map(line => JSON.parse(line) as PoolGoal)
+      const rows = raw.split('\n').filter(Boolean).map(line => JSON.parse(line) as PoolGoal)
+      // 2026-09-11 18:0x(cl-233): 池是**只追加 + last-wins** 的账本, 而这里原来把每一行都当成一个
+      // 目标 ⇒ 同一目标的多行会被**各评估一次**(实测 debug 日志出现同一毫秒三行重复), 而写回又按
+      // 池中条目逐个追加 ⇒ 池自我膨胀(实测一个目标从 1 行长到 6 行)。读取侧按 id 去重(末行胜出)。
+      const byId = new Map<string, PoolGoal>()
+      for (const row of rows) byId.set(String(row.id ?? `anon-${byId.size}`), row)
+      const loaded = [...byId.values()]
       // 2026-09-09 10:2x 修复(cl-060): 池里的 rep/kernel/focus 向量是 1024 维(bge-m3 embedding),
       // 而哨兵运行时算的是 384 维哈希袋向量——cosine 长度不等恒返回 0, 于是自 09-04 建池以来
       // triggerCount 一直是 0(机制从未可能触发)。这里在载入时按当前维度自愈: 维度不符就用
@@ -420,11 +426,31 @@ function parseWaitingMomentLocal(text: string, now: Date = new Date()): Date | n
       if (now - last < config.cooldownMs) continue
       const rep = cosine(sVec, goal.repVector)
       if (config.debugSimilarity) {
+        // cl-216 第二版: 唤醒是**两道门**(rep 与 layer 各自过阈)。第一版只记了 rep, 于是
+        // "rep 已越线却仍不唤醒"看起来无从解释 —— 现在把 layer 门的分量/阈值/结论一并落盘。
         try {
+          const kT0 = goal.triggerThresholds?.kernel ?? config.kernelThreshold
+          const fT0 = goal.triggerThresholds?.focus ?? config.focusThreshold
+          let layer0 = 'focus'
+          let sim0 = rep
+          if (goal.kernelVector !== undefined) {
+            const k0 = cosine(sVec, goal.kernelVector)
+            if (k0 > sim0) { sim0 = k0; layer0 = 'kernel' }
+          }
+          if (goal.focusVector !== undefined) {
+            const f0 = cosine(sVec, goal.focusVector)
+            if (f0 > sim0) { sim0 = f0; layer0 = 'focus' }
+          }
+          const need0 = layer0 === 'kernel' ? kT0 : fT0
+          const d = new Date()
+          const p2 = (n: number, w = 2): string => String(n).padStart(w, '0')
+          const off = -d.getTimezoneOffset()
+          const ts = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}T${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}.${p2(d.getMilliseconds(), 3)}${off >= 0 ? '+' : '-'}${p2(Math.floor(Math.abs(off) / 60))}:${p2(Math.abs(off) % 60)}`
           require('node:fs').appendFileSync(join(dirname(config.poolPath), 'dormant-goal-similarity.debug.jsonl'),
-            JSON.stringify({ ts: (() => { const d = new Date(); const p2 = (n: number, w = 2): string => String(n).padStart(w, '0'); const off = -d.getTimezoneOffset(); return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}T${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}.${p2(d.getMilliseconds(), 3)}${off >= 0 ? '+' : '-'}${p2(Math.floor(Math.abs(off) / 60))}:${p2(Math.abs(off) % 60)}` })(), goalId: goal.id, rep: Number(rep.toFixed(4)),
+            JSON.stringify({ ts, goalId: goal.id, rep: Number(rep.toFixed(4)),
               repThreshold: config.repThreshold, pass: rep >= config.repThreshold,
-              cooled: now - last < config.cooldownMs }) + '\n')
+              layer: layer0, layerSim: Number(sim0.toFixed(4)), layerNeed: need0,
+              layerPass: sim0 >= need0, cooled: now - last < config.cooldownMs }) + '\n')
         } catch { /* debug best-effort */ }
       }
       if (rep < config.repThreshold) continue

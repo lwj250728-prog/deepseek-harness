@@ -319,12 +319,20 @@ async function readGoalsSnapshot(poolPath: string): Promise<string> {
     const { readFile } = await import('node:fs/promises')
     const raw = await readFile(target, 'utf8')
     const goals: string[] = []
+    // cl-233: 只追加 + last-wins ⇒ 同一目标可能有多行; 逐行打印会把同一个目标列多次、且读到的是**最老**
+    // 那行的字段。先按 id 收敛到末行(末行胜出)再渲染。
+    const snapshotRows = new Map<string, Record<string, unknown>>()
     for (const line of raw.split('\n').filter(Boolean)) {
       try {
-        const g = JSON.parse(line) as {
-          title?: string; status?: string; triggerCount?: number
-          resumeConditionMet?: boolean; pauseReason?: string
-        }
+        const row = JSON.parse(line) as Record<string, unknown>
+        snapshotRows.set(String(row.id ?? `anon-${snapshotRows.size}`), row)
+      } catch { /* skip */ }
+    }
+    for (const g of snapshotRows.values() as Iterable<{
+      title?: string; status?: string; triggerCount?: number
+      resumeConditionMet?: boolean; pauseReason?: string
+    }>) {
+      try {
         if (g.title) {
           // v25 P1: dormant 且解除条件已满足 → 标"可唤醒"(帧应具体判断该恢复)
           const wakeable = g.status === 'dormant' && g.resumeConditionMet === true
@@ -349,9 +357,18 @@ async function findAllActionableGoals(poolPath: string): Promise<Array<{ title: 
   try {
     const { readFile } = await import('node:fs/promises')
     const raw = await readFile(target, 'utf8')
+    // cl-233: 同上 —— 按 id 收敛到末行再选, 否则行动帧会拿**最老**那行的 nextAction 催办
+    // (实测: 我 17:20 已把孵化目标的 nextAction 前进过, 而帧仍在按 15:36 那行催办同一件事)。
+    const latestRows = new Map<string, Record<string, unknown>>()
     for (const line of raw.split('\n').filter(Boolean)) {
       try {
-        const g = JSON.parse(line) as {
+        const row = JSON.parse(line) as Record<string, unknown>
+        latestRows.set(String(row.id ?? `anon-${latestRows.size}`), row)
+      } catch { /* skip */ }
+    }
+    for (const row of latestRows.values()) {
+      try {
+        const g = row as {
           id?: string; title?: string; status?: string; nextAction?: string; priority?: number
         }
         const na = (g.nextAction ?? '').trim()
