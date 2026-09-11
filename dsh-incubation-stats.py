@@ -379,6 +379,28 @@ else:
         '- **见证不可判定** = 采纳发生但该目标的专属锚在历史快照里没有记录, 无法比较(不得记 0): %d 次' % _witness_undecidable['n'],
         '- 不可判定 = 计数器 adoptedCount 与有据采纳的差额：基线前的存量采纳无时间戳，24h 窗口无从计算；单列，既不进分子也不进分母（incubation-baseline.json 固定该差额）',
     ]
+    # cl-251: 三率回答"唤醒之后有没有变", 归因率回答"是不是这次唤醒让它变的"
+    _wake_attr = None
+    try:
+        _wa_path = os.path.join(D, 'wake-attribution.jsonl')
+        if os.path.exists(_wa_path):
+            _lines = [l for l in open(_wa_path, encoding='utf8') if l.strip()]
+            if _lines:
+                _wake_attr = json.loads(_lines[-1])
+    except Exception:
+        _wake_attr = None
+
+    # cl-251: 唤醒→推进归因并列展示(读最近一条 wake-attribution.jsonl)
+    if _wake_attr:
+        lines += ['',
+                  '**唤醒→推进归因(cl-251)**: 严格(被驱动的那一步确实被推进) **%s%%** / 宽松(窗口内该目标有推进) %s%% '
+                  '—— 窗口 %.0f 分钟, 行动帧 %s 条, 噪声候选: %s'
+                  % (round(100 * (_wake_attr.get('attributionRate') or 0), 1),
+                     round(100 * (_wake_attr.get('looseRate') or 0), 1),
+                     _wake_attr.get('windowMin') or 0, _wake_attr.get('frames'),
+                     '、'.join(_wake_attr.get('noiseCandidates') or []) or '无'),
+                  '- 口径: 严格=核对被驱动的那一步(`before` 前缀一致); 宽松=窗口内该目标有任何推进。'
+                  '两者差距大时先怀疑口径(窗口长度/池重复行时代/nextAction 由别的机制改写), 再谈"提醒没用"']
     text = '\n'.join(lines) + '\n'
     open(os.path.join(D, 'incubation-stats.md'), 'w', encoding='utf8').write(text)
     print(text)

@@ -6253,6 +6253,78 @@ for gid, g in pool.items():
 assert not bad, "疑似重复催办(该目标的 nextAction 可能已完成或不可推进): %s" % bad
 print("active 目标均未出现\"连续未采纳且无等待\"的空转")
 '
+# ── T172 唤醒→推进归因这把尺子本身(cl-251) ──
+# 起因: 这条读数第一版给出"严格 8.4%", 我差点据此判"提醒多半是噪声"。逐项校准发现**两处都是尺子的问题**:
+#   ①窗口 60 分钟把 p90≈45/最大≈60 的真实归因截断(user bug: 取窗口时没看延迟分布);
+#   ②"池变更必须晚于帧时间戳"这个假设对**回合边界**是错的 —— 帧记录是回合结束才落盘的, 它引发的池变更
+#     可能略早于它(实测 change 20:02:46.4 / frame 20:02:47, 一对真归因被漏掉)。
+# 修完两处后严格率 8.4% → 37.7%。故本组守: 前向容差要生效、超容差不得认领、内容不匹配不得认领。
+echo "[T172] 唤醒→推进归因的口径(前向容差生效 / 超容差不认领 / 内容必须匹配)"
+t "合成: 池变更略早于帧(回合边界)必须仍被归因" python3 -c '
+import json, os, subprocess, tempfile, datetime
+tmp = tempfile.mkdtemp()
+base = datetime.datetime(2026, 9, 11, 22, 0, 0).timestamp() * 1000
+step = "读 A/B 后窗裁决 utilityFusion(可执行; 后窗 >=20 回合才判): ①"
+open(os.path.join(tmp, "quiet-driver-frames.jsonl"), "w", encoding="utf8").write(json.dumps({
+    "ts": str(int(base + 1000)), "kind": "action-frame", "goalId": "g", "session": "s", "nextAction": step}) + "\n")
+iso = datetime.datetime.fromtimestamp((base + 500) / 1000).astimezone().isoformat()
+open(os.path.join(tmp, "incubation-log.jsonl"), "w", encoding="utf8").write(json.dumps({
+    "ts": iso, "goalId": "g", "sessionId": "s", "evidence": "pool-change", "before": step, "after": "下一步"}) + "\n")
+open(os.path.join(tmp, "goal-trigger-log.jsonl"), "w", encoding="utf8").write("")
+env = dict(os.environ, DSH_COG_DIR=tmp)
+r = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-wake-attribution.py"), "--json", "--no-record"],
+                   capture_output=True, text=True, timeout=600, env=env)
+assert r.returncode == 0, "工具失败: %s" % (r.stderr or r.stdout)[-160:]
+d = json.loads(r.stdout)
+assert d["attributed"] == 1, "池变更早于帧时间戳 0.5s 时未归因(前向容差没生效): %s" % d
+print("前向容差生效: 1s 内的边界情形被正确归因")
+'
+t "合成: 内容不匹配或超出容差不得认领(防止把同回合的别的改动算成唤醒的功劳)" python3 -c '
+import json, os, subprocess, tempfile, datetime
+def run(frames, changes):
+    tmp = tempfile.mkdtemp()
+    open(os.path.join(tmp, "quiet-driver-frames.jsonl"), "w", encoding="utf8").write(frames)
+    open(os.path.join(tmp, "incubation-log.jsonl"), "w", encoding="utf8").write(changes)
+    open(os.path.join(tmp, "goal-trigger-log.jsonl"), "w", encoding="utf8").write("")
+    env = dict(os.environ, DSH_COG_DIR=tmp)
+    r = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-wake-attribution.py"), "--json", "--no-record"],
+                       capture_output=True, text=True, timeout=600, env=env)
+    assert r.returncode == 0, (r.stderr or r.stdout)[-160:]
+    return json.loads(r.stdout)
+base = datetime.datetime(2026, 9, 11, 22, 0, 0).timestamp() * 1000
+frame = json.dumps({"ts": str(int(base)), "kind": "action-frame", "goalId": "g", "session": "s",
+                    "nextAction": "步骤 A: 做甲事"}) + "\n"
+# ① 内容不同(同会话同窗口) ⇒ 不得认领
+diff = json.dumps({"ts": datetime.datetime.fromtimestamp((base + 60000) / 1000).astimezone().isoformat(),
+                   "goalId": "g", "sessionId": "s", "evidence": "pool-change",
+                   "before": "完全不一样的另一步", "after": "x"}) + "\n"
+assert run(frame, diff)["attributed"] == 0, "内容不匹配却被认领"
+# ② 超出前向容差(变更比帧早 3 小时) ⇒ 不得认领
+early = json.dumps({"ts": datetime.datetime.fromtimestamp((base - 3 * 3600000) / 1000).astimezone().isoformat(),
+                    "goalId": "g", "sessionId": "s", "evidence": "pool-change",
+                    "before": "步骤 A: 做甲事", "after": "x"}) + "\n"
+assert run(frame, early)["attributed"] == 0, "超出前向容差却被认领"
+print("内容与容差两道闸都拦住了误认领")
+'
+# ── T173 断言名不得含双引号(元判据: 防「登记簿与套件永远对不上」) ──
+# 起因: 同一个坑踩了三次(T158 / T169 / T172) —— 断言名里带双引号时, 套件源码里会被转义, 而登记簿里存的是
+# 未转义原名, 于是「声明的开火断言必须真实存在于该组」反复假红。判据: 断言行里出现转义双引号即红(要强调用「」)。
+echo "[T173] 断言名不得含双引号(登记簿匹配不被转义坑)"
+t "套件里所有断言名不得含双引号" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/dsh-cog-tests.sh"), encoding="utf8").read()
+bad = []
+CH = chr(34); ESC = chr(92)
+for line in src.splitlines():
+    st = line.strip()
+    if not st.startswith("t " + CH):
+        continue
+    head = st.split(" python3")[0].split(" bash")[0]
+    if ESC + CH in head:
+        bad.append(head[:50])
+assert not bad, "断言名含双引号(登记簿匹配会被转义坑, 请改用「」): %s" % bad[:4]
+print("套件断言名均不含双引号")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
