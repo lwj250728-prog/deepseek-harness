@@ -49,6 +49,14 @@ NOISE_MAX_RATE = 0.20
 # = 未满足 ⇒ 不该干), 未满足者标 heldByCondition 并从噪声候选里剔除。
 WAIT_CHECK_TIMEOUT = 25.0
 
+# 时代限定(2026-09-12 03:0x, cl-261): 归因率是"这次唤醒有没有推动下一步"的度量, 而下一步是会被**反复重写**的。
+# 用一个目标的**全部历史帧**判它今天是不是噪声, 会把三件事混在一起: ①旧 nextAction 时代的步法(实测
+# goal-experience-library 的 16 帧里有 8 帧是"③a 检查: 可执行, 每次唤醒跑一次, 同读数不重复劳动"这类**幂等复读步**
+# —— 复读步天然产生不了池变更, 于是被判成"没推动") ②被条件门冻结的时段(门开着时驱动侧不产生帧, 率被冻住)
+# ③当前接线。故: 噪声裁决只看最近 NOISE_WINDOW_HOURS 内的帧; 窗口内不足 NOISE_MIN_FRAMES 帧就**不判**
+# (报 stale-window), 而不是拿旧账判今天。
+NOISE_WINDOW_HOURS = 72.0
+
 
 
 # 由**别的机制拥有 nextAction** 的目标: 它们的 nextAction 会被那个机制直接改写, 于是"帧驱动的那一步被推进"
@@ -121,6 +129,9 @@ def main() -> int:
     ap.add_argument('--since', default=None,
                     help='只统计该时刻之后写入的行动帧(ISO 或 epoch ms)。全时读数会把"条件门装好之前"与之后混在一起 '
                          '—— 复测某目标是否变好时, 必须限定时代, 否则结论由旧账决定')
+    ap.add_argument('--noise-window-hours', type=float, default=NOISE_WINDOW_HOURS,
+                    help='噪声裁决只看最近这么多小时内的行动帧(默认 72): 全部历史帧会把旧 nextAction 时代的'
+                         '步法与门控冻结时段混进今天的裁决(cl-261)')
     ap.add_argument('--reverse', action='store_true',
                     help='同时算**反向判据**: 有多少次池推进**没有**对应的行动帧(即没被唤醒也被推进了)')
     args = ap.parse_args()
@@ -152,7 +163,9 @@ def main() -> int:
 
     per: dict[str, dict] = collections.defaultdict(lambda: {
         'frames': 0, 'attributed': 0, 'loose': 0, 'delays': [], 'unattributedFrames': [],
-        'wakes': 0, 'skippedWaiting': 0})
+        'wakes': 0, 'skippedWaiting': 0, 'framesRecent': 0, 'attributedRecent': 0})
+    now_ms = datetime.datetime.now().timestamp() * 1000
+    window_cut_ms = now_ms - args.noise_window_hours * 3600 * 1000
     for wake in triggers:
         gid = str(wake.get('goalId') or '?')
         per[gid]['wakes'] += 1
@@ -162,6 +175,8 @@ def main() -> int:
     for frame in frames:
         gid = str(frame.get('goalId') or '?')
         session = str(frame.get('session') or '')
+        f_ts = ms_of(frame.get('ts')) or 0.0
+        recent = f_ts >= window_cut_ms
         ts = ms_of(frame.get('ts'))
         driven = str(frame.get('nextAction') or '')[:PREFIX]
         slot = per[gid]
@@ -186,8 +201,12 @@ def main() -> int:
         if loose_hit is not None:
             slot['loose'] += 1
             slot['delays'].append(round((ms_of(loose_hit.get('ts')) - ts) / 60000, 1))
+        if recent:
+            slot['framesRecent'] += 1
         if hit is not None:
             slot['attributed'] += 1
+            if recent:
+                slot['attributedRecent'] += 1
         else:
             slot['unattributedFrames'].append({'ts': frame.get('ts'), 'driven': driven})
 
@@ -204,8 +223,13 @@ def main() -> int:
             'looseDelayMin': min(slot['delays']) if slot['delays'] else None,
             'looseDelayMax': max(slot['delays']) if slot['delays'] else None,
             'status': pool_status.get(gid),
-            # 只有"现在仍可被驱动"(active)的目标才谈噪声候选; paused/dormant 的历史帧只作信息展示
-            'noiseCandidate': bool(f >= NOISE_MIN_FRAMES and rate is not None and rate < NOISE_MAX_RATE
+            'framesRecent': slot['framesRecent'],
+            'attributionRateRecent': (round(slot['attributedRecent'] / slot['framesRecent'], 3)
+                                      if slot['framesRecent'] else None),
+            # cl-261: 裁决**只看窗口内的帧**; 窗口内帧数不够就"不判"(stale-window), 不拿旧账判今天。
+            'noiseCandidate': bool(slot['framesRecent'] >= NOISE_MIN_FRAMES
+                                   and slot['framesRecent'] > 0
+                                   and (slot['attributedRecent'] / slot['framesRecent']) < NOISE_MAX_RATE
                                    and pool_status.get(gid) == 'active'),
             'waitChecker': (pool_wait.get(gid) or '').strip() or None,
             # 条件门未满足 ⇒ 期间不会新增行动帧 ⇒ "低归因"在这里不构成噪声证据(cl-252)
@@ -226,8 +250,15 @@ def main() -> int:
         else:
             r['waitConditionMet'] = None
         # 自证: 被条件门挡住的目标必须能被指认出来, 否则剔除动作会变成静默的
-        r['noiseCandidateBasis'] = ('held-by-condition' if r['heldByCondition'] else
-                                    ('rate' if r['noiseCandidate'] else 'not-candidate'))
+        if r['heldByCondition']:
+            r['noiseCandidateBasis'] = 'held-by-condition'
+        elif r['noiseCandidate']:
+            r['noiseCandidateBasis'] = 'rate'
+        elif (r['frames'] >= NOISE_MIN_FRAMES and r['framesRecent'] < NOISE_MIN_FRAMES
+              and pool_status.get(r['goalId']) == 'active'):
+            r['noiseCandidateBasis'] = 'stale-window'   # 历史帧够多但都在窗口外 ⇒ 不判, 而不是判噪声
+        else:
+            r['noiseCandidateBasis'] = 'not-candidate'
     measurable = [r for r in rows if r['frames'] > 0 and not r['governedElsewhere']]
     m_frames = sum(r['frames'] for r in measurable)
     m_attr = sum(r['attributed'] for r in measurable)
@@ -270,8 +301,9 @@ def main() -> int:
         'ts': now_iso(), 'origin': os.environ.get('DSH_RUN_ORIGIN') or 'manual',
         'since': args.since,
         'windowMin': args.window_min, 'preToleranceMin': args.pre_tolerance_min,
-        'noiseRule': ('frames>=%d 且 严格归因率<%d%% 且 目标当前 active 且 **其 waitChecker 未拦着**'
-                      % (NOISE_MIN_FRAMES, int(NOISE_MAX_RATE * 100))),
+        'noiseRule': ('最近 %gh 内 frames>=%d 且 严格归因率<%d%% 且 目标当前 active 且 **其 waitChecker 未拦着**'
+                      % (args.noise_window_hours, NOISE_MIN_FRAMES, int(NOISE_MAX_RATE * 100))),
+        'noiseWindowHours': args.noise_window_hours,
         'heldByCondition': [r['goalId'] for r in rows if r.get('heldByCondition')],
         'frames': total_frames, 'attributed': total_attr,
         'attributionRate': round(total_attr / total_frames, 3) if total_frames else None,
@@ -305,8 +337,9 @@ def main() -> int:
                   ('%.1f%%' % (100 * r['attributionRate'])) if r['attributionRate'] is not None else '-',
                   ('%.1f%%' % (100 * r['looseRate'])) if r['looseRate'] is not None else '-',
                   ('  ← 噪声候选' if r['noiseCandidate'] else
-                   ('  ← 被自身条件门挡着(不计噪声)' if r.get('heldByCondition') else
-                    ('  ← 由别的机制拥有(量不了)' if r['governedElsewhere'] else '')))))
+                   ('  ← 历史帧够多但窗口内不足(不判)' if r.get('noiseCandidateBasis') == 'stale-window' else
+                    ('  ← 被自身条件门挡着(不计噪声)' if r.get('heldByCondition') else
+                     ('  ← 由别的机制拥有(量不了)' if r['governedElsewhere'] else ''))))))
         if reverse is not None:
             print('反向判据: 池推进 %d 次, 其中 **%d 次没有对应的唤醒**(%.1f%%) —— 未被唤醒也被推进 ⇒ 提醒不是推进的必要条件'
                   % (reverse['changes'], reverse['withoutWake'], 100 * (reverse['withoutWakeRate'] or 0)))

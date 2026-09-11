@@ -6808,6 +6808,34 @@ assert per["g-nochecker"]["noiseCandidate"] is True, "无等待条件的真噪�
 assert per["g-paused"]["noiseCandidate"] is False, "暂停目标被列为噪声候选"
 print("held 不入选 / 条件满足后恢复可判 / 无门真噪声仍入选 / 暂停不入选")
 '
+t "噪声裁决只看窗口内的帧(全部历史帧不得判今天, cl-261)" python3 -c '
+import json, os, subprocess, tempfile, datetime
+tmp = tempfile.mkdtemp()
+TZ = datetime.timezone(datetime.timedelta(hours=8)); now = datetime.datetime.now(TZ)
+# g-old: 6 帧全在 100h 前(窗口外) ⇒ 历史够多但不得据此判噪声
+# g-fresh: 6 帧全在 10h 内且 0 归因 ⇒ 仍须判噪声(判据不能被"窗口"这道免责条款架空)
+pool = [{"id": "g-old", "status": "active", "nextAction": "旧步"},
+        {"id": "g-fresh", "status": "active", "nextAction": "新步"}]
+open(os.path.join(tmp, "dormant-goals.jsonl"), "w", encoding="utf8").write("\n".join(json.dumps(r, ensure_ascii=False) for r in pool) + "\n")
+frames = []
+for gid, mins in (("g-old", 6000), ("g-fresh", 600)):
+    for i in range(6):
+        frames.append({"kind": "action-frame", "goalId": gid, "nextAction": "步 " + gid,
+                       "session": "s-probe", "ts": (now - datetime.timedelta(minutes=mins + i * 10)).isoformat()})
+open(os.path.join(tmp, "quiet-driver-frames.jsonl"), "w", encoding="utf8").write("\n".join(json.dumps(r, ensure_ascii=False) for r in frames) + "\n")
+open(os.path.join(tmp, "incubation-log.jsonl"), "w", encoding="utf8").write("\n")
+open(os.path.join(tmp, "goal-trigger-log.jsonl"), "w", encoding="utf8").write("\n")
+r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-wake-attribution.py", "--json", "--no-record"],
+                   capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=tmp), timeout=300)
+assert r.returncode == 0, "归因脚本失败: " + (r.stderr or r.stdout)[-200:]
+d = json.loads(r.stdout.strip().splitlines()[-1])
+per = {g["goalId"]: g for g in d["perGoal"]}
+old, fresh = per["g-old"], per["g-fresh"]
+assert old["framesRecent"] < 5, "窗口内帧数统计不对: " + str(old["framesRecent"])
+assert old["noiseCandidate"] is False and old["noiseCandidateBasis"] == "stale-window", "窗口外的历史帧仍被用来判噪声: " + str(old["noiseCandidateBasis"])
+assert fresh["framesRecent"] >= 5 and fresh["noiseCandidate"] is True, "窗口内的低归因目标反而没被判噪声(免责条款被架空)"
+print("历史帧够多但窗口内不足 ⇒ 不判(stale-window); 窗口内低归因 ⇒ 仍判噪声")
+'
 t "真实读数: 被条件门挡住的目标不得同时出现在噪声候选里" python3 -c '
 import json, os, subprocess
 r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-wake-attribution.py", "--json", "--no-record"],
