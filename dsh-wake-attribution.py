@@ -91,9 +91,17 @@ def main() -> int:
                          '就因"必须晚于帧时间戳"这一假设被漏掉; 内容匹配(before 前缀)仍要求逐字一致, 不会误认')
     ap.add_argument('--json', action='store_true')
     ap.add_argument('--no-record', action='store_true')
+    ap.add_argument('--since', default=None,
+                    help='只统计该时刻之后写入的行动帧(ISO 或 epoch ms)。全时读数会把"条件门装好之前"与之后混在一起 '
+                         '—— 复测某目标是否变好时, 必须限定时代, 否则结论由旧账决定')
+    ap.add_argument('--reverse', action='store_true',
+                    help='同时算**反向判据**: 有多少次池推进**没有**对应的行动帧(即没被唤醒也被推进了)')
     args = ap.parse_args()
     try:
         frames = [r for r in load(FRAMES) if r.get('kind') == 'action-frame']
+        if args.since:
+            cut = ms_of(args.since) or 0.0
+            frames = [r for r in frames if (ms_of(r.get('ts')) or 0) > cut]
         changes = [r for r in load(INCUBATION) if r.get('evidence') == 'pool-change']
         triggers = load(TRIGGERS)
     except FileNotFoundError as exc:
@@ -182,8 +190,40 @@ def main() -> int:
     total_frames = sum(r['frames'] for r in driven_rows)
     total_attr = sum(r['attributed'] for r in driven_rows)
     total_loose = sum(r['loose'] for r in driven_rows)
+    reverse = None
+    if args.reverse:
+        # 反向判据(帧要求的下一个可证伪点): 池推进**不是**由"关于该目标的唤醒"带来的比例。
+        # 若这个比例很高, 说明提醒不是推进的生产者 —— 那么"唤醒→推进"的因果链需要重估, 而不是继续
+        # 用正向归因率给自己打分。判据: 一条 pool-change 若在 (ts - 窗口, ts + 前向容差) 内找不到
+        # 同一目标、同一会话、且 before 与之匹配的行动帧 ⇒ 记为"未被唤醒也被推进"。
+        unown = []
+        for change in changes:
+            gid = str(change.get('goalId'))
+            session = str(change.get('sessionId') or '')
+            cts = ms_of(change.get('ts'))
+            before = str(change.get('before') or '')[:PREFIX]
+            if cts is None:
+                continue
+            owned = False
+            for frame in frames:
+                if str(frame.get('goalId')) != gid:
+                    continue
+                if session and str(frame.get('session') or '') != session:
+                    continue
+                fts = ms_of(frame.get('ts'))
+                if fts is None:
+                    continue
+                if cts - tol_ms <= fts <= cts + window_ms and str(frame.get('nextAction') or '')[:PREFIX] == before:
+                    owned = True
+                    break
+            if not owned:
+                unown.append({'goalId': gid, 'ts': str(change.get('ts'))[:19], 'before': before[:40]})
+        reverse = {'changes': len(changes), 'withoutWake': len(unown),
+                   'withoutWakeRate': round(len(unown) / len(changes), 3) if changes else None,
+                   'sample': unown[-3:]}
     payload = {
         'ts': now_iso(), 'origin': os.environ.get('DSH_RUN_ORIGIN') or 'manual',
+        'since': args.since,
         'windowMin': args.window_min, 'preToleranceMin': args.pre_tolerance_min,
         'noiseRule': 'frames>=%d 且 严格归因率<%d%% 且 目标当前 active' % (NOISE_MIN_FRAMES, int(NOISE_MAX_RATE * 100)),
         'frames': total_frames, 'attributed': total_attr,
@@ -194,6 +234,7 @@ def main() -> int:
         'measurableAttributionRate': round(m_attr / m_frames, 3) if m_frames else None,
         'governedElsewhere': {gid: reason for gid, reason in GOVERNED_ELSEWHERE.items() if gid in per},
         'perGoal': rows,
+        'reverse': reverse,
     }
     if not args.no_record:
         with open(RECORD, 'a', encoding='utf8') as f:
@@ -215,6 +256,11 @@ def main() -> int:
                   ('%.1f%%' % (100 * r['attributionRate'])) if r['attributionRate'] is not None else '-',
                   ('%.1f%%' % (100 * r['looseRate'])) if r['looseRate'] is not None else '-',
                   '  ← 噪声候选' if r['noiseCandidate'] else ('  ← 由别的机制拥有(量不了)' if r['governedElsewhere'] else '')))
+        if reverse is not None:
+            print('反向判据: 池推进 %d 次, 其中 **%d 次没有对应的唤醒**(%.1f%%) —— 未被唤醒也被推进 ⇒ 提醒不是推进的必要条件'
+                  % (reverse['changes'], reverse['withoutWake'], 100 * (reverse['withoutWakeRate'] or 0)))
+            for x in reverse['sample']:
+                print('    %s %s | %s' % (x['ts'], x['goalId'], x['before']))
         if payload['noiseCandidates']:
             print('噪声候选(%s): %s —— 处置: 先逐条排除替代解释(是不是在合法等待/nextAction 由别的机制拥有), '
                   '再考虑降相似度权重/调阈值/改写 focus, 而不是继续解释'

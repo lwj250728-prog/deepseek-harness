@@ -401,6 +401,13 @@ else:
                      '、'.join(_wake_attr.get('noiseCandidates') or []) or '无'),
                   '- 口径: 严格=核对被驱动的那一步(`before` 前缀一致); 宽松=窗口内该目标有任何推进。'
                   '两者差距大时先怀疑口径(窗口长度/池重复行时代/nextAction 由别的机制改写), 再谈"提醒没用"']
+        _rev = _wake_attr.get('reverse') or {}
+        if _rev:
+            lines += ['**反向判据(提醒是否必要)**: 池推进 %s 次中 **%s 次没有对应的唤醒**(%s%%) —— '
+                      '这部分推进**未被唤醒也在发生** ⇒ 唤醒是推进的**贡献者而非必要条件**; '
+                      '读三率时不得把它当成"唤醒驱动了推进"的证据。'
+                      % (_rev.get('changes'), _rev.get('withoutWake'),
+                         round(100 * (_rev.get('withoutWakeRate') or 0), 1))]
     text = '\n'.join(lines) + '\n'
     open(os.path.join(D, 'incubation-stats.md'), 'w', encoding='utf8').write(text)
     print(text)
