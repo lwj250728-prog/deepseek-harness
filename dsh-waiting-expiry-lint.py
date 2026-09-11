@@ -45,7 +45,9 @@ def main() -> int:
         return 3
     after = args.after
     if after is None:
-        after = os.path.getmtime(DEFAULT_LIB) * 1000 if os.path.exists(DEFAULT_LIB) else 0
+        # cl-202: 用共享的部署边界(max(lib 构建, 服务启动)), 不用裸 lib mtime
+        after = int(subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-deploy-boundary.py")],
+                                   capture_output=True, text=True, timeout=60).stdout.strip() or 0)
 
     import datetime
     def ts_ms(v):

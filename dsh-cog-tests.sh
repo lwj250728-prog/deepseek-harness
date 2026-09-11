@@ -5256,8 +5256,11 @@ print("lib 含 preTop 埋点")
 t "部署后审计须真带 preTop 且可排序集在长" python3 -c '
 import json, os
 D = os.path.expanduser("~/.dsh/cognitive-pipeline")
-lib = os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js")
-after = os.path.getmtime(lib) * 1000
+import subprocess
+# cl-202: 部署边界取 max(lib 构建, 服务启动) —— 构建与重启之间有窗口(实测 07:52 构建/07:58:50 重启),
+# 窗口内的行是旧进程写的, 拿它们当"部署后的行为"会误判。
+after = int(subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-deploy-boundary.py"],
+                           capture_output=True, text=True, timeout=60).stdout.strip() or 0)
 rows = [json.loads(l) for l in open(D + "/retrieval-audit.jsonl", encoding="utf8") if l.strip()]
 post = [r for r in rows if (r.get("t") or 0) > after]
 injected = [r for r in post if r.get("stage") == "injected"]
@@ -5268,6 +5271,38 @@ withpre = [r for r in injected if r.get("preTop")]
 assert withpre, "部署后没有任何一条带 preTop —— 埋点没生效"
 multi = [r for r in withpre if len(r["preTop"]) >= 2]
 print("部署后 injected %d 条, 带 preTop %d 条, 其中可排序(>=2 候选) %d 条" % (len(injected), len(withpre), len(multi)))
+'
+# ── T148 账本时间戳必须同形(cl-202) ──
+# 起因: 我从 goal-trigger-log.jsonl 的**最新一行**读出"唤醒已停摆 8 小时"——那行其实是 UTC(`...Z`),
+# 换算到本地是**几分钟前**。误读的根因不是粗心, 而是同一个目录里 13 个账本写 +08:00、2 个写 UTC、2 个写 epoch,
+# 跨账本比时间的前提(同一时间坐标系)不成立。判据: tz-aware ISO 且偏移为 +08:00(epoch 只允许白名单)。
+echo "[T148] 账本时间戳同形(tz-aware +08:00 / epoch 须在白名单)"
+t "账本时间戳必须同形且带 +08:00 偏移" python3 -c '
+import json, os, re
+D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+EPOCH_ALLOW = {"quiet-driver-frames.jsonl", "quiet-driver-heartbeat.jsonl"}  # 历史就是 epoch(ms), 不改历史
+pat = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(\.\d+)?\+08:00$")
+bad, checked = [], 0
+for name in sorted(os.listdir(D)):
+    if not name.endswith(".jsonl") or name in EPOCH_ALLOW:
+        continue
+    path = os.path.join(D, name)
+    rows = [l for l in open(path, encoding="utf8") if l.strip()]
+    if not rows:
+        continue
+    try:
+        r = json.loads(rows[-1])
+    except Exception:
+        continue
+    v = r.get("ts") or r.get("doneAt")
+    if not v:
+        continue
+    checked += 1
+    if not pat.match(str(v)):
+        bad.append("%s: %s" % (name, str(v)[:30]))
+assert not bad, "账本时间戳不同形(UTC/无偏移会让跨账本比时间得出反向结论): " + repr(bad[:4])
+assert checked >= 5, "只检查到 %d 个账本 —— 判据前提不成立" % checked
+print("检查 %d 个账本, 时间戳均为 +08:00 同形" % checked)
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。

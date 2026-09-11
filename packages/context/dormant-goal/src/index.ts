@@ -275,9 +275,19 @@ function parseWaitingMomentLocal(text: string, now: Date = new Date()): Date | n
 }
 
   const triggerLogPath = join(homedir(), '.dsh', 'cognitive-pipeline', 'goal-trigger-log.jsonl')
+  // cl-202: 账本时间戳一律**本地时区 ISO**(带偏移), 不用 toISOString()——
+  // 后者产出 UTC(`...Z`), 与流水线其余账本(全是 +08:00)不同形: 实测我据此把"刚发生"的唤醒
+  // 读成"8 小时前", 差点报出一次不存在的停摆。跨账本比时间的前提是同一个时间坐标系。
+  const localIso = (): string => {
+    const d = new Date()
+    const pad = (n: number, w = 2): string => String(n).padStart(w, '0')
+    const off = -d.getTimezoneOffset()
+    const sign = off >= 0 ? '+' : '-'
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}${sign}${pad(Math.floor(Math.abs(off) / 60))}:${pad(Math.abs(off) % 60)}`
+  }
   const logTriggers = (deltas: Map<string, boolean>, stamps: Map<string, number>, skipped: Map<string, string>): void => {
     const rows = [...deltas.entries()].map(([goalId, adopted]) => JSON.stringify({
-      ts: new Date().toISOString(),
+      ts: localIso(),
       goalId,
       adopted: adopted === true,
       // cl-186: 等待型目标被唤醒时标 skipped —— 不与"可执行唤醒"混计, 否则空转被读成活跃(cl-178)
@@ -484,7 +494,7 @@ function parseWaitingMomentLocal(text: string, now: Date = new Date()): Date | n
         if (!structural && !keywordFallback) continue
         adopted.set(goalId, true)
         void appendFile(incubationLog, JSON.stringify({
-          ts: new Date().toISOString(),
+          ts: localIso(),
           goalId,
           sessionId: session.id,
           evidence: structural ? 'pool-change' : 'keyword-fallback',
