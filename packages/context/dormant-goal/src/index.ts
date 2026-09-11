@@ -58,6 +58,9 @@ export interface Config {
   failThreshold: number
   /** Debug: append every tools/result observation to failure-domains.debug.jsonl. */
   debugFail: boolean
+  /** Debug(cl-216): 把**每次评估每个目标的相似度**落盘 —— 没有它, "某目标从不被唤醒"只能靠猜
+   *  (实测 goal-experience-library 有向量有阈值却 10 小时 0 次唤醒, 无从判断是阈值不可达还是向量不对)。 */
+  debugSimilarity: boolean
   /** Adoption keywords per goal id: when the turn text contains one of these
    * after a trigger, the trigger counts as ADOPTED (trigger→adopt statistics).
    * Empty map disables adoption detection (v1: triggers only). */
@@ -75,6 +78,7 @@ export const Config: z<Config> = z.object({
   failSink: z.boolean().default(true),
   failThreshold: z.number().default(3),
   debugFail: z.boolean().default(false),
+  debugSimilarity: z.boolean().default(false),
   adoptKeywords: z.dict(z.array(z.string())).default({}),
 })
 
@@ -415,6 +419,14 @@ function parseWaitingMomentLocal(text: string, now: Date = new Date()): Date | n
       const last = lastTrigger.get(goal.id) ?? 0
       if (now - last < config.cooldownMs) continue
       const rep = cosine(sVec, goal.repVector)
+      if (config.debugSimilarity) {
+        try {
+          require('node:fs').appendFileSync(join(dirname(config.poolPath), 'dormant-goal-similarity.debug.jsonl'),
+            JSON.stringify({ ts: new Date().toISOString(), goalId: goal.id, rep: Number(rep.toFixed(4)),
+              repThreshold: config.repThreshold, pass: rep >= config.repThreshold,
+              cooled: now - last < config.cooldownMs }) + '\n')
+        } catch { /* debug best-effort */ }
+      }
       if (rep < config.repThreshold) continue
       // refine: best layer among kernel/focus
       let layer = 'focus'
