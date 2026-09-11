@@ -163,13 +163,25 @@ def close_env_alert() -> None:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def last_row_for(rows, rid):
+    """该 id 的**当前**状态 = 末行(last-wins)。只追加账本上"历史里存在某个非终态行"
+    不等于"当前是待办" —— 这正是本工具每 5 分钟重追加一次 cl-deploy-pending 的根因:
+    close_alert 用 `any(非终态)` 找开单行, 于是一条早已被 done 覆盖的旧 open 行会被
+    反复"关闭"一次, 每次追加一行(实测 107 行, 占账本 20.7%)。"""
+    for r in reversed(rows):
+        if r.get("id") == rid:
+            return r
+    return None
+
+
 def write_alert(message):
     rows = []
     if os.path.exists(LEDGER):
         rows = [json.loads(l) for l in open(LEDGER, encoding="utf8") if l.strip()]
-    existing = next((r for r in reversed(rows) if r.get("id") == "cl-deploy-pending"
-                     and r.get("status") not in TERMINAL), None)
-    row = dict(existing or {})
+    current = last_row_for(rows, "cl-deploy-pending")
+    if current is not None and current.get("status") not in TERMINAL and current.get("claim") == message:
+        return False                      # 已经是同一条待办: 不追加(幂等)
+    row = dict(current or {})
     row.update({
         "id": "cl-deploy-pending", "status": "open", "claim": message,
         "source": "dsh-deploy-intent.py --watch",
@@ -183,10 +195,9 @@ def write_alert(message):
 
 def close_alert():
     rows = [json.loads(l) for l in open(LEDGER, encoding="utf8") if l.strip()] if os.path.exists(LEDGER) else []
-    open_row = next((r for r in reversed(rows) if r.get("id") == "cl-deploy-pending"
-                     and r.get("status") not in TERMINAL), None)
-    if open_row is None:
-        return False
+    open_row = last_row_for(rows, "cl-deploy-pending")
+    if open_row is None or open_row.get("status") in TERMINAL:
+        return False                      # 当前已是终态: 关闭是幂等的, 不得再追加一行
     row = dict(open_row)
     row.update({"status": "done", "doneNote": "部署意图已消解(lib 已不新于服务启动)", "ts": now_iso()})
     with open(LEDGER, "a", encoding="utf8") as f:

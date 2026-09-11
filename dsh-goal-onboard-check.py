@@ -87,8 +87,11 @@ def main() -> int:
             problems.append('%s: T57 无专属见证锚(请在 dsh-incubation-stats.py 的 GOAL_WITNESS 中登记)' % gid)
         if gid in anchored and gid not in chained:
             problems.append('%s: T21f 已被链锚指向但无经验继承(补一条带该 chainId 的经验)' % gid)
-        dims = {len(goal.get(key) or []) for key in ('repVector', 'kernelVector', 'focusVector')}
-        if dims != {384}:
+        # 2026-09-11 18:2x 修: 这行的原话是"缺失可留空由插件自愈", 但判据把缺失当成维度 0 一起开火 ——
+        # 于是"我按设计清空向量等自愈"反而被判缺陷(实测: 经验库目标清空三个向量后本组转红)。
+        # 缺失(None/空)不是缺陷, 插件载入时按文本自愈; 只有**非空却长度不对**才是真异常。
+        dims = {len(goal.get(key) or []) for key in ('repVector', 'kernelVector', 'focusVector')} - {0}
+        if dims and dims != {384}:
             problems.append('%s: 向量维度异常 %s(应为 {384}; 缺失可留空由插件自愈)' % (gid, sorted(dims)))
 
     if problems:

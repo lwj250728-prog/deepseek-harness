@@ -36,8 +36,12 @@ for (const line of readFileSync(join(homedir(), '.dsh/cognitive-pipeline/dormant
 const goal = pool.get(GOAL)
 if (goal === undefined) { console.error(`池里没有 ${GOAL}`); process.exit(2) }
 
-/** 样本: 目标样本(该目标工作时的真实情境) 与 无关样本(判别力对照)。 */
-const SAMPLES: Array<{ name: string; kind: 'target' | 'control'; file: string }> = [
+/** 样本: 目标样本(该目标工作时的真实情境) 与 无关样本(判别力对照)。
+ *  --samples <json> 可直接内联样本([{name,kind,text}]), 供测试自带样本、不依赖会话临时文件。 */
+const samplesArg = arg('samples')
+interface SampleRow { name: string; kind: 'target' | 'control'; file?: string; text?: string }
+const INLINE_SAMPLES: SampleRow[] = samplesArg === undefined ? [] : JSON.parse(readFileSync(samplesArg, 'utf8'))
+const SAMPLES: SampleRow[] = INLINE_SAMPLES.length > 0 ? INLINE_SAMPLES : [
   { name: '帧-1749(真实情境, 已用日志 rep 标定)', kind: 'target', file: '/tmp/sit-1749.txt' },
   { name: '无关-SPA发布(exp_35 原文)', kind: 'control', file: '/tmp/sit-control-spa.txt' },
   { name: '无关-小说目标 kernel', kind: 'control', file: '/tmp/sit-control-novel.txt' },
@@ -67,8 +71,9 @@ for (const cand of all) {
   const kV = situationVector(cand.kernel)
   const fV = situationVector(cand.focus)
   for (const s of SAMPLES) {
-    let text = ''
-    try { text = readFileSync(s.file, 'utf8') } catch { continue }
+    let text = s.text ?? ''
+    if (text === '' && s.file !== undefined) { try { text = readFileSync(s.file, 'utf8') } catch { continue } }
+    if (text === '') continue
     const sVec = situationVector(text)
     const rep = cosine(sVec, repV)
     const k = cosine(sVec, kV)

@@ -1394,10 +1394,12 @@ t "dormant-goal产物含status门(已部署)" bash -c "grep -q 'goal.status' '$H
 t "行动帧侧只选active" python3 -c '
 import os
 s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts")).read()
-i = s.index("findAllActionableGoals")
-seg = s[i:i+900]
+i = s.index("async function findAllActionableGoals")
+j = s.index(chr(10) + "}" + chr(10), i)          # 取函数体到最后一行单独的 }
+seg = s[i:j]
 assert "status === " in seg and chr(39) + "active" + chr(39) in seg, "行动帧选择器未限定 active"
 '
+
 t "小说目标处于paused" python3 -c '
 import json, os
 p = os.path.expanduser("~/.dsh/cognitive-pipeline/dormant-goals.jsonl")
@@ -5770,6 +5772,115 @@ import subprocess
 r = subprocess.run(["bash", "/home/ubuntu/dsh-fork/dsh-guard-t158-probe.sh"], capture_output=True, text=True, timeout=180)
 assert r.returncode == 1, "开火探针未按预期开火(exit=%d): %s" % (r.returncode, r.stderr[-160:])
 print("探针开火: " + r.stderr.strip().splitlines()[-1][:80])
+'
+# ── T159 宿主面构建新鲜度(cl-229: 改了源码没重跑 emit ⇒ 打包静默带旧代码) ──
+# 起因: 第二道门埋点 15:50 写进源码却从未进产物, 而宿主面构建是两段式 —— `tsc -b` 先把 JS 发到
+# `lib/types/`, `tsdown --env.DSH_BUILD_FACE host` 再以 `lib/types/{index}.js` 为 entry 打包 `lib/index.js`。
+# 只跑后半段会**打包旧 emit 并报成功**(实测: 补跑 tsc 前 grep layerSim = 0, 之后重打包才 = 1), 于是
+# "改动生效了"与"构建成功了"之间没有任何判据。本组守: src 不得比 lib/types 的 emit 新。
+echo "[T159] 宿主面构建新鲜度(src 不得比 lib/types 的 emit 新)"
+t "凡已 emit 的包, src 不得比 lib/types 新(否则打包只会带旧代码)" python3 -c '
+import os, glob
+stale = []
+for src in sorted(glob.glob(os.path.expanduser("~/dsh-fork/packages/*/*/src/index.ts"))):
+    pkg = os.path.dirname(os.path.dirname(src))
+    emitted = os.path.join(pkg, "lib/types/index.js")
+    if not os.path.exists(emitted):
+        continue                      # 未构建的包不判(不是本组的事)
+    gap = os.path.getmtime(src) - os.path.getmtime(emitted)
+    if gap > 1:                       # 1s 容忍文件系统粒度
+        stale.append("%s(落后 %ds)" % (pkg.split("packages/")[-1], int(gap)))
+assert not stale, "改了源码却没重跑 tsc emit ⇒ 宿主打包只会带旧 emit(cl-229): " + "; ".join(stale[:5])
+print("所有已 emit 的包都不落后于源码")
+'
+# ── T160 休眠目标文本调参工具的自证(cl-234) ──
+# 这轮用 dsh-layer-sim/tune 把"卡在第二道门"的目标定量修掉(layerSim 0.4961 → 0.5767)。工具本身必须
+# 带两道自证, 否则"我测量过了"就是不可证伪的话:
+#   ①标定闸: 复算值与已落盘日志值不一致时必须**拒绝出结论**(exit 3), 而不是照样打印;
+#   ②判别力: 指标必须能分开"和目标样本共享工作词汇"与"关键词堆砌"(后者不得过门) —— 若两者都过或都不
+#     过, 说明这个相似度不可用于裁决(这也正是 cl-063 自激要防的)。
+echo "[T160] 文本调参工具自证(标定闸必修红 / 关键词堆砌不得过门)"
+t "标定不一致时工具必须拒绝出结论(exit 3)" python3 -c '
+import json, os, subprocess, tempfile
+tmp = tempfile.mkdtemp()
+cand = os.path.join(tmp, "c.json"); samp = os.path.join(tmp, "s.json")
+json.dump([{"name": "X", "kernel": "经验库 注入 排序", "focus": "读 replay 可排序集"}], open(cand, "w"))
+json.dump([{"name": "目标", "kind": "target", "text": "读 replay 的可排序集与 lift, 判是否接线效用项"}], open(samp, "w"))
+r = subprocess.run(["npx", "tsx", os.path.expanduser("~/dsh-fork/dsh-layer-tune.tsx"),
+                    "--candidates", cand, "--samples", samp, "--expect-rep", "0.9999"],
+                   cwd=os.path.expanduser("~/dsh-fork"), capture_output=True, text=True, timeout=600)
+assert r.returncode == 3, "标定不一致却没有拒绝出结论(rc=%d): %s" % (r.returncode, (r.stdout or r.stderr)[-200:])
+print("标定不一致 ⇒ exit 3(拒绝出结论)")
+'
+t "判别力: 词汇不相交者不得过门, 共享工作词汇者可过门" python3 -c '
+import json, os, subprocess, tempfile
+tmp = tempfile.mkdtemp()
+target = "读 replay 的可排序集与 lift, 判是否接线效用项; 核对引用率/采纳数与注入文本量; 看 A/B 后窗回合数与回滚条件; 回写目标池与账本"
+cand = os.path.join(tmp, "c.json"); samp = os.path.join(tmp, "s.json")
+# 负对照必须是**词汇不相交**的另一领域文本(拿目标文本的词拼"堆砌"是错误用例: 字符袋必然过门)
+json.dump([
+  {"name": "OFFTOPIC", "kernel": "视觉模型辅助SPA自动化: 截图理解、ProseMirror 聚焦、分卷设置向导拦截、发布流程阻塞排查。", "focus": "调用视觉模型读页面截图, 解析后点击按钮并输入正文, 处理弹窗栈与瞬时提示。"},
+  {"name": "GOOD", "kernel": "经验库注入排序与学习回路的接线与退役: 让被注入的经验更常被真正用上。涉及影子对照三档、可排序集与 MRR/top-1、引用率与采纳率、注入文本量成本、A/B 前后窗与最小护栏、预登记判据与回滚条件、埋点与分通道得分。",
+   "focus": "读 dsh-library-replay.py 的可排序集与 lift, 判是否接线效用项; 核对引用率/采纳数与注入文本量; 核对判据口径(样本不足不下结论); 看 A/B 后窗回合数与方向; 回写目标池与账本。"},
+], open(cand, "w"), ensure_ascii=False)
+json.dump([{"name": "目标样本", "kind": "target", "text": target},
+           {"name": "无关对照", "kind": "control", "text": "视觉模型辅助SPA自动化，模型无法读取截图，需调Qwen3-VL处理base64图像；番茄发布流程最后一步阻塞，正文内含分卷设置向导状态化拦截。"}],
+          open(samp, "w"), ensure_ascii=False)
+r = subprocess.run(["npx", "tsx", os.path.expanduser("~/dsh-fork/dsh-layer-tune.tsx"),
+                    "--candidates", cand, "--samples", samp],
+                   cwd=os.path.expanduser("~/dsh-fork"), capture_output=True, text=True, timeout=600)
+out = r.stdout
+assert r.returncode == 0, "工具未正常输出(rc=%d): %s" % (r.returncode, out[-200:])
+soup_disc = [l for l in out.splitlines() if l.startswith("OFFTOPIC") and "判别差" in l]
+assert soup_disc and "目标过门 no" in soup_disc[0], "词汇不相交的候选竟然过门(指标不可用于裁决): %s" % soup_disc[:1]
+good_disc = [l for l in out.splitlines() if l.startswith("GOOD") and "判别差" in l]
+assert good_disc and "目标过门 YES" in good_disc[0], "共享工作词汇者未能过门(指标过严/不可达): %s" % good_disc[:1]
+print("堆砌 no / 共享词汇 YES(指标有判别力)")
+'
+# ── T161 C 档预登记裁决(cl-173 退役) ──
+# 学习权重换常数已按预登记退役; 裁决必须由**代码**给出而不是靠人记(否则样本到 30 那天还得靠回想)。
+echo "[T161] C 档预登记裁决机械出判决"
+t "C 档裁决: 样本不足不下结论 / C<=A 退役 / C>A 可再议 / 缺数据不可算" python3 -c '
+import importlib.util, os
+spec = importlib.util.spec_from_file_location("replay", os.path.expanduser("~/dsh-fork/dsh-library-replay.py"))
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+f = mod._arm_c_verdict
+assert f(None, None, 40, 0.5, 0.3, 30)["verdict"] == "unavailable", "缺 C 数据时未报 unavailable"
+assert f(0.40, 0.20, 29, 0.50, 0.30, 30)["verdict"] == "insufficient", "样本不足却下了结论"
+assert f(0.42, 0.20, 35, 0.50, 0.28, 30)["verdict"] == "retire-c-arm", "C<=A 且样本够却未判退役"
+assert f(0.60, 0.40, 35, 0.50, 0.28, 30)["verdict"] == "keep-c-arm-candidate", "C>A 却仍判退役"
+print("四处判决口径一致")
+'
+# ── T162 目标池写侧不变量(cl-235: 只治读不治写, last-wins 反而会读到更旧的意图) ──
+# 起因: cl-233 我只改了读侧(last-wins)就关单, 而写侧继续追加 —— 旁路帧实测到最危险的形态:
+# **末行携带比前一行更旧的 nextAction**(写者拿旧快照回写) ⇒ last-wins 读到的意图反而变旧, 帧会重复
+# 催办已完成的事。压实/补向量只是收拾现场, 判据必须守住这两条不变量。
+echo "[T162] 目标池写侧不变量(末行不得回退 / 不得纯重复追加)"
+t "同一目标的末行时间戳不得早于前一行(意图回退)" python3 -c '
+import json, os, collections
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/dormant-goals.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+by = collections.defaultdict(list)
+for r in rows: by[str(r.get("id"))].append(r)
+def stamp(g):
+    return str(g.get("lastActionAt") or g.get("lastProgressAt") or g.get("createdAt") or "")
+bad = [gid for gid, g in by.items() if len(g) >= 2 and stamp(g[-1]) < stamp(g[-2])]
+assert not bad, "末行比前一行更旧(写者拿旧快照回写 ⇒ last-wins 会复活旧意图): %s" % bad
+print("每个目标的末行都不早于前一行")
+'
+t "同一目标不得存在逐字节相同的重复行(纯重复追加)" python3 -c '
+import json, os, collections
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/dormant-goals.jsonl")
+rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
+by = collections.defaultdict(list)
+for r in rows: by[str(r.get("id"))].append(r)
+dup = []
+for gid, g in by.items():
+    seen = collections.Counter(json.dumps(x, ensure_ascii=False, sort_keys=True) for x in g)
+    n = sum(c - 1 for c in seen.values() if c > 1)
+    if n: dup.append("%s(%d 行重复)" % (gid, n))
+assert not dup, "存在逐字节重复行(写侧幂等缺失): %s" % dup
+print("无逐字节重复行")
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
