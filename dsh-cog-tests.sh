@@ -7255,6 +7255,50 @@ assert era_d["roundsWithBelowGate"] == 35, "时代内带埋点回合不对: " + 
 assert r3.returncode != 0, "边界在未来却照样出了裁决(拿全史凑数)"
 print("全史 55/35 ⇒ 时代后 35/35 ⇒ 未来边界明确拒绝(exit %d)" % r3.returncode)
 '
+# ── T190 干预判读器必须三方向可分(cl-265) ──
+# 24h 后要判"唤醒是不是推进的因", 判据事先写死在工具里(免得我又临时定口径)。三类结果必须分得开:
+# ①目标推进速率降 >=50% 且降幅大于对照 ⇒ causal ②没降 ⇒ no-effect(提醒无独立贡献) ③窗口内仍被唤醒 ⇒ contaminated(结论作废)。
+echo "[T190] 干预判读器(causal / no-effect / contaminated 三方向)"
+t "干预判读须三方向可分: 降幅大⇒causal / 无降幅⇒no-effect / 窗口内仍唤醒⇒contaminated" python3 -c '
+import json, os, subprocess, tempfile, datetime
+TZ = datetime.timezone(datetime.timedelta(hours=8)); now = datetime.datetime.now(TZ)
+def build(tmp, target_after, ctrl_after, last_trigger=None):
+    start = now - datetime.timedelta(hours=24)
+    log = []
+    def put(goal, t, n):
+        for i in range(n):
+            log.append({"ts": (t + datetime.timedelta(minutes=i + 1)).isoformat(), "goalId": goal,
+                        "sessionId": "s", "evidence": "pool-change", "before": "a", "after": "b"})
+    put("goal-t", start - datetime.timedelta(hours=12), 8)
+    put("goal-t", start, target_after)
+    put("goal-c", start - datetime.timedelta(hours=12), 8)
+    put("goal-c", start, ctrl_after)
+    open(os.path.join(tmp, "incubation-log.jsonl"), "w", encoding="utf8").write(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in log) + "\n")
+    open(os.path.join(tmp, "dormant-goals.jsonl"), "w", encoding="utf8").write("\n".join(json.dumps(r, ensure_ascii=False) for r in [
+        {"id": "goal-t", "status": "active", "triggerThresholds": {"kernel": 1.01, "focus": 1.01}, "lastTriggerAt": last_trigger},
+        {"id": "goal-c", "status": "active"}]) + "\n")
+    open(os.path.join(tmp, "wake-interventions.jsonl"), "w", encoding="utf8").write(json.dumps(
+        {"ts": start.isoformat(), "event": "disable", "goal": "goal-t",
+         "thresholdsBefore": {"kernel": 0.6, "focus": 0.55},
+         "thresholdsAfter": {"kernel": 1.01, "focus": 1.01}}, ensure_ascii=False) + "\n")
+def run(tmp):
+    r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-wake-intervention-readout.py", "--target", "goal-t", "--json"],
+                       capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=tmp), timeout=300)
+    assert r.returncode == 0, "判读器失败: " + (r.stderr or r.stdout)[-200:]
+    return json.loads(r.stdout.strip().splitlines()[-1])
+t1 = tempfile.mkdtemp(); build(t1, 1, 8)
+d1 = run(t1)
+assert d1["verdict"] == "causal", "降幅大却没判 causal: " + json.dumps(d1, ensure_ascii=False)[:200]
+t2 = tempfile.mkdtemp(); build(t2, 8, 8)
+d2 = run(t2)
+assert d2["verdict"] == "no-effect", "没降幅却判了 " + str(d2["verdict"])
+t3 = tempfile.mkdtemp(); build(t3, 1, 8, last_trigger=(now - datetime.timedelta(hours=6)).isoformat())
+d3 = run(t3)
+assert d3["verdict"] == "contaminated", "窗口内仍被唤醒却没判 contaminated: " + str(d3["verdict"])
+assert "controls" in d1 and d1["controls"], "判读缺对照目标读数(判据要求与对照比)"
+print("降幅大⇒causal / 无降幅⇒no-effect / 窗口内仍唤醒⇒contaminated")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
