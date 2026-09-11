@@ -6048,6 +6048,50 @@ assert {"canonical", "log"} <= targets, "emit 未同时写 canonical 与 --log: 
 assert "open(target" in seg, "emit 没有按遍历目标落盘"
 print("emit 同时写 canonical 与 --log(按行解析, 不靠正则): %s" % sorted(targets))
 '
+# ── T167 孵化预测机制不得腐烂成"永远命中"(cl-249) ──
+# 起因: 把孵化从"能自证"推进到"能预测"时先写出的区间是"二项比例区间 × horizon ±1" ⇒ 10 次唤醒给出
+# [0,8], 几乎必然命中 —— 那就是**自我确认**, 正是该机制要防的东西。改用 beta-二项预测区间(共轭、
+# 小样本校准好)并加严口径(点估计误差 <=1 才算 tightHit)。本组守两件:
+#   ①结算逻辑真的能判未命中(合成: 实际落在区间外 ⇒ 必须 miss);
+#   ②区间宽度必须随样本量收窄(样本越少越宽是诚实的; 若恒宽, 说明没在算)。
+echo "[T167] 孵化预测(结算能判未命中 / 区间随样本收窄)"
+t "合成预测: 实际落在区间外必须判未命中(不得恒命中)" python3 -c '
+import json, os, subprocess, tempfile
+tmp = tempfile.mkdtemp()
+open(os.path.join(tmp, "goal-trigger-log.jsonl"), "w", encoding="utf8").write("".join(
+    json.dumps({"ts": "2026-09-11T00:00:0%d+08:00" % i, "goalId": "g", "adopted": False}) + "\n" for i in range(6)))
+# 预登记: 基准 0 次唤醒/0 采纳, 区间 [0,0] ⇒ 之后 5 次唤醒里出现 3 次采纳就必须判"未命中"
+open(os.path.join(tmp, "incubation-predictions.jsonl"), "w", encoding="utf8").write(json.dumps({
+    "ts": "2026-09-11T10:00:00+08:00", "kind": "register", "version": 2, "horizonWakes": 5,
+    "predictions": [{"goalId": "g", "basisTriggers": 0, "basisAdoptions": 0, "horizonWakes": 5,
+                     "adoptInterval": [0, 0], "adoptPoint": 0, "advanceInterval": None, "advancePoint": None,
+                     "rule": "x", "deadline": "2026-09-14T00:00:00+08:00", "note": "y"}]}, ensure_ascii=False) + "\n")
+# 实际: 补齐到 5 次唤醒且其中 3 次采纳
+with open(os.path.join(tmp, "goal-trigger-log.jsonl"), "a", encoding="utf8") as f:
+    for i in range(3):
+        f.write(json.dumps({"ts": "2026-09-11T11:00:0%d+08:00" % i, "goalId": "g", "adopted": True}) + "\n")
+env = dict(os.environ, DSH_COG_DIR=tmp)
+r = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-incubation-forecast.py"), "--score", "--json"],
+                   capture_output=True, text=True, timeout=600, env=env)
+assert r.returncode == 0, "结算失败: %s" % (r.stderr or r.stdout)[-200:]
+d = json.loads(r.stdout)
+assert d["scored"], "已到结算点却没有结算任何预测"
+row = d["scored"][0]
+assert row["actualAdoptions"] == 3 and row["hit"] is False, "区间 [0,0] 遇上实际 3 次竟判命中: %s" % row
+assert d["hitRate"] == 0.0, "命中率未如实反映未命中: %s" % d["hitRate"]
+print("合成未命中被判出: 实际 %s 区间 %s ⇒ hit=%s" % (row["actualAdoptions"], row["interval"], row["hit"]))
+'
+t "预测区间必须随样本量收窄(beta-二项, 不是恒宽)" python3 -c '
+import importlib.util, os
+spec = importlib.util.spec_from_file_location("fx", os.path.expanduser("~/dsh-fork/dsh-incubation-forecast.py"))
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+small = mod.beta_binomial_interval(1, 5, 10)      # 5 次唤醒 1 次成功
+large = mod.beta_binomial_interval(200, 1000, 10)  # 1000 次唤醒 200 次成功(同样的 20%)
+assert small != large, "样本量不影响区间宽度(说明没在算): %s vs %s" % (small, large)
+assert (large[1] - large[0]) < (small[1] - small[0]), "大样本区间未收窄: %s vs %s" % (small, large)
+assert large[1] - large[0] <= 5, "大样本区间过宽(不可证伪): %s" % (large,)
+print("区间随样本收窄: 小样本 %s → 大样本 %s" % (small, large))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
