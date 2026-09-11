@@ -6886,6 +6886,20 @@ else:
     assert d["verdict"] in ("widen-gate", "tradeoff-ceiling", "no-headroom"), "非法判读: " + str(d["verdict"])
     print("阈下候选已采集(" + str(diag["belowGate"]) + " 个), 判读 " + str(d["verdict"]))
 '
+t "阈下候选埋点必须真的在产物里(且只在记录路径上, 不参与选择)" python3 -c '
+# 2026-09-12 04:1x: 与 T178"写入点须在产物里"同型 —— 埋点加在**源码**却漏在**产物**里, 是最安静的一种失败:
+# 判据会一直报 inconclusive, 而我可能去怀疑判据本身。这里守三件: ①源码里有采集(过滤前留住被丢掉的候选)
+# ②产物里有(重启后才会生效) ③采集只进记录(审计), 不改选择(排序/过滤顺序未变)。
+import os
+src = open(os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/src/index.ts"), encoding="utf8").read()
+lib = open(os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/lib/index.js"), encoding="utf8").read()
+assert "belowGate" in src and "belowGate" in lib, "阈下候选埋点不在源码或产物里"
+assert "scoredBeforeThreshold" in src, "源码里没有在阈值过滤前留住候选(采集点缺失)"
+assert ".filter(hit => hit.similarity >= minSimilarity)" in src, "阈值过滤本身不见了(选择行为被改动)"
+assert src.index("droppedByThreshold") < src.index("const hits = scoredBeforeThreshold.filter"), "采集点须在过滤前"
+assert "candidates: hits.length" in src and "overThreshold: cooled.length" in src, "候选/过阈计数口径被改动(埋点不该改选择)"
+print("埋点在源码与产物中, 且只落审计不改选择")
+'
 t "扫描工具必须真的消费 belowGate(有则走真判读 / 无则报 inconclusive)" python3 -c '
 # 2026-09-12 04:0x: 埋点(belowGate)落地后, 通道还差**消费**那一半 —— 若扫描工具不并进阈下候选,
 # 埋点就是个摆设。用合成沙箱两方向验证(不碰真库): 带 belowGate ⇒ 走真判读分支; 去掉 ⇒ 报 inconclusive。
