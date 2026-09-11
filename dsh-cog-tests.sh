@@ -7636,6 +7636,24 @@ assert not bad_frame, "条件门依赖行动帧产出(全部门挂上时会饿�
 assert not no_ext, "条件门没挂在任何外部产物上(可能在等我自己开工): " + repr(no_ext)
 print("池内 %d 个门: 均不读行动帧, 且都挂在外部产物上" % len(checkers))
 '
+# ── T197 等待型目标不得收到提醒(两侧同一判据, cl-267) ──
+# 起因: cl-250 修的是"哨兵不打扰了、行动帧却照样催办"; 实测(我这一帧的帧头就是证据)现状**反过来** ——
+# 行动帧侧早按 waitChecker 过滤(tsx 直调真实池实测: 带门 ⇒ 三个目标全排除), 哨兵侧却只把
+# shouldSkipAsWaiting 当**标注**, 提醒照发 ⇒ "发了提醒却注定推不动"的事件在两条读数里都隐形。
+# 修法: 哨兵命中里凡 shouldSkipAsWaiting 为真者不进提醒块, 但仍进 skipped 观测计数(读数不失真)。
+echo "[T197] 等待型目标不得收到提醒(源码结构 + 计数仍留痕)"
+t "哨兵不得给等待型目标发提醒, 但 skipped 计数必须照记" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/src/index.ts"), encoding="utf8").read()
+lib = open(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/lib/index.js"), encoding="utf8").read()
+assert "const skipHits = hits.filter" in src, "没有把等待型命中挑出来(提醒照发的老形态)"
+assert "const remindHits = hits.filter" in src, "没有从提醒块里排除等待型命中"
+assert "if (remindHits.length === 0)" in src, "全为等待型时没有提前返回(仍会发提醒)"
+assert "remindHits.slice(0, 1)" in src, "提醒块不是从 remindHits 里取的(排除没生效)"
+assert "new Map(skipHits.map(h => [h.goal.id, \u0027waiting\u0027]))" in src, "skipped 计数没有照记(读数会失真)"
+assert "skipHits" in lib and "remindHits" in lib, "改动没进产物(重启后仍是旧行为)"
+print("源码与产物均已排除等待型提醒, 且 skipped 计数保留")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

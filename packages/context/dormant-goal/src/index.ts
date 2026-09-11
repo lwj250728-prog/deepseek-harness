@@ -474,8 +474,29 @@ function parseWaitingMomentLocal(text: string, now: Date = new Date()): Date | n
     }
     if (hits.length === 0) return decision
     hits.sort((a, b) => b.similarity - a.similarity)
+    // cl-267 (2026-09-12 07:3x): **检查器未满足 ⇒ 连提醒都不发**(两侧同一判据)。
+    // cl-250 修的是"哨兵不打扰了、行动帧却照样催办"; 而实测(本帧帧头就是证据)现状是**反过来的**:
+    // 行动帧侧早已按 waitChecker 过滤(我的 tsx 直调实测: 带门 ⇒ 三个目标全被排除), 哨兵侧却只把
+    // shouldSkipAsWaiting 的结果当**标注**(skipped=waiting), 提醒照发 ⇒ "发了提醒却注定推不动"的事件
+    // 在两条读数里都隐形(cl-267)。这里改为: 命中的目标里, 凡 shouldSkipAsWaiting 为真者**不进提醒块**,
+    // 但仍进 skipped 观测计数(读数不失真)。
+    const skipHits = hits.filter(h => shouldSkipAsWaiting(h.goal as { nextAction?: string, waitChecker?: string }))
+    const skippedIds = new Set(skipHits.map(h => h.goal.id))
+    const remindHits = hits.filter(h => !skippedIds.has(h.goal.id))
+    const registerAndCount = (): void => {
+      const set = pending.get(agent.session.id) ?? new Map<string, string>()
+      for (const h of hits) set.set(h.goal.id, poolSnapshot(h.goal))
+      pending.set(agent.session.id, set)
+      bumpMany(new Map(hits.map(h => [h.goal.id, false])),
+        new Map(skipHits.map(h => [h.goal.id, 'waiting'])))
+    }
+    if (remindHits.length === 0) {
+      // 全部命中都是等待型 ⇒ 本轮不发提醒, 但触发/等待计数照记(否则"条件门挡住了多少提醒"无从观测)
+      registerAndCount()
+      return decision
+    }
     let summary = '目标孵化提醒'
-    const blocks = hits.slice(0, 1).map(({ goal, layer, similarity }) => {
+    const blocks = remindHits.slice(0, 1).map(({ goal, layer, similarity }) => {
       const body = layer === 'kernel' && goal.kernel ? goal.kernel : goal.focus ?? goal.kernel ?? ''
       const title = goal.title ?? goal.id
       summary = `目标孵化提醒: ${title} (${layer} ${similarity.toFixed(2)})`
@@ -490,12 +511,7 @@ function parseWaitingMomentLocal(text: string, now: Date = new Date()): Date | n
       source: { kind: 'plugin', plugin: name, form: 'notice', summary },
     })
     // Register triggered goals for this turn's adoption check; count triggers.
-    const set = pending.get(agent.session.id) ?? new Map<string, string>()
-    for (const h of hits) set.set(h.goal.id, poolSnapshot(h.goal))
-    pending.set(agent.session.id, set)
-    bumpMany(new Map(hits.map(h => [h.goal.id, false])),
-      new Map(hits.filter(h => shouldSkipAsWaiting(h.goal as { nextAction?: string, waitChecker?: string }))
-        .map(h => [h.goal.id, 'waiting'])))
+    registerAndCount()
     return { kind: 'enter', messages: [...decision.messages, block] }
   }, 'dormant-goal sentinel')
 
