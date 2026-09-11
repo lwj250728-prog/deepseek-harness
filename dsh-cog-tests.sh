@@ -7347,6 +7347,52 @@ assert d_bad["preregMismatch"] is True, "不符时没有标记 preregMismatch"
 assert d_bad["representativenessReviewRequired"] is True, "不符时没有要求样本代表性复核(会直接采信裁决)"
 print("字段齐备 / 一致⇒不报警 / 不符⇒要求复核(沙箱裁决 %s)" % d_ok["verdict"])
 '
+# ── T192 截断闸与"期望自身可疑"都必须开口(tp-169 后续) ──
+# 起因(测试审视帧 06:1x): ①`insufficient-belowgate-capped` 这条闸在代码里但**从没被断言过** —— 它若静默失效,
+# 被截断的样本会照出裁决(正是今天修过两次的偏差); ②我把"期望自身也是在被截断样本上算的"写进了文件, 却没人读它 ⇒
+# 不符时会默认"裁决错了"。本组守两件事: 顶满上限 ⇒ 不出裁决; 不符且期望可疑 ⇒ 置 preregSuspect。
+echo "[T192] 截断闸(cappedRounds) + 期望自身可疑(preregSuspect)"
+t "顶满上限不得出裁决 / 期望可疑须与不符一并标出" python3 -c '
+import json, os, subprocess, tempfile, datetime
+tmp = tempfile.mkdtemp(); ids = ["exp_%03d" % i for i in range(60)]
+open(os.path.join(tmp, "experiences.jsonl"), "w", encoding="utf8").write("\n".join(json.dumps(
+    {"expId": e, "sar": {"situation": "s", "action": "a", "outcome": "o",
+                         "outcomeUtility": {"materialGain": i % 10, "emotionalValence": i % 5}}},
+    ensure_ascii=False) for i, e in enumerate(ids)) + "\n")
+now = datetime.datetime.now().timestamp() * 1000
+def build(bg_len):
+    rows = []
+    for k in range(18):
+        rows.append({"stage": "injected", "t": now - 30 * 3600 * 1000 + k * 60000, "expIds": [ids[k]], "cited": False,
+                     "candidates": 2, "overThreshold": 1,
+                     "preTop": [{"expId": ids[k], "similarity": 0.6}, {"expId": ids[k + 1], "similarity": 0.55}]})
+    for k in range(12):
+        rows.append({"stage": "injected", "t": now - (k + 1) * 600000, "expIds": [ids[k]], "cited": False,
+                     "candidates": 2, "overThreshold": 1,
+                     "preTop": [{"expId": ids[k], "similarity": 0.6}, {"expId": ids[k + 1], "similarity": 0.55}],
+                     "belowGate": [{"expId": ids[(k + j) % 60], "similarity": 0.4 - 0.0001 * j} for j in range(bg_len)]})
+    open(os.path.join(tmp, "retrieval-audit.jsonl"), "w", encoding="utf8").write(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+def run(expect, truncated, bg_len):
+    build(bg_len)
+    json.dump({"ts": "2026-09-12T00:00:00+08:00", "table": [], "expectation": "沙箱期望",
+               "expectedVerdict": expect, "computedOnTruncatedSample": truncated},
+              open(os.path.join(tmp, "threshold-prereg.json"), "w", encoding="utf8"), ensure_ascii=False)
+    era = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))) - datetime.timedelta(hours=6)
+    r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json", "--post-since", era.isoformat()],
+                       capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=tmp), timeout=900)
+    assert r.returncode == 0, "沙箱裁决失败: " + (r.stderr or r.stdout)[-200:]
+    return json.loads(r.stdout.strip().splitlines()[-1])
+# ① 每轮 500 条阈下(顶满上限) ⇒ 必须报 capped, 不出真裁决
+d1 = run("no-headroom", False, 500)
+assert d1["verdict"] == "insufficient-belowgate-capped", "顶满上限却出了裁决: " + str(d1["verdict"])
+assert d1["subGateDiagnostics"]["cappedRounds"] > 0, "没报出顶满的回合数"
+# ② 不顶满 + 期望不符 + 期望自身在被截断样本上算的 ⇒ 必须同时置 mismatch 与 suspect
+d2 = run("widen-gate", True, 2)
+assert d2["preregMismatch"] is True, "不符却没标 preregMismatch"
+assert d2["preregSuspect"] is True, "期望自身可疑却没标 preregSuspect(会默认裁决错)"
+print("顶满⇒%s / 不符且期望可疑⇒mismatch+suspect" % d1["verdict"])
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

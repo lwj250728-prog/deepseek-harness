@@ -276,11 +276,16 @@ def main() -> int:
         prereg = None
     expected = (prereg or {}).get('expectedVerdict')
     mismatch = bool(expected) and expected != verdict
+    # 2026-09-12 06:1x: 期望**自身**可能是在被截断的样本上算的(threshold-prereg.json 里的
+    # computedOnTruncatedSample) ⇒ 不符时不能默认"裁决错了", 要把这一层也说出来。
+    prereg_suspect = mismatch and bool((prereg or {}).get('computedOnTruncatedSample'))
     payload = {'ts': datetime.datetime.now().astimezone().isoformat(),
                'label': args.label, 'currentGate': CURRENT_GATE, 'turns': len(records),
                'preregExpected': expected,
                'preregExpectation': (prereg or {}).get('expectation'),
                'preregMismatch': mismatch,
+               'preregSuspect': prereg_suspect,
+               'preregTruncationNote': (prereg or {}).get('truncationNote') if prereg_suspect else None,
                'representativenessReviewRequired': mismatch,
                'subGateDiagnostics': diag, 'roundsWithBelowGate': rounds_with_bg,
                'table': table, 'verdict': verdict, 'reason': reason, 'bestRow': best,
@@ -305,6 +310,9 @@ def main() -> int:
     if expected:
         print('预注册期望: %s %s' % (expected, '(**与裁决不符** ⇒ 先做样本代表性复核, 不得直接采信裁决)' if mismatch
                                      else '(与裁决一致)'))
+        if prereg_suspect:
+            print('  ⚠ 该期望自身是在**被截断的样本**上算的(%s) ⇒ 不符时优先复核期望, 而不是直接改判据'
+                  % str((prereg or {}).get('truncationNote'))[:80])
     elif (prereg or {}).get('expectation'):
         print('预注册期望(未含 expectedVerdict, 无法机械比对): %s' % str(prereg.get('expectation'))[:80])
     return 0
