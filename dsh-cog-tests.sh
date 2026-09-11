@@ -5407,6 +5407,14 @@ for name in sorted(os.listdir(D)):
         if not pat.match(str(v)):
             bad.append("%s: %s" % (name, str(v)[:30]))
             break
+if bad:
+    # 诊断必须落盘: `t` 助手把断言输出丢进 /dev/null, 于是"哪一行违规"从来没进过日志 ——
+    # 上一次这条红我查了三轮窗口才确认不可复现。现在违规行直接写文件, 下次一眼可见。
+    import json as _json
+    with open(os.path.join(D, "ts-form-violations.jsonl"), "a", encoding="utf8") as _f:
+        _f.write(_json.dumps({"ts": datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat(),
+                               "origin": "dsh-cog-tests.sh T148", "afterBoundary": after,
+                               "violations": [str(x)[:80] for x in bad[:10]]}, ensure_ascii=False) + "\n")
 assert not bad, "账本时间戳不同形(UTC/无偏移会让跨账本比时间得出反向结论): " + repr(bad[:4])
 assert checked >= 5, "只检查到 %d 个账本 —— 判据前提不成立" % checked
 print("检查 %d 个账本, 时间戳均为 +08:00 同形" % checked)
@@ -6091,6 +6099,67 @@ assert small != large, "样本量不影响区间宽度(说明没在算): %s vs %
 assert (large[1] - large[0]) < (small[1] - small[0]), "大样本区间未收窄: %s vs %s" % (small, large)
 assert large[1] - large[0] <= 5, "大样本区间过宽(不可证伪): %s" % (large,)
 print("区间随样本收窄: 小样本 %s → 大样本 %s" % (small, large))
+'
+# ── T168 条件型等待必须在驱动侧也生效(cl-250) ──
+# 起因: 我给检索目标挂了日期门(waitChecker exit 1 = 到 09-17 才做), 而**行动帧照样驱动了它** —— 因为
+# waitChecker 只被 dormant-goal 哨兵读(用于标记 trigger-log 的 skipped), 真正驱动我做事的 quiet-driver
+# 不读它。跨插件语义只被一侧读, 于是"门"是半个门(cl-073 的同型: 暂停只停了一半)。
+echo "[T168] 条件型等待必须在驱动侧生效(选目标时排除未满足条件者)"
+t "合成池: waitChecker 未满足的目标不得被选为可行动目标" python3 -c '
+import json, os, subprocess, tempfile
+tmp = tempfile.mkdtemp(); pool = os.path.join(tmp, "pool.jsonl"); script = os.path.join(tmp, "s.mts")
+rows = [{"id": "ready", "title": "该干", "status": "active", "nextAction": "做事", "priority": 1},
+        {"id": "gated", "title": "日期门", "status": "active", "nextAction": "等 09-17",
+         "waitChecker": "test $(date +%s) -ge 9999999999", "priority": 9}]
+open(pool, "w", encoding="utf8").write("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+open(script, "w", encoding="utf8").write(
+  "import { readFileSync } from \"node:fs\"\n"
+  "import { selectActionableGoals } from \"/home/ubuntu/dsh-fork/packages/context/quiet-driver/src/index.ts\"\n"
+  "const text = readFileSync(process.argv[2], \"utf8\")\n"
+  "const none = selectActionableGoals(text).map(g => g.id)\n"
+  "const gated = selectActionableGoals(text, g => (g.waitChecker ?? \"\") !== \"\").map(g => g.id)\n"
+  "console.log(JSON.stringify({ none, gated }))\n")
+r = subprocess.run(["npx", "tsx", script, pool], cwd=os.path.expanduser("~/dsh-fork"),
+                   capture_output=True, text=True, timeout=600)
+assert r.returncode == 0, "选择器脚本失败: %s" % (r.stderr[-200:])
+d = json.loads(r.stdout.strip().splitlines()[-1])
+assert set(d["none"]) == {"ready", "gated"}, "不传等待谓词时应原样返回(向后兼容): %s" % d["none"]
+assert d["gated"] == ["ready"], "带等待条件的目标未被排除(条件型等待在驱动侧失效): %s" % d["gated"]
+print("等待谓词生效: 未满足条件者被排除, 不传谓词时向后兼容")
+'
+t "驱动侧必须真的把 waitChecker 接进选目标路径(不是只在哨兵侧)" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
+assert "function waitConditionMet(" in src, "驱动侧没有 waitChecker 求值器"
+i = src.index("async function findAllActionableGoals")
+seg = src[i:src.index("\n}", i)]
+assert "waitConditionMet(" in seg and "waitChecker" in seg, "选目标路径没有把 waitChecker 接进去(门只是半个门)"
+print("findAllActionableGoals 已把 waitChecker 接进候选过滤")
+'
+# ── T169 llm 跳词准入必须需证据(cl-099 裁决) ──
+echo "[T169] llm 跳词准入需证据(离线读数: 120 条零证据/零命中/零引用)"
+t "无证据的 llm 跳词不得以「新鲜」为由进入或保留" python3 -c '
+import os
+src = open(os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts"), encoding="utf8").read()
+i = src.index("for (const [word, prior] of existing)")
+seg = src[i:i + 900]
+assert "const proven = prior.citedCount > 0 || (prior.evidenceCount ?? 0) > 0" in seg, "证据判定被改动了"
+assert "if (!proven) continue" in seg, "无证据的 llm 变体仍可继承(裁决要求: 需证据)"
+assert "fresh" not in seg.split("if (!proven)")[0].split("const proven")[1], "仍有\"新鲜\"作为准入理由"
+print("llm 跳词继承只认证据或引用")
+'
+t "表里不得存在超期且零证据零引用的 llm 跳词(病态复发的探针)" python3 -c '
+import json, os, time
+p = os.path.expanduser("~/.dsh/cognitive-pipeline/trigger_jumps.json")
+rows = json.load(open(p, encoding="utf8"))
+ttl = 7 * 24 * 3600 * 1000
+now = time.time() * 1000
+bad = ["%s(证据 %s/引用 %s, 龄 %.1fd)" % (r.get("jumpWord"), r.get("evidenceCount"), r.get("citedCount"),
+                                         (now - (r.get("createdAt") or 0)) / 86400000)
+       for r in rows if r.get("source") == "llm" and (r.get("evidenceCount") or 0) == 0
+       and (r.get("citedCount") or 0) == 0 and (now - (r.get("createdAt") or 0)) > ttl]
+assert not bad, "存在超期且零证据的 llm 跳词(该通道的\"新鲜\"宽限又变成永不过期?): %s" % bad[:4]
+print("无超期零证据的 llm 跳词(龄在 TTL 内的条目由重建周期自然淘汰)")
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。

@@ -2288,11 +2288,14 @@ export class CognitivePipelineService extends Service {
     for (const [word, prior] of existing) {
       if (prior.source !== 'llm') continue
       if (jumps.has(word)) continue
-      // cl-099: 继承前先过证据寿命——被引用过或有证据的永久保留; 新鲜的保留
-      // (给它机会开火并被引用); 既无证据又不新鲜的退场, 不再无限累积。
+      // cl-099 裁决(2026-09-11 21:0x, 离线读数): **改为需证据**。
+      // 数据: llm 通道 120 条, evidenceCount 全为 0、hitCount 合计 0、citedCount 合计 0;
+      // cooccurrence 通道 280 条(证据 905 / 命中 7)。且这 120 条的 createdAt 全是同一时刻
+      // (生产侧每次重建**重新创建**它们) ⇒ 原来的"新鲜"宽限永远不会到期, 证据门形同虚设:
+      // 既无证据又"永远新鲜"的条目可以无限累积, 却从未开火也从未被引用。
+      // 故: llm 条目进入/保留必须**有证据或被引用**; 无证据者不再以"新鲜"为由占用表位。
       const proven = prior.citedCount > 0 || (prior.evidenceCount ?? 0) > 0
-      const fresh = now - prior.createdAt < JUMP_EVIDENCE_TTL_MS
-      if (!proven && !fresh) continue
+      if (!proven) continue
       jumps.set(word, prior)
     }
 
@@ -2310,10 +2313,9 @@ export class CognitivePipelineService extends Service {
       // cl-099: 保留位优先给"有证据的"变体, 其次给仍在寿命内的新变体;
       // 过寿命且零证据的变体不再占用保留位(它们本已在上一步被过滤掉, 这里是
       // 双保险, 防止未来改动重新放它们进来)。
+      // cl-099 裁决后: 保留位只给**有证据或被引用**的 llm 变体(不再给"零证据但新鲜"的)
       const provenLlm = llmJumps.filter(jump => jump.citedCount > 0 || (jump.evidenceCount ?? 0) > 0)
-      const freshLlm = llmJumps.filter(jump => !provenLlm.includes(jump)
-        && now - jump.createdAt < JUMP_EVIDENCE_TTL_MS)
-      const llmKept = [...provenLlm, ...freshLlm].slice(0, llmFloor)
+      const llmKept = provenLlm.slice(0, llmFloor)
       const cooccurrence = list.filter(jump => jump.source !== 'llm')
         .sort((a, b) => maxJumpWeight(b) - maxJumpWeight(a))
         .slice(0, Math.max(0, cap - llmKept.length))

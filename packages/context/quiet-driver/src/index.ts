@@ -13,6 +13,7 @@
  * @module @deepseek-ai/dsh-quiet-driver
  */
 
+import { execSync } from 'node:child_process'
 import { hostname } from 'node:os'
 import { appendFile, mkdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -367,7 +368,28 @@ export interface ActionableGoal {
  * @param rowsText - 池文件的原始 JSONL 文本。
  * @returns 可行动目标, 保持池内出现顺序(调用方再做冷却/等待/停滞过滤)。
  */
-export function selectActionableGoals(rowsText: string): readonly ActionableGoal[] {
+/**
+ * 条件型等待求值(cl-250): 与 dormant-goal 哨兵**同一语义** —— 跑 `waitChecker`, exit 0 = 条件已满足
+ * (该干), 非 0/超时/测不出 = 视为未满足(不驱动)。两处必须同判据, 否则又会出现"条件只被一侧读"的
+ * 半生效(cl-073): 哨兵不打扰了, 行动帧却照样催办。
+ * @param cmd - 目标池里的 waitChecker 命令行。
+ * @returns 条件是否已满足。
+ */
+function waitConditionMet(cmd: string): boolean {
+  const trimmed = cmd.trim()
+  if (trimmed === '') return false
+  try {
+    execSync(trimmed, { timeout: 20_000, stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function selectActionableGoals(
+  rowsText: string,
+  isWaiting: (goal: { id?: string; waitChecker?: string }) => boolean = () => false,
+): readonly ActionableGoal[] {
   const latestRows = new Map<string, Record<string, unknown>>()
   for (const line of rowsText.split('\n').filter(Boolean)) {
     try {
@@ -382,6 +404,10 @@ export function selectActionableGoals(rowsText: string): readonly ActionableGoal
     }
     const na = (g.nextAction ?? '').trim()
     if (g.title && g.status === 'active' && na.length > 0 && na !== '无' && na !== 'none') {
+      // cl-250: 条件型等待必须在**驱动侧**也生效。此前 waitChecker 只被 dormant-goal 哨兵读(用于标记
+      // trigger-log 的 skipped), 而真正驱动我做事的行动帧不读它 ⇒ 一个"日期门/条件门"目标照样被催办:
+      // 实测 21:0x 的帧驱动的正是我刚挂上日期门(到 09-17)的检索目标。跨插件语义必须两侧读同一字段(cl-073)。
+      if (isWaiting(g as { id?: string; waitChecker?: string })) continue
       out.push({ title: g.title, nextAction: na, id: g.id ?? 'unknown', priority: g.priority ?? 0 })
     }
   }
@@ -392,7 +418,10 @@ async function findAllActionableGoals(poolPath: string): Promise<ActionableGoal[
   const target = expandHome(poolPath)
   try {
     const { readFile } = await import('node:fs/promises')
-    return [...selectActionableGoals(await readFile(target, 'utf8'))]
+    // 与哨兵同一判据: 条件已满足(exit 0) ⇒ 不算等待; 非 0/测不出 ⇒ 视为等待(不驱动)
+    return [...selectActionableGoals(await readFile(target, 'utf8'),
+      goal => (goal.waitChecker ?? '').trim() !== '' && !waitConditionMet(String(goal.waitChecker)))]
+
   } catch {
     return []
   }
