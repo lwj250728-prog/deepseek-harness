@@ -19,7 +19,8 @@ import subprocess
 import sys
 
 REPO = os.path.expanduser('~/dsh-fork')
-TOOL = os.path.join(REPO, 'dsh-refine-eval.py')
+# 工具路径可注入(仅供测试: 用它喂一份坏输出, 验证"解析不了 ⇒ exit 3 不放行")
+TOOL = os.environ.get('DSH_REFINE_EVAL') or os.path.join(REPO, 'dsh-refine-eval.py')
 
 
 def main() -> int:

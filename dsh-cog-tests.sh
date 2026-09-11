@@ -6152,14 +6152,16 @@ t "表里不得存在超期且零证据零引用的 llm 跳词(病态复发的�
 import json, os, time
 p = os.path.expanduser("~/.dsh/cognitive-pipeline/trigger_jumps.json")
 rows = json.load(open(p, encoding="utf8"))
-ttl = 7 * 24 * 3600 * 1000
 now = time.time() * 1000
+# tp-146 已实证效果(2026-09-11 22:29 重建后 llm 条目 120 → 0), 故探针**收紧到即时**:
+# 只要表里出现 source=llm 且零证据零引用的条目就红 —— 不再等 7 天 TTL(那会让"生产侧又重造零证据变体"
+# 这类回归整整一周无人发现)。旧的 TTL 口径是把"还没到期的零证据条目"当合法, 而实测证明它们本就不该存在。
 bad = ["%s(证据 %s/引用 %s, 龄 %.1fd)" % (r.get("jumpWord"), r.get("evidenceCount"), r.get("citedCount"),
                                          (now - (r.get("createdAt") or 0)) / 86400000)
        for r in rows if r.get("source") == "llm" and (r.get("evidenceCount") or 0) == 0
-       and (r.get("citedCount") or 0) == 0 and (now - (r.get("createdAt") or 0)) > ttl]
-assert not bad, "存在超期且零证据的 llm 跳词(该通道的\"新鲜\"宽限又变成永不过期?): %s" % bad[:4]
-print("无超期零证据的 llm 跳词(龄在 TTL 内的条目由重建周期自然淘汰)")
+       and (r.get("citedCount") or 0) == 0]
+assert not bad, "表内出现零证据零引用的 llm 跳词(准入判据回归了?): %s" % bad[:4]
+print("表内 llm 跳词 %d 条, 全部有证据或被引用" % sum(1 for r in rows if r.get("source") == "llm"))
 '
 # ── T170 孵化预测的 register→score 往返与 last-wins(cl-249 的机制面) ──
 # 起因(测试审视帧): T167 只守了"能判未命中"与"区间随样本收窄"两个**片段**, 而这条机制真正会被用的是
@@ -6324,6 +6326,82 @@ for line in src.splitlines():
         bad.append(head[:50])
 assert not bad, "断言名含双引号(登记簿匹配会被转义坑, 请改用「」): %s" % bad[:4]
 print("套件断言名均不含双引号")
+'
+# ── T174 归因读数的噪声判据与「由别的机制拥有」单列(cl-251/cl-252) ──
+# 起因(测试审视帧): 这条读数即将用来**决定是否下调某个目标的相似度权重**, 而它的两个关键口径没有覆盖:
+#   ①噪声候选的阈值化判据(frames>=5 且严格率<20% 且当前 active) —— 写成"恰好为 0"时 1/15 与 0/15 会被
+#     当成两回事, 太二值;
+#   ②「nextAction 由别的机制拥有」的目标必须**单列且不计入候选**(闸门会自己改写 adoption-rate 的
+#     nextAction, 实测它宽松 100% 而严格 0% —— 那是尺子量不了, 不是提醒没用)。
+echo "[T174] 归因读数的噪声判据(阈值化 + 由别的机制拥有者单列)"
+t "合成: 由别的机制拥有的目标不得被列为噪声候选; 阈值化判据须生效" python3 -c '
+import json, os, subprocess, tempfile, datetime
+tmp = tempfile.mkdtemp()
+base = datetime.datetime(2026, 9, 11, 22, 0, 0).timestamp() * 1000
+frames, changes, triggers = [], [], []
+# 三个目标各 6 条帧、严格归因全 0: A=active 无门(应判噪声候选), B=paused(不该判), C=闸门拥有(不该判)
+for gid in ("goal-a-active", "goal-b-paused", "goal-adoption-rate"):
+    for i in range(6):
+        frames.append(json.dumps({"ts": str(int(base + i * 1000)), "kind": "action-frame", "goalId": gid,
+                                  "session": "s", "nextAction": "步骤 X: 做事"}))
+open(os.path.join(tmp, "quiet-driver-frames.jsonl"), "w", encoding="utf8").write("\n".join(frames) + "\n")
+open(os.path.join(tmp, "incubation-log.jsonl"), "w", encoding="utf8").write("")           # 无任何推进
+open(os.path.join(tmp, "goal-trigger-log.jsonl"), "w", encoding="utf8").write("")
+open(os.path.join(tmp, "dormant-goals.jsonl"), "w", encoding="utf8").write("\n".join([
+    json.dumps({"id": "goal-a-active", "status": "active"}),
+    json.dumps({"id": "goal-b-paused", "status": "paused"}),
+    json.dumps({"id": "goal-adoption-rate", "status": "active"})]) + "\n")
+env = dict(os.environ, DSH_COG_DIR=tmp)
+r = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-wake-attribution.py"), "--json", "--no-record"],
+                   capture_output=True, text=True, timeout=600, env=env)
+assert r.returncode == 0, "工具失败: %s" % (r.stderr or r.stdout)[-200:]
+d = json.loads(r.stdout)
+assert d["noiseCandidates"] == ["goal-a-active"], "候选集合不对(应只有 active 且无门者): %s" % d["noiseCandidates"]
+assert d["measurableAttributionRate"] == 0.0, "可严格测量口径应只含非拥有者: %s" % d
+by = {x["goalId"]: x for x in d["perGoal"]}
+assert by["goal-adoption-rate"]["governedElsewhere"] is True, "闸门拥有的目标未单列"
+assert by["goal-b-paused"]["noiseCandidate"] is False, "paused 目标被当成噪声候选(它已不可被驱动)"
+print("候选=仅 active 且无门者; 闸门拥有者单列; paused 不计")
+'
+# ── T175 池内每个 waitChecker 都要有覆盖(T154 只跑了写死的那一个) ──
+# 起因(测试审视帧): T154 名义上测「池内样本的 waitChecker 须如实回答」, 实现里却写死了
+# `dsh-wait-check-library.py` —— 于是后加的日期门检查器与精排样本门检查器**完全没有覆盖**。
+# 本组对**每个**池内 checker 断言两件: ①重复运行结果一致(不抖动); ②exit ∈ {0,1}(3=测不出来, 属故障态);
+# 并对「解析不了不得当成满足」这条纪律做一次合成验证(喂坏输出必须 exit 3)。
+echo "[T175] 池内每个 waitChecker 均被覆盖 + fail-closed 纪律"
+t "池内每个 waitChecker 须确定(两次一致)且不返回故障码" python3 -c '
+import json, os, subprocess
+pool = os.path.expanduser("~/.dsh/cognitive-pipeline/dormant-goals.jsonl")
+latest = {}
+for l in open(pool, encoding="utf8"):
+    if l.strip():
+        g = json.loads(l)
+        if g.get("id"): latest[g["id"]] = g
+checkers = {k: str(v.get("waitChecker") or "").strip() for k, v in latest.items() if str(v.get("waitChecker") or "").strip()}
+assert checkers, "池里没有 waitChecker —— 前提不成立"
+bad = []
+for gid, cmd in checkers.items():
+    codes = []
+    for _ in range(2):
+        r = subprocess.run(cmd, shell=True, capture_output=True, timeout=400)
+        codes.append(r.returncode)
+    if codes[0] != codes[1]:
+        bad.append("%s: 两次结果不一致 %s" % (gid, codes))
+    if any(c not in (0, 1) for c in codes):
+        bad.append("%s: 返回故障码 %s(0=条件满足该驱动 / 1=未满足继续等待)" % (gid, codes))
+assert not bad, "池内 checker 不可用: %s" % bad
+print("池内 %d 个 checker 均确定且只返回 0/1" % len(checkers))
+'
+t "解析不了不得当成满足(精排样本门检查器 fail-closed)" python3 -c '
+import os, subprocess, tempfile
+tmp = tempfile.mkdtemp()
+shim = os.path.join(tmp, "fake-refine.py")
+open(shim, "w", encoding="utf8").write("print(\"完全不是预期格式的输出\")\n")
+env = dict(os.environ, DSH_REFINE_EVAL=shim)
+r = subprocess.run(["python3", os.path.expanduser("~/dsh-fork/dsh-wait-check-refine.py")],
+                   capture_output=True, text=True, timeout=600, env=env)
+assert r.returncode == 3, "输出解析不了却没 fail-closed(exit %d) —— 这会让「测不出来」被当成「条件满足」" % r.returncode
+print("坏输出 ⇒ exit 3(不放行)")
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
