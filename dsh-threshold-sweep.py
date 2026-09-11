@@ -299,6 +299,7 @@ def main() -> int:
     prereg_suspect = mismatch and bool((prereg or {}).get('computedOnTruncatedSample'))
     payload = {'ts': datetime.datetime.now().astimezone().isoformat(),
                'label': args.label, 'currentGate': CURRENT_GATE, 'turns': len(records),
+               'skippedNoCandidateRecord': skipped_no_record,
                'preregExpected': expected,
                'preregExpectation': (prereg or {}).get('expectation'),
                'preregMismatch': mismatch,

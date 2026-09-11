@@ -7498,6 +7498,58 @@ assert case(now - datetime.timedelta(hours=26), now - datetime.timedelta(hours=2
             now - datetime.timedelta(hours=50)) == 1, "拿旧窗口的判读残留冒充本次结果"
 print("未开始/进行中/判读未出/旧残留 ⇒ 1; 本窗口判读已出 ⇒ 0(可满足, 非死门)")
 '
+# ── T194 有效总体与截断上限的两个跨件一致性(cl-263) ──
+# ①"无候选记录"的回合必须**从总体排除并被计数**(不在分母里冒充"不可排序"): 我今天连续两次把记录缺口读成召回性质。
+# ②扫描工具的 BELOW_GATE_CAP 必须与 cognitive-inject 源码里那个 slice 上限**一致** —— 两边漂开的话, 截断闸会静默失效
+# (或者反过来把好数据误判成截断), 而这正是"改一处忘另一处"的高发形态。
+echo "[T194] 有效总体(无记录回合须排除) + 截断上限跨件一致"
+t "无候选记录的回合必须从总体排除并被计数" python3 -c '
+import json, os, subprocess, tempfile, datetime
+tmp = tempfile.mkdtemp(); ids = ["exp_%03d" % i for i in range(60)]
+open(os.path.join(tmp, "experiences.jsonl"), "w", encoding="utf8").write("\n".join(json.dumps(
+    {"expId": e, "sar": {"situation": "s", "action": "a", "outcome": "o",
+                         "outcomeUtility": {"materialGain": i % 10, "emotionalValence": i % 5}}},
+    ensure_ascii=False) for i, e in enumerate(ids)) + "\n")
+now = datetime.datetime.now().timestamp() * 1000
+rows = []
+for k in range(20):     # 埋点前时代: 既无 preTop 也无 candidateScores
+    rows.append({"stage": "injected", "t": now - (k + 3) * 600000, "expIds": [ids[k]], "cited": False,
+                 "candidates": 2, "overThreshold": 1})
+for k in range(12):     # 有候选记录
+    rows.append({"stage": "injected", "t": now - (k + 1) * 600000, "expIds": [ids[k]], "cited": False,
+                 "candidates": 2, "overThreshold": 1,
+                 "preTop": [{"expId": ids[k], "similarity": 0.6}, {"expId": ids[k + 1], "similarity": 0.55}],
+                 "belowGate": [{"expId": ids[k + 2], "similarity": 0.45}]})
+open(os.path.join(tmp, "retrieval-audit.jsonl"), "w", encoding="utf8").write(
+    "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+json.dump({"ts": "2026-09-12T00:00:00+08:00", "table": [], "expectation": "沙箱",
+           "expectedVerdict": "no-headroom"},
+          open(os.path.join(tmp, "threshold-prereg.json"), "w", encoding="utf8"), ensure_ascii=False)
+era = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))) - datetime.timedelta(hours=6)
+r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json", "--post-since", era.isoformat()],
+                   capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=tmp), timeout=900)
+assert r.returncode == 0, "扫描失败: " + (r.stderr or r.stdout)[-200:]
+d = json.loads(r.stdout.strip().splitlines()[-1])
+assert d.get("skippedNoCandidateRecord") == 20, "无候选记录的回合没被计数: " + str(d.get("skippedNoCandidateRecord"))
+assert d["turns"] == 12, "无候选记录的回合混进了分母: turns=" + str(d["turns"])
+print("排除 %d 个无记录回合, 总体只含 %d 个有记录回合" % (d["skippedNoCandidateRecord"], d["turns"]))
+'
+t "扫描工具的截断上限必须与 cognitive-inject 源码里的 slice 上限一致" python3 -c '
+import os, re
+src = open(os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/src/index.ts"), encoding="utf8").read()
+tool = open(os.path.expanduser("~/dsh-fork/dsh-threshold-sweep.py"), encoding="utf8").read()
+i = src.index("const droppedByThreshold")
+seg = src[i:i + 900]
+m = re.search(r"\.slice\(0,\s*(\d+)\)", seg)
+assert m, "源码里找不到阈下候选记录的 slice 上限"
+src_cap = int(m.group(1))
+m2 = re.search(r"BELOW_GATE_CAP = (\d+)", tool)
+assert m2, "扫描工具里找不到 BELOW_GATE_CAP"
+tool_cap = int(m2.group(1))
+assert src_cap == tool_cap, ("两边漂开了: 源码 slice=%d vs 工具 BELOW_GATE_CAP=%d ⇒ 截断闸会静默失效或误判"
+                             % (src_cap, tool_cap))
+print("截断上限一致: %d(源码) == %d(工具)" % (src_cap, tool_cap))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
