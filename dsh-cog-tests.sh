@@ -8324,6 +8324,41 @@ r = subprocess.run([sys.executable, CHK], capture_output=True, text=True, timeou
 assert r.returncode == 0, "新判据隔离性检查转红: " + (r.stderr or r.stdout)[-300:]
 print(r.stdout.strip()[:200])
 '
+# ── T211 引用/采纳率的消费方必须声明时代(采集方式变了就不可跨时代平均) ──
+# cl-274 取证: 末次引用停在 09-08 06:47, 09-09 全天 126 条注入 0 引用, 09-10 05:28 才出现第一条 —— 而让"引用"
+# 变得可观测的是 commit 8e5b7dc(09-08 23:54)加的那条**引用契约**(要求我写出 expId)。故 09-10 之前的"引用率"
+# 测的是别的东西; 跨时代平均会把"信号不存在"读成"经验没用"。本组守: ①代表消费方(dsh-adoption-stats.py)缺时代
+# 即拒绝出数, 且输出含 citationEra; ②**不得有 cited-rate 消费方同时不在 wired 与 pending 两个集合里**
+# (静默不接时代的脚本会继续悄悄跨时代出数)。
+echo "[T211] 引用率消费方必须声明时代(缺时代即拒绝出数; 未接的必须显式挂账)"
+t "引用率消费方: 缺时代拒绝出数, 且不得有脚本既未接时代又未挂账" python3 -c '
+import json, os, subprocess, sys
+DIR = os.path.expanduser("~/.dsh/cognitive-pipeline")
+REPO = os.path.expanduser("~/dsh-fork")
+CONSUMERS = ["dsh-adoption-stats.py", "dsh-adoption-observe.py", "dsh-library-replay.py", "dsh-ab-compare.py",
+             "dsh-injection-noise.py", "dsh-settlement-effect.py", "dsh-citation-by-trigger.py"]
+def src(name):
+    p = os.path.join(REPO, name)
+    return open(p, encoding="utf8").read() if os.path.exists(p) else None
+wired = {c for c in CONSUMERS if (src(c) or "").find("citation-era") >= 0}
+led = {}
+for line in open(os.path.join(DIR, "claims-ledger.jsonl"), encoding="utf8"):
+    if line.strip():
+        r = json.loads(line)
+        if r.get("id"): led[r["id"]] = r
+pending = set(led.get("cl-274", {}).get("pendingConsumers") or [])
+exist = {c for c in CONSUMERS if src(c) is not None}
+silent = sorted(exist - wired - pending)
+assert not silent, ("这些 cited-rate 消费方既没接时代、也没挂账(会继续跨时代出数): %s" % silent)
+assert "dsh-adoption-stats.py" in wired, "代表消费方没有接时代"
+STATS = os.environ.get("DSH_ADOPTION_STATS") or os.path.join(REPO, "dsh-adoption-stats.py")
+r = subprocess.run([sys.executable, STATS, "--json"],
+                   capture_output=True, text=True, timeout=900, env=dict(os.environ))
+assert r.returncode == 0, "代表消费方跑不动(缺时代会拒绝出数): " + (r.stderr or r.stdout)[-200:]
+d = json.loads(r.stdout.strip().splitlines()[-1])
+assert (d.get("citationEra") or {}).get("since"), "输出里没有时代声明 —— 跨时代平均又回来了"
+print("时代已接 %d 个; 挂账 %d 个; 代表消费方输出含 citationEra(%s)" % (len(wired), len(pending), d["citationEra"]["since"]))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

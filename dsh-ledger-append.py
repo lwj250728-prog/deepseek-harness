@@ -56,6 +56,16 @@ def main():
             print("[ledger-append] 拒绝: --set 需要 KEY=VALUE, 收到 %r" % kv, file=sys.stderr)
             return 2
         k, v = kv.split("=", 1)
+        # 2026-09-12 14:4x(与 dsh-goal-pool-write.py 同日同型缺陷的**复现**): --set 原先把一切值当字符串 ——
+        # 实测: 我给 cl-274 写 `--set 'pendingConsumers=["a.py","b.py"]'`, 落盘成了**字符串**而不是列表, 于是
+        # 消费方（T211 判据）读出来是字符集合, 判据当场转红。池写入口在 05:2x 已修, 这里漏了 ⇒ 同一类缺陷
+        # 会在**兄弟工具**里复现。只对 JSON 容器(以 { 或 [ 开头)做解析, 标量语义保持不变(避免 '5' 变 5)。
+        if v.strip()[:1] in ("{", "["):
+            try:
+                patch[k] = json.loads(v)
+                continue
+            except Exception:
+                pass
         patch[k] = v
 
     now = datetime.datetime.now().astimezone().isoformat()

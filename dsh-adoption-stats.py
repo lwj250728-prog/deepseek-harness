@@ -131,6 +131,23 @@ def main() -> int:
     until = (int(datetime.datetime.fromisoformat(args.until).timestamp() * 1000)
              if args.until else None)
 
+    # cl-274(2026-09-12 14:2x): 引用率**没有时代声明**就会被跨时代平均——而它的采集方式在 09-10 变了
+    # (commit 8e5b7dc 给注入块加了"引用契约": 要求我写出 expId ⇒ 引用从'没人要求写的隐式行为'变成'被要求的动作';
+    # 取证: 末次引用停在 09-08 06:47, 09-09 全天 126 条注入 0 引用, 09-10 05:28 才出现第一条)⇒ 09-10 之前的
+    # "引用率"测的是别的东西。故: 时代文件缺失/不可解析一律**拒绝出数**(与缺水位同一纪律), 且窗口左端不得早于时代。
+    era_path = os.path.join(os.environ.get('DSH_COG_DIR') or DIR, 'citation-era.json')
+    try:
+        era_since = str(json.load(open(era_path, encoding='utf8')).get('since') or '')
+        era_ms = int(datetime.datetime.fromisoformat(era_since).timestamp() * 1000)
+    except Exception as exc:
+        print('缺时代: 读不到/解析不了 citation-era.json(%s) ⇒ 拒绝出数(跨时代平均会把"信号不存在"读成"经验没用")' % exc,
+              file=sys.stderr)
+        return 1
+    pre_era_skipped = 0
+    if since < era_ms:
+        pre_era_skipped = 1          # 标记: 请求窗口跨到时代之前, 下面如实报告
+        since = era_ms
+
     def in_window(created: int) -> bool:
         """左闭右开窗口。单点实现, 所有取数路径共用(防同一脚本内两套口径)。"""
         return created >= since and (until is None or created < until)
@@ -279,6 +296,7 @@ def main() -> int:
                       if until is not None else None),
         'windowSemantics': '左闭右开 [windowStart, windowEnd); windowEnd=null 表示到当前',
         'sessionId': args.session_id,
+        'citationEra': {'since': era_since, 'windowClampedToEra': bool(pre_era_skipped)},
         'classes': {k: {'injected': v[0], 'cited': v[1], 'unsettled': v[2],
                         'rate': round(v[1] / v[0], 4) if v[0] else None}
                     for k, v in sorted(stats.items())},
@@ -302,6 +320,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(payload, ensure_ascii=False))
         return 0
+    print('引用时代: since=%s%s' % (era_since, '  (请求窗口早于时代 ⇒ 已收到时代起点)' if pre_era_skipped else ''))
     print('窗口: %s → %s (来源: %s)'
           % (payload['windowStart'], payload['windowEnd'] or '当前', payload['windowStartSource']))
     for kind, values in payload['classes'].items():
