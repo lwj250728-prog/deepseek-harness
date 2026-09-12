@@ -8029,6 +8029,84 @@ n = subprocess.run(["python3", RO, "--reversal-eval", "--target", "goal-experien
 assert n.returncode == 2, "未预登记却仍给出判定(exit %d) —— 事后叙事被采信了" % n.returncode
 print("四例: 判读行消费预期(含复核时点) / 零推进⇒unmet(1) / 有推进⇒met(0) / 未预登记⇒2")
 '
+# ── T204 判读口径: 速率分母必须是**该臂自己的时代覆盖小时数**(cl-265 caliberBias) ──
+# 2026-09-12 11:1x 取证: rate() 原先分子只数时代之后的推进、分母却用窗口全长 24h。冻结基线的 24h 窗口里
+# 只有 4.6h 落在时代内 ⇒ 基线 0.375/h 实为 1.96/h(低估 5.2 倍) ⇒ ratio 放大 ~5 倍, **偏向判 causal**。
+# 本组守三件事: ①分母=时代覆盖(不是窗口全长); ②某臂覆盖为 0 ⇒ 速率**不可判**(None, 不是 0);
+# ③基线覆盖不足 ⇒ 因果结论降级; 对照臂无空间 ⇒ 判 no-headroom-controls(而不是把"没法比"写成"没效果")。
+echo "[T204] 判读口径: 时代覆盖作分母 / 覆盖为 0 不可判 / 薄基线降级 / 对照无空间须明说"
+t "判读速率的分母必须是该臂的时代覆盖小时数, 覆盖为 0 时须判不可判(而非 0)" python3 -c '
+import datetime, json, os, subprocess, tempfile
+RO = os.path.expanduser("~/dsh-fork/dsh-wake-intervention-readout.py")
+T = "goal-x"
+now = datetime.datetime.now().astimezone()
+def iso(dt): return dt.isoformat()
+def build(tmp, era_hours_ago, rows, pool):
+    os.makedirs(tmp, exist_ok=True)
+    open(os.path.join(tmp, "attribution-era.json"), "w", encoding="utf8").write(
+        json.dumps({"since": iso(now - datetime.timedelta(hours=era_hours_ago))}))
+    open(os.path.join(tmp, "quiet-driver-frames.jsonl"), "w", encoding="utf8").write("")
+    open(os.path.join(tmp, "wake-interventions.jsonl"), "w", encoding="utf8").write("")
+    open(os.path.join(tmp, "dormant-goals.jsonl"), "w", encoding="utf8").write(
+        "".join(json.dumps({"id": g, "status": "active"}) + "\n" for g in pool))
+    with open(os.path.join(tmp, "incubation-log.jsonl"), "w", encoding="utf8") as f:
+        for gid, offs in rows:
+            f.write(json.dumps({"ts": iso(now - datetime.timedelta(hours=offs)), "goalId": gid,
+                                "evidence": "pool-change"}) + "\n")
+tmp = tempfile.mkdtemp()
+# 时代起点在窗口**内部**: 窗口 24h, 时代只覆盖最后 6h; 2 条推进在覆盖段内, 3 条在覆盖段之前(须被排除)
+build(tmp, 12, [(T, 20), (T, 20), (T, 20), (T, 8), (T, 8)], [T])
+env = dict(os.environ, DSH_COG_DIR=tmp)
+r = subprocess.run(["python3", RO, "--target", T,
+                    "--start", iso(now - datetime.timedelta(hours=30)),
+                    "--end", iso(now - datetime.timedelta(hours=6))],
+                   capture_output=True, text=True, timeout=600, env=env)
+assert r.returncode == 0, "判读失败: " + (r.stderr or r.stdout)[-200:]
+p = [json.loads(l) for l in open(os.path.join(tmp, "wake-intervention-readout.jsonl"), encoding="utf8") if l.strip()][-1]
+assert abs(p["interventionCoverageHours"] - 6.0) < 0.05, "覆盖小时数没按时代算: %r" % p["interventionCoverageHours"]
+assert abs(p["targetInterventionRate"] - 2.0 / 6.0) < 0.01, (
+    "分母用的不是时代覆盖(2 条 / 6h = 0.333): %r —— 若为 0.083 说明又按窗口全长 24h 除" % p["targetInterventionRate"])
+assert p["targetBaselineRate"] is None, "基线窗内零覆盖却给出速率 %r(应判不可判)" % p["targetBaselineRate"]
+assert p["verdict"] == "insufficient-coverage", "某臂零覆盖却判成 %r" % p["verdict"]
+print("覆盖段 6h: 速率 2/6=0.333(非 2/24) / 基线零覆盖⇒不可判 / 裁决 insufficient-coverage")
+'
+t "薄基线覆盖 ⇒ 因果结论降级; 对照臂无空间 ⇒ 判 no-headroom-controls(不得把没法比写成没效果)" python3 -c '
+import datetime, json, os, subprocess, tempfile
+RO = os.path.expanduser("~/dsh-fork/dsh-wake-intervention-readout.py")
+T, C = "goal-x", "goal-ctl"
+now = datetime.datetime.now().astimezone()
+def iso(dt): return dt.isoformat()
+def build(tmp, ctl_intervention_rows):
+    os.makedirs(tmp, exist_ok=True)
+    open(os.path.join(tmp, "attribution-era.json"), "w", encoding="utf8").write(
+        json.dumps({"since": iso(now - datetime.timedelta(hours=32))}))
+    open(os.path.join(tmp, "quiet-driver-frames.jsonl"), "w", encoding="utf8").write("")
+    open(os.path.join(tmp, "wake-interventions.jsonl"), "w", encoding="utf8").write("")
+    open(os.path.join(tmp, "dormant-goals.jsonl"), "w", encoding="utf8").write(
+        json.dumps({"id": T, "status": "active"}) + "\n" + json.dumps({"id": C, "status": "active"}) + "\n")
+    rows = [(T, 31)] * 4 + [(T, 40)] * 10 + [(T, 8)] * 2 + [(C, 31)] * 4 + [(C, 8)] * ctl_intervention_rows
+    with open(os.path.join(tmp, "incubation-log.jsonl"), "w", encoding="utf8") as f:
+        for gid, offs in rows:
+            f.write(json.dumps({"ts": iso(now - datetime.timedelta(hours=offs)), "goalId": gid,
+                                "evidence": "pool-change"}) + "\n")
+def run(tmp):
+    env = dict(os.environ, DSH_COG_DIR=tmp)
+    r = subprocess.run(["python3", RO, "--target", T,
+                        "--start", iso(now - datetime.timedelta(hours=30)),
+                        "--end", iso(now - datetime.timedelta(hours=6))],
+                       capture_output=True, text=True, timeout=600, env=env)
+    assert r.returncode == 0, "判读失败: " + (r.stderr or r.stdout)[-200:]
+    return [json.loads(l) for l in open(os.path.join(tmp, "wake-intervention-readout.jsonl"), encoding="utf8") if l.strip()][-1]
+t1 = tempfile.mkdtemp(); build(t1, 24); p1 = run(t1)
+assert abs(p1["baselineCoverageHours"] - 2.0) < 0.05, "基线覆盖小时数不对: %r" % p1["baselineCoverageHours"]
+assert p1["coverageWarn"] is True, "基线只覆盖 2h/24h 却没标警示"
+assert p1["verdict"] == "causal-thin-baseline", "薄基线覆盖却给出自信结论: %r" % p1["verdict"]
+t2 = tempfile.mkdtemp(); build(t2, 0); p2 = run(t2)
+assert p2["verdict"] == "no-headroom-controls", (
+    "对照臂也塌成 0(无空间)却判成 %r —— 那是把构造出来的 no-effect 当成测出来的结论" % p2["verdict"])
+assert p2["verdict"] not in ("causal", "no-effect"), "对照无空间不得给出因果/无效果结论"
+print("薄基线(2h/24h)⇒causal-thin-baseline / 对照无空间⇒no-headroom-controls")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
