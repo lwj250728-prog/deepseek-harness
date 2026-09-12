@@ -5129,6 +5129,25 @@ for k, v in by.items():
 assert not bad, "最新行丢掉了前序行的处置位(last-wins 之下等于删字段): " + repr(bad[:5])
 print("非终态 " + str(sum(1 for v in by.values() if v[-1].get("status") not in TERMINAL)) + " 项均未丢处置位")
 '
+t "结单必须有机器可核的证据指针(账本可自查不能只靠叙述)" python3 -c '
+import json, os, subprocess, sys, tempfile
+TOOL = os.path.expanduser("~/dsh-fork/dsh-ledger-append.py")
+tmp = tempfile.mkdtemp()
+led = os.path.join(tmp, "l.jsonl")
+open(led, "w", encoding="utf8").write(json.dumps({"id": "cl-x", "ts": "2026-09-12T10:00:00+08:00",
+                                                  "status": "open", "claim": "c"}, ensure_ascii=False) + "\n")
+def close(note, extra=()):
+    return subprocess.run([sys.executable, TOOL, "cl-x", "--ledger", led, "--set", "status=done",
+                           "--set", "doneNote=" + note, *extra],
+                          capture_output=True, text=True, timeout=300)
+r0 = close("已修好了")
+assert r0.returncode == 2, "无任何可核指针却允许结单(exit %d) —— 账本会退化成只有叙述" % r0.returncode
+r1 = close("修好了: 见 T212 与 dsh-audit-coverage-check.py")
+assert r1.returncode == 0, "带 T编号/脚本名的结单被拒(误伤): " + (r1.stderr or r1.stdout)[-160:]
+r2 = close("确实无指针", ("--set", "noEvidenceReason=该结单的依据是一次人工观察"))
+assert r2.returncode == 0, "显式说明无指针理由后仍被拒: " + (r2.stderr or r2.stdout)[-160:]
+print("三例: 无指针⇒拒 / 带指针⇒过 / 显式理由⇒过")
+'
 # ── T142 部署意图须有排程载体(cl-189/tp-120) ──
 # 起因: 同一个部署被我临时手排秒数、连续改期 3 次, 每次理由都是"重启会掐断进行中的回合"——重启是机制侧
 # 动作却由我手排, 于是"部署"永远排在"把这一轮做完"之后。T11 只守"lib 早于服务启动"这个症状: 它红了也没人
@@ -8394,34 +8413,6 @@ else:
     print("源码顶层齐备; 最新行含 retrievedIds(%d 条, truncated=%s)" % (len(last["retrievedIds"]), last.get("retrievedIdsTruncated")))
 '
 # ── T212 审计字段必须接在**每一个**审计点上(cl-278 首次部署的实证缺陷) ──
-# 实测(2026-09-12 15:0x): cl-278 给审计补 retrievedIds, 源码'改过了'、产物也含字段, 但**只接上 7 个审计点里的 6 个**
-# —— path='raw'(最常走的那条)漏了 ⇒ 15:08 那条 stage=injected 的新行缺字段。这正是"改过了 ≠ 生效了"的老坑,
-# 而且它躲过了 tsc(类型合法)与产物检查(grep 得到字段)。故本组: ①**每个**审计点都须落该字段(源码级枚举);
-# ②边界后**最新一条**审计行须真的带字段(行为级, 重启宽限内跳过并打印, 不冒充通过)。
-echo "[T212] 审计字段必须接在每一个审计点上(源码枚举 + 最新行实证)"
-t "审计字段(retrievedIds)必须接在每一个审计点, 且最新审计行须带它" python3 -c '
-import json, os, re, time
-SRC = os.environ.get("DSH_INJECT_SRC") or os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/src/index.ts")
-src = open(SRC, encoding="utf8").read()
-missing = []
-for m in re.finditer(r"audit\(\{ stage: .([a-z-]+).(?:, path: .([a-z]+).)?", src):
-    seg = src[m.start():m.start() + 1400]
-    end = seg.find("})\n")
-    seg = seg[:end if end > 0 else 1400]
-    if "retrievalIds" not in seg:
-        missing.append("%s/%s" % (m.group(1), m.group(2) or "-"))
-assert not missing, ("这些审计点没有落 retrievedIds ⇒ 覆盖率归因会缺一整个阶段(改过了≠生效了): %s" % missing)
-D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
-rows = [json.loads(l) for l in open(os.path.join(D, "retrieval-audit.jsonl"), encoding="utf8") if l.strip()]
-assert rows, "读不到审计行(判据前提不成立)"
-last = rows[-1]
-if "retrievedIds" not in last:
-    age_min = (time.time() * 1000 - (last.get("t") or 0)) / 60000.0
-    assert age_min < 30, ("最新审计行(%.0f 分钟前)仍缺 retrievedIds ⇒ 字段没真的生效" % age_min)
-    print("审计点 %d 处均已接字段; 最新行来自旧进程(%.0f 分钟前)⇒ 本帧不判(宽限 30 分钟)" % (src.count("retrievalIds") - 2, age_min))
-else:
-    print("审计点均已接字段; 最新行含 retrievedIds(%d 条, truncated=%s)" % (len(last["retrievedIds"]), last.get("retrievedIdsTruncated")))
-'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

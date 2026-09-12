@@ -39,6 +39,7 @@ def main():
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     ap.add_argument("--ledger", default=LEDGER)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--reclaim-id", action="store_true", help="确认这是同一个事的改写(否则拒绝覆盖已有 claim 正文)")
     args = ap.parse_args()
 
     rows = load(args.ledger)
@@ -50,6 +51,13 @@ def main():
         print("[ledger-append] 拒绝: 该 id 不存在(%s)——追加行不能凭空造 id" % args.id, file=sys.stderr)
         return 2
 
+    import re as _re
+    # 2026-09-12 15:5x(反事实自审所得): 抽查今日 18 条结单, 只有 10 条带**机器可核的证据指针**
+    # (提交哈希/T编号/脚本名/账本 id/文件路径), 其余只有叙述 ⇒ "账本可自查"这个前提只被半支持。
+    # 故: 结单(status=done/closed)时 doneNote 或 nextAction 里必须出现**至少一个可核指针**,
+    # 否则拒绝(确有理由无指针者, 显式 --set noEvidenceReason="...")。
+    EVIDENCE_PTR = _re.compile(r"\b[0-9a-f]{7,40}\b|\bT\d{2,3}\b|\bdsh-[a-z0-9-]+\.(py|sh)\b|"
+                               r"\b(tp|cl)-[\w-]+\b|\bexp_\d+\b|\binject_\d+\b|/[[\w./-]+\.(py|sh|jsonl|json|md)")
     patch = {}
     for kv in args.set:
         if "=" not in kv:
@@ -86,6 +94,28 @@ def main():
         return 2
 
     line = json.dumps(row, ensure_ascii=False)
+    # 结单必须有**可核指针**(反事实自审所得: 今日 18 条结单里 8 条只有叙述)
+    new_status = str(patch.get("status") or "")
+    if new_status in ("done", "closed"):
+        blob = " ".join(str(patch.get(k) or "") for k in ("doneNote", "nextAction", "result", "evidence"))
+        if not EVIDENCE_PTR.search(blob) and not str(patch.get("noEvidenceReason") or "").strip():
+            print("[ledger-append] 拒绝结单: doneNote/nextAction 里没有**机器可核的证据指针**"
+                  "(提交哈希 / T编号 / 脚本名 / 账本 id / 文件路径); 确有理由请显式 --set noEvidenceReason=\"...\"",
+                  file=sys.stderr)
+            return 2
+
+    # id 碰撞守卫(2026-09-12 16:0x **实测到的真实事故**): 我(主会话)与旁路会话在同一分钟各写了一条 cl-280,
+    # 而追加式账本是 **last-wins** ⇒ 后写者把前者整条盖掉, 前者的 claim 在 last-wins 读法下**消失**。
+    # 故: 当补丁要**改写 claim 正文**(与当前行逐字不同)且没有显式 --reclaim-id 时, 拒绝 ——
+    # 这正是"两个不同的事共用了一个 id"的形态; 单纯更新状态/字段不受影响。
+    new_claim = patch.get("claim")
+    if isinstance(new_claim, str) and new_claim.strip() and new_claim.strip() != str(prev.get("claim") or "").strip() \
+            and not args.reclaim_id:
+        print("[ledger-append] 拒绝: 这会**改写已存在 id 的 claim 正文**(last-wins 下原 claim 会消失) —— "
+              "多半是两个不同的事共用了同一个 id; 请换一个未占用的 id, 或确属同一事加 --reclaim-id",
+              file=sys.stderr)
+        return 2
+
     if args.dry_run:
         print("[dry-run] " + line)
         return 0
