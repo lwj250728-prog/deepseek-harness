@@ -8489,6 +8489,25 @@ assert len(hit) == len(fr), ("工具侧判据漏掉 %d/%d 条帧层经验 ⇒ �
 assert not fp, "工具侧判据误伤任务层经验(会白丢真实经验): %s" % fp[:5]
 print("工具侧判据与写侧产物一致: 帧层 %d/%d 全中, 任务层零误伤" % (len(hit), len(fr)))
 '
+# ── T215 账本体积/行数守卫(cl-282) ──
+# 实测: 739 行/844KB 时解析 0.020s/+1MB, 而 22 170 行时 0.312s/+33MB(线性) —— 时间可承受, 但**内存峰值随行数
+# 线性上升**, 且账本被 16 个脚本读(套件内 21 处)。按今日 170 行/天, 一年约 6.3 万行/44MB/峰值 +90MB。
+# 故加阈值守卫: 超阈即红并提示跑 `dsh-claims-ledger-compact.py`(它承诺 last-wins 视图逐字节不变)。
+echo "[T215] 账本体积与行数守卫(超阈须提示压缩)"
+t "账本体积与行数须在阈值内(超阈提示压缩)" python3 -c '
+import os
+BASE = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+LEDGER = os.environ.get("DSH_COG_LEDGER") or os.path.join(BASE, "claims-ledger.jsonl")
+ROWS_MAX, BYTES_MAX = 3000, 4 * 1024 * 1024
+assert os.path.exists(LEDGER), "读不到账本(判据前提不成立): " + LEDGER
+size = os.path.getsize(LEDGER)
+rows = sum(1 for l in open(LEDGER, encoding="utf8") if l.strip())
+why = ("账本超阈 ⇒ 先跑 dsh-claims-ledger-compact.py(它保证 last-wins 视图逐字节不变)再回看本条; "
+       "盲目继续追加会让每次全量读取的内存峰值线性上升")
+assert rows <= ROWS_MAX, ("账本 %d 行 > 阈 %d: " % (rows, ROWS_MAX)) + why
+assert size <= BYTES_MAX, ("账本 %.2fMB > 阈 %.1fMB: " % (size / 1048576, BYTES_MAX / 1048576)) + why
+print("账本 %d 行 / %.2fMB(阈 %d 行 / %.0fMB)" % (rows, size / 1048576, ROWS_MAX, BYTES_MAX / 1048576))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
