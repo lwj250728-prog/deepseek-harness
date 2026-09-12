@@ -26,8 +26,11 @@ import sys
 import time
 
 LIB_GLOB = "/home/ubuntu/dsh-fork/packages/*/*/lib/index.js"
-LEDGER = os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
-STATE = os.path.expanduser("~/.dsh/cognitive-pipeline/deploy-intent.json")
+# 2026-09-12 19:1x: 允许 DSH_COG_DIR 注入 —— 我为了测 write_alert 在内存里改源码却仍从真路径导入,
+# 结果**测试直接写进了生产账本**(追加了一条假告警)。有注入点才能让此类测试走沙箱。
+COG_DIR = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+LEDGER = os.path.join(COG_DIR, "claims-ledger.jsonl")
+STATE = os.path.join(COG_DIR, "deploy-intent.json")
 SERVICE = "dsh-web.service"
 HASH_TOOL = "/home/ubuntu/dsh-fork/dsh-deploy-lib-hashes.py"
 # 排程/会话来源标记: cron 行给 DSH_COG_ORIGIN, 统一机制台账的检查器认 DSH_RUN_ORIGIN —— 两个都认,
@@ -228,7 +231,11 @@ def write_alert(message):
     row["ts"] = now_iso()
     with open(LEDGER, "a", encoding="utf8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
-    return existing is not None
+    # 2026-09-12 19:1x **实测崩溃修复**: 这里原本 `return existing is not None`, 而本函数里的变量叫 `current`
+    # (`existing` 是隔壁 raise_env_alert 的名字, 复制粘贴残留) ⇒ **每一次"部署意图无人承载"告警都会
+    # NameError 崩在这行**, 日志里堆了 8 次 traceback(部署告警路径长期半死: 行虽写下, 但进程非零退出,
+    # 调用方拿不到返回值、后续刷新逻辑从不执行)。这与"套件可执行位被抹掉"同族: 告警通道自己坏了没人知道。
+    return current is not None
 
 
 def close_alert():

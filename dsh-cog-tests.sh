@@ -4201,6 +4201,30 @@ print("台账 %d 项与其记录文件均在" % len(inv["mechanisms"]))
 # 年龄/版本/重建结果。于是"整合层停止吸收新样本"这件事只能靠偶然想起; 想加判据连数据源都没有。
 # 判据设计: 摘要年龄 > 24h 时, 24h 内必须**至少有一次重建尝试**记录(成功的或被告知被拒的都算) ——
 # 这检验的是"层还在被尝试", 而不是"层成功了"(成功与否是内容问题, 被拒也要留痕)。
+t "部署告警路径不得崩, 且同消息幂等(告警通道自己也会坏)" python3 -c '
+import json, os, subprocess, sys, tempfile
+TOOL = os.path.expanduser("~/dsh-fork/dsh-deploy-intent.py")
+D = os.environ.get("DSH_COG_DIR") or tempfile.mkdtemp()
+probe_src = """
+import importlib.util, json, os
+spec = importlib.util.spec_from_file_location("di", os.environ["TOOL"])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+r1 = m.write_alert("部署告警路径测试")
+r2 = m.write_alert("部署告警路径测试")
+rows = [json.loads(l) for l in open(m.LEDGER, encoding="utf8") if l.strip()]
+print(json.dumps({"r1": r1, "r2": r2, "n": len(rows)}))
+"""
+probe = os.path.join(tempfile.mkdtemp(), "probe-alert.py")
+open(probe, "w", encoding="utf8").write(probe_src + "\n")
+r = subprocess.run([sys.executable, probe], capture_output=True, text=True, timeout=300,
+                   env=dict(os.environ, TOOL=TOOL, DSH_COG_DIR=D))
+assert r.returncode == 0, ("部署告警路径**崩了**(告警通道自己坏掉没人知道; 实证 2026-09-12 NameError: existing 未定义): "
+                            + (r.stderr or r.stdout)[-220:])
+d = json.loads(r.stdout.strip().splitlines()[-1])
+assert d["n"] == 1, "同消息重复调用不是幂等(落盘 %d 行)" % d["n"]
+print("部署告警路径: 不崩 + 落盘 + 同消息幂等(落盘 %d 行)" % d["n"])
+'
 echo "[T121] 离线整合层可判读(年龄 / 重建尝试落盘 / 记录字段完整)"
 t "重建尝试必须落盘且字段完整" python3 -c '
 import json, os
