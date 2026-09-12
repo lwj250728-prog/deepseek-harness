@@ -14,10 +14,16 @@
   ③ **本工具只改这一个字段**: 其余字段由现有唯一写入方 `dsh-goal-pool-write.py` 追加行(last-wins), 保持写入口收口。
 
 用法:
-  dsh-wake-intervention.py disable <goalId> --hours 24 --reason "..."   # 关闭唤醒并登记
+  dsh-wake-intervention.py disable <goalId> --hours 24 --reason "..." --reversal-expectation "..."
+  dsh-wake-intervention.py preregister <goalId> --expectation "..."   # 给已开窗口补登记恢复腿预期
   dsh-wake-intervention.py restore <goalId> [--reason "..."]            # 按登记的原值恢复
   dsh-wake-intervention.py status [<goalId>]
 退出码: 0 正常; 2 参数/状态问题(如 restore 无原始值可依); 3 池不可读。
+
+**恢复腿必须预登记**(2026-09-12 10:2x 加, 由 T203 守): 干预实验的恢复腿如果等到窗口结束后再解释,
+那就不是预登记而是事后叙事 —— 与 `threshold-prereg.json` 同一条纪律。故 `disable` **强制**要
+`--reversal-expectation`(窗口结束前必须看到什么的判据), 且它必须在**窗口结束之前**落盘;
+已开的窗口可用 `preregister` 补登记(仍须早于窗口结束, 否则 lint 判红)。
 """
 from __future__ import annotations
 
@@ -88,6 +94,11 @@ def main() -> int:
     d.add_argument('goal')
     d.add_argument('--hours', type=float, default=24.0)
     d.add_argument('--reason', default='')
+    d.add_argument('--reversal-expectation', default='',
+                   help='恢复腿预登记: 窗口结束后必须看到什么(留空即拒绝关闭 —— 事后叙事不算预登记)')
+    p = sub.add_parser('preregister')
+    p.add_argument('goal')
+    p.add_argument('--expectation', required=True)
     s = sub.add_parser('restore')
     s.add_argument('goal')
     s.add_argument('--reason', default='干预窗口结束, 回滚到原阈值')
@@ -112,7 +123,23 @@ def main() -> int:
         return 3
     orig = row.get('triggerThresholds')
     orig_wait = row.get('waitChecker') or ''
+    if args.cmd == 'preregister':
+        dis = [r for r in records() if r.get('goal') == args.goal and r.get('event') == 'disable']
+        if not dis:
+            print('preregister 无窗口可挂(该目标没有 disable 记录)⇒ 拒绝', file=sys.stderr)
+            return 2
+        with open(RECORD, 'a', encoding='utf8') as f:
+            f.write(json.dumps({'ts': now_iso(), 'event': 'preregister', 'goal': args.goal,
+                                'reversalExpectation': args.expectation,
+                                'windowDisableTs': dis[-1].get('ts'),
+                                'reason': '恢复腿预登记(须早于窗口结束)'}, ensure_ascii=False) + '\n')
+        print('[干预] %s 恢复腿预期已预登记(窗口 disable@%s)' % (args.goal, str(dis[-1].get('ts'))[:19]))
+        return 0
     if args.cmd == 'disable':
+        if not str(args.reversal_expectation).strip():
+            print('拒绝关闭: 缺 --reversal-expectation —— 恢复腿必须先登记判据(事后叙事不算预登记); '
+                  '已开窗口可用 preregister 补登记', file=sys.stderr)
+            return 2
         if orig == OFF_THRESHOLDS and str(orig_wait).strip() == OFF_WAIT_CHECKER:
             print('已经是关闭状态(阈值 %s + waitChecker %s), 幂等返回' % (json.dumps(orig, ensure_ascii=False), OFF_WAIT_CHECKER))
             return 0
@@ -123,8 +150,9 @@ def main() -> int:
                                     'thresholdsBefore': orig, 'thresholdsAfter': OFF_THRESHOLDS,
                                     'waitCheckerBefore': orig_wait, 'waitCheckerAfter': OFF_WAIT_CHECKER,
                                     'triggerCountBefore': row.get('triggerCount'),
-                                    'plannedHours': args.hours, 'reason': args.reason}, ensure_ascii=False) + '\n')
-            print('[干预] %s 唤醒已关闭(阈值 %s + waitChecker %s), 计划 %g 小时后恢复'
+                                    'plannedHours': args.hours, 'reason': args.reason,
+                                    'reversalExpectation': args.reversal_expectation}, ensure_ascii=False) + '\n')
+            print('[干预] %s 唤醒已关闭(阈值 %s + waitChecker %s), 计划 %g 小时后恢复; 恢复腿预期已预登记'
                   % (args.goal, json.dumps(OFF_THRESHOLDS), OFF_WAIT_CHECKER, args.hours))
         return rc
     # restore

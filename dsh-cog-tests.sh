@@ -7215,7 +7215,7 @@ def cur():
             x = json.loads(l)
             if x.get("id") == "g-i": r = x
     return r
-assert run("disable", "g-i", "--hours", "24", "--reason", "沙箱").returncode == 0
+assert run("disable", "g-i", "--hours", "24", "--reason", "沙箱", "--reversal-expectation", "沙箱: 恢复后应见行动帧").returncode == 0
 th, wc = cur().get("triggerThresholds"), cur().get("waitChecker")
 assert isinstance(th, dict) and th.get("focus") == 1.01, "阈值没关: " + json.dumps(th, ensure_ascii=False)
 assert "/bin/false" in str(wc), "waitChecker 没关(行动帧会照来): " + repr(wc)
@@ -7244,7 +7244,7 @@ def cur():
 # ① 无 disable 记录 ⇒ 拒绝回滚(不猜)
 assert run("restore", "g-i").returncode == 2, "无原始阈值可依时仍执行了回滚(在猜)"
 # ② 关闭 ⇒ 阈值必须是**对象**且值为 1.01(命不中任何相似度)
-assert run("disable", "g-i", "--hours", "24", "--reason", "沙箱").returncode == 0, "关闭失败"
+assert run("disable", "g-i", "--hours", "24", "--reason", "沙箱", "--reversal-expectation", "沙箱: 恢复后应见行动帧").returncode == 0, "关闭失败"
 th = cur().get("triggerThresholds")
 assert isinstance(th, dict), "--set 传 JSON 容器落成了 " + type(th).__name__ + "(干预会静默无效)"
 assert th.get("kernel") == 1.01 and th.get("focus") == 1.01, "阈值没抬到命不中的值: " + json.dumps(th, ensure_ascii=False)
@@ -7911,6 +7911,82 @@ assert run(decorative).returncode == 1, "装饰性时限(逐字包含却不被�
 assert run(real).returncode == 0, "真消费时限的池被判红(误伤)"
 assert run(mixed).returncode == 0, "只要有一条能自行解冻就不该判红(判据是存在量词)"
 print("四例: 全无界⇒红 / 装饰时限⇒红 / 真消费⇒绿 / 一条可解冻⇒绿")
+'
+# ── T203 干预实验的恢复腿必须预登记(窗口结束前), 且开关必须可逆 ──
+# 由来(2026-09-12 10:2x 三问帧实测): cl-265 窗口跑到一半才发现"恢复腿不是回到静默" —— 目标当前的门
+# dsh-wait-check-sweep.py 已 exit 0 ⇒ 08:00 一恢复该目标立刻重新可驱动。这条解释如果等到窗口结束之后
+# 才写, 就是**事后叙事**而不是预登记(与 threshold-prereg.json 同一条纪律)。故: ①disable 强制要
+# --reversal-expectation(缺则拒绝); ②已开窗口用 preregister 补登记, 但必须早于窗口结束; ③开关必须可逆 ——
+# 往返测试直接保护**在跑的那个窗口**的恢复路径(restore 崩了 = 实验永不回滚)。
+echo "[T203] 干预恢复腿须预登记(早于窗口结束) + 开关可逆(往返回滚)"
+t "在跑的干预窗口必须有恢复腿预登记(且须早于窗口结束)" python3 /home/ubuntu/dsh-fork/dsh-intervention-reversal-lint.py --quiet
+t "恢复腿判据可判别: 缺登记/事后登记必须判红, 窗口内补登记判绿" python3 -c '
+import datetime, json, os, subprocess, tempfile
+LINT = os.path.expanduser("~/dsh-fork/dsh-intervention-reversal-lint.py")
+tmp = tempfile.mkdtemp()
+now = datetime.datetime.now().astimezone()
+def rec(name, rows):
+    p = os.path.join(tmp, name)
+    open(p, "w", encoding="utf8").write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+    return p
+def run(p):
+    return subprocess.run(["python3", LINT, "--record", p, "--quiet"], capture_output=True, text=True, timeout=300)
+dis = (now - datetime.timedelta(hours=2)).isoformat()
+missing = rec("missing.jsonl", [{"ts": dis, "event": "disable", "goal": "g", "plannedHours": 24}])
+posthoc = rec("posthoc.jsonl", [{"ts": dis, "event": "disable", "goal": "g", "plannedHours": 1},
+                                {"ts": (now + datetime.timedelta(hours=2)).isoformat(), "event": "preregister",
+                                 "goal": "g", "reversalExpectation": "x"}])
+inwindow = rec("inwindow.jsonl", [{"ts": dis, "event": "disable", "goal": "g", "plannedHours": 24},
+                                  {"ts": (now - datetime.timedelta(hours=1)).isoformat(), "event": "preregister",
+                                   "goal": "g", "reversalExpectation": "x"}])
+closed = rec("closed.jsonl", [{"ts": dis, "event": "disable", "goal": "g", "plannedHours": 24},
+                              {"ts": (now - datetime.timedelta(minutes=30)).isoformat(), "event": "restore",
+                               "goal": "g"}])
+assert run(missing).returncode == 1, "缺恢复腿预登记没判红"
+assert run(posthoc).returncode == 1, "窗口结束后才登记(事后叙事)没判红"
+assert run(inwindow).returncode == 0, "窗口内预登记被判红(误伤)"
+assert run(closed).returncode == 0, "已恢复的历史窗口被追认(不该审它)"
+print("四例: 缺登记⇒红 / 事后登记⇒红 / 窗口内登记⇒绿 / 已恢复窗口⇒不审")
+'
+t "关闭干预必须强制要求恢复腿预期(缺则拒绝, 不带预期不得关闭)" python3 -c '
+import json, os, subprocess, tempfile
+TOOL = os.path.expanduser("~/dsh-fork/dsh-wake-intervention.py")
+tmp = tempfile.mkdtemp()
+pool = os.path.join(tmp, "dormant-goals.jsonl")
+open(pool, "w", encoding="utf8").write(json.dumps({"id": "g1", "status": "active", "nextAction": "n",
+    "triggerThresholds": {"kernel": 0.6, "focus": 0.55},
+    "waitChecker": "/home/ubuntu/dsh-fork/dsh-wait-check-sweep.py"}, ensure_ascii=False) + "\n")
+env = dict(os.environ, DSH_COG_DIR=tmp)
+r0 = subprocess.run(["python3", TOOL, "disable", "g1"], capture_output=True, text=True, timeout=300, env=env)
+assert r0.returncode == 2, "缺恢复腿预期却允许关闭(exit %d) —— 恢复腿会变成事后叙事" % r0.returncode
+r1 = subprocess.run(["python3", TOOL, "disable", "g1", "--hours", "24",
+                     "--reversal-expectation", "恢复后 30 分钟内应出现行动帧"],
+                    capture_output=True, text=True, timeout=300, env=env)
+assert r1.returncode == 0, "带预期关闭失败: " + (r1.stderr or r1.stdout)[-160:]
+cur = [json.loads(l) for l in open(pool, encoding="utf8") if l.strip()][-1]
+assert cur.get("triggerThresholds") == {"kernel": 1.01, "focus": 1.01}, "关闭没落到池的阈值上: %r" % cur.get("triggerThresholds")
+assert str(cur.get("waitChecker")) == "/bin/false", "关闭没落到池的门上: %r" % cur.get("waitChecker")
+rows = [json.loads(l) for l in open(os.path.join(tmp, "wake-interventions.jsonl"), encoding="utf8") if l.strip()]
+assert rows[-1].get("reversalExpectation"), "disable 行没记下恢复腿预期"
+print("缺预期⇒拒绝(2) / 带预期⇒关闭并落盘(阈值+门+预期三处)")
+'
+t "干预开关必须可逆: disable→restore 往返回滚原阈值与原门" python3 -c '
+import json, os, subprocess, tempfile
+TOOL = os.path.expanduser("~/dsh-fork/dsh-wake-intervention.py")
+tmp = tempfile.mkdtemp()
+pool = os.path.join(tmp, "dormant-goals.jsonl")
+orig_wait = "/home/ubuntu/dsh-fork/dsh-wait-check-sweep.py"
+open(pool, "w", encoding="utf8").write(json.dumps({"id": "g1", "status": "active", "nextAction": "n",
+    "triggerThresholds": {"kernel": 0.6, "focus": 0.55}, "waitChecker": orig_wait}, ensure_ascii=False) + "\n")
+env = dict(os.environ, DSH_COG_DIR=tmp)
+def call(*a):
+    return subprocess.run(["python3", TOOL] + list(a), capture_output=True, text=True, timeout=300, env=env)
+assert call("disable", "g1", "--hours", "24", "--reversal-expectation", "x").returncode == 0
+assert call("restore", "g1").returncode == 0, "restore 失败 —— 在跑的窗口就回滚不了"
+cur = [json.loads(l) for l in open(pool, encoding="utf8") if l.strip()][-1]
+assert cur.get("triggerThresholds") == {"kernel": 0.6, "focus": 0.55}, "往返没回到原阈值: %r" % cur.get("triggerThresholds")
+assert str(cur.get("waitChecker")) == orig_wait, "往返没回到原门: %r" % cur.get("waitChecker")
+print("disable→restore 往返: 阈值与原门均回滚")
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
