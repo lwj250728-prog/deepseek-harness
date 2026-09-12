@@ -7661,6 +7661,11 @@ import os
 src = open(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/src/index.ts"), encoding="utf8").read()
 lib = open(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/lib/index.js"), encoding="utf8").read()
 assert "const skipHits = hits.filter" in src, "没有把等待型命中挑出来(提醒照发的老形态)"
+# 2026-09-12 08:2x: 只过滤 shouldSkipAsWaiting(文本与 checker 的**与**)是不够的 —— 行动型措辞+checker 未满足
+# 的目标照样收提醒(实测证伪信号命中) ⇒ 必须**有 checker 时由 checker 说了算**。
+assert "const wc = String((h.goal as { waitChecker?: string }).waitChecker ?? \u0027\u0027).trim()" in src, "没有取 checker"
+assert "if (wc !== \u0027\u0027) return !waitConditionMet(wc)" in src, "有 checker 时没有让它说了算(仍是文本与checker的与)"
+assert "return shouldSkipAsWaiting(h.goal" in src, "没有保留无 checker 时的文本启发式兜底"
 assert "const remindHits = hits.filter" in src, "没有从提醒块里排除等待型命中"
 assert "if (remindHits.length === 0)" in src, "全为等待型时没有提前返回(仍会发提醒)"
 assert "remindHits.slice(0, 1)" in src, "提醒块不是从 remindHits 里取的(排除没生效)"

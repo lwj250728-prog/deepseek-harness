@@ -480,7 +480,15 @@ function parseWaitingMomentLocal(text: string, now: Date = new Date()): Date | n
     // shouldSkipAsWaiting 的结果当**标注**(skipped=waiting), 提醒照发 ⇒ "发了提醒却注定推不动"的事件
     // 在两条读数里都隐形(cl-267)。这里改为: 命中的目标里, 凡 shouldSkipAsWaiting 为真者**不进提醒块**,
     // 但仍进 skipped 观测计数(读数不失真)。
-    const skipHits = hits.filter(h => shouldSkipAsWaiting(h.goal as { nextAction?: string, waitChecker?: string }))
+    // 2026-09-12 08:2x **修一个不完全的修复**: 上一版只过滤 shouldSkipAsWaiting 为真者, 而该函数是
+    // "文本像等待型 **且** checker 未满足"的**与**: nextAction 写成行动型措辞的目标(checker 却未满足)照样收提醒 ——
+    // 实测 08:26 重启后检索目标(行动型措辞 + refine checker 未满足)仍收到孵化提醒, 我的证伪信号命中。
+    // 正确语义: **有 checker 就由 checker 说了算**(两侧同一判据); 没有 checker 时才退回文本启发式兜底。
+    const skipHits = hits.filter(h => {
+      const wc = String((h.goal as { waitChecker?: string }).waitChecker ?? '').trim()
+      if (wc !== '') return !waitConditionMet(wc)
+      return shouldSkipAsWaiting(h.goal as { nextAction?: string, waitChecker?: string })
+    })
     const skippedIds = new Set(skipHits.map(h => h.goal.id))
     const remindHits = hits.filter(h => !skippedIds.has(h.goal.id))
     const registerAndCount = (): void => {
