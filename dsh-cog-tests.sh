@@ -7431,7 +7431,8 @@ era = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))) - da
 def run(expect):
     json.dump({"ts": "2026-09-12T00:00:00+08:00", "table": [], "expectation": "沙箱期望",
                "expectedVerdict": expect}, open(os.path.join(tmp, "threshold-prereg.json"), "w", encoding="utf8"), ensure_ascii=False)
-    r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json",
+    SWEEP = os.environ.get("DSH_THRESHOLD_SWEEP") or "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py"
+    r = subprocess.run(["python3", SWEEP, "--json",
                         "--post-since", era.isoformat()],
                        capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=tmp), timeout=900)
     assert r.returncode == 0, "沙箱裁决失败: " + (r.stderr or r.stdout)[-200:]
