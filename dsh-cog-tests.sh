@@ -8107,6 +8107,40 @@ assert p2["verdict"] == "no-headroom-controls", (
 assert p2["verdict"] not in ("causal", "no-effect"), "对照无空间不得给出因果/无效果结论"
 print("薄基线(2h/24h)⇒causal-thin-baseline / 对照无空间⇒no-headroom-controls")
 '
+# ── T205 冻结基线的数字本身必须可核(同口径复算) ──
+# 起因(2026-09-12 11:1x 测试审视帧): 口径已经在判读器里改成"时代覆盖作分母", 但**冻结文件本身是一张
+# 没人核过的数字表** —— 谁再按旧口径冻结一次, 判读器照用不误, 偏差(基线低估 5.2 倍 ⇒ ratio 放大
+# ⇒ 偏向 causal)原样回来。故把"基线数字必须与同口径复算一致"做成可执行检查: 复算=窗口内且 ≥ 时代的
+# pool-change 条数 ÷ 时代覆盖小时数; 某臂零覆盖时不得写 0.0(0 会被读成"测过且为零")。
+echo "[T205] 冻结基线必须与同口径复算一致(cl-265 caliberBias 的下游守门)"
+t "冻结基线的 perHour 必须与同口径(时代覆盖作分母)复算一致" python3 /home/ubuntu/dsh-fork/dsh-baseline-caliber-check.py
+t "判据可判别: 旧口径基线/有覆盖却写 0 必须判红, 真基线判绿" python3 -c '
+import json, os, subprocess, tempfile
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+CHK = os.path.expanduser("~/dsh-fork/dsh-baseline-caliber-check.py")
+LOG = os.path.join(D, "incubation-log.jsonl")
+tmp = tempfile.mkdtemp()
+b = json.load(open(os.path.join(D, "wake-intervention-baseline.json"), encoding="utf8"))
+cov = float((b.get("rates") or {}).get("goal-experience-library", {}).get("coverageHours") or 4.57)
+def run(path):
+    return subprocess.run(["python3", CHK, "--baseline", path, "--log", LOG],
+                          capture_output=True, text=True, timeout=300)
+good = os.path.join(tmp, "good.json"); json.dump(b, open(good, "w", encoding="utf8"))
+assert run(good).returncode == 0, "真基线被判红(误伤): " + run(good).stderr[-160:]
+old = json.loads(json.dumps(b))
+for gid, rec in (old.get("rates") or {}).items():
+    if isinstance(rec, dict) and rec.get("perHour"):
+        rec["perHour"] = round(rec["perHour"] * cov / 24.0, 4)     # 旧口径: 分母用窗口全长
+oldp = os.path.join(tmp, "old.json"); json.dump(old, open(oldp, "w", encoding="utf8"))
+assert run(oldp).returncode == 1, "旧口径(窗口全长作分母)的基线没判红 —— 偏差会原样回到判读里"
+zero = json.loads(json.dumps(b))
+for gid, rec in (zero.get("rates") or {}).items():
+    if isinstance(rec, dict):
+        rec["perHour"] = 0.0
+zerop = os.path.join(tmp, "zero.json"); json.dump(zero, open(zerop, "w", encoding="utf8"))
+assert run(zerop).returncode == 1, "有时代覆盖的臂被写成 0 却没判红(0 会被读成测过且为零)"
+print("三例: 真基线⇒绿 / 旧口径⇒红 / 有覆盖却写 0⇒红")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
