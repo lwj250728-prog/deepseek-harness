@@ -280,7 +280,14 @@ def main() -> int:
         print('  %s' % rev['reason'])
         return {'met': 0, 'unmet': 1, 'none': 2, 'pending': 3}[rev['verdict']]
 
+    # 消费"开工时的对照臂空间"(2026-09-12 11:5x): disable 现在会预检并落盘 controlHeadroom; 判读行必须
+    # 回显它 —— 否则那条预检又是一份没人看的声明(T202 的教训: 声明必须被消费)。开工时就没有空间 ⇒
+    # 本窗口的因果判据天生不开火, 判读行要把它写在明面上, 而不是让读者以为"测过了没效果"。
+    _dis = [r for r in recs if r.get('goal') == args.target and r.get('event') == 'disable']
+    _head = _dis[-1].get('controlHeadroom') if _dis else None
+    _waived = bool(_dis[-1].get('headroomWaived')) if _dis else None
     payload = {'ts': datetime.datetime.now().astimezone().isoformat(), 'target': args.target,
+               'controlHeadroomAtDisable': _head, 'headroomWaivedAtDisable': _waived,
                'baselineSource': baseline_src,
                'startIso': datetime.datetime.fromtimestamp(start_ms / 1000).astimezone().isoformat(),
                'endIso': datetime.datetime.fromtimestamp(end_ms / 1000).astimezone().isoformat(),
@@ -306,6 +313,8 @@ def main() -> int:
     print('  目标推进速率: 基线 %s → 干预 %s 次/h(比 %s) | 基线来源: %s'
           % ('不可判' if t_rate_b is None else format(t_rate_b, '.3f'),
              '不可判' if t_rate_i is None else format(t_rate_i, '.3f'), payload['targetRatio'], baseline_src))
+    if _waived:
+        print('  ⚠ 开工时就没有任何对照臂有推进空间(已显式豁免) ⇒ 本窗口的"降幅大于所有对照"天生不开火')
     print('  时代覆盖: 基线 %.1fh / 干预 %.1fh(窗口 %.1fh)%s'
           % (cov_b, cov_i, span / 3600000.0, '  ⚠ 基线覆盖不足 ⇒ 因果结论降级' if coverage_warn else ''))
     print('  对照: %s' % json.dumps(controls, ensure_ascii=False))

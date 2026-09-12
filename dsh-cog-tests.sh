@@ -8166,6 +8166,72 @@ assert "oneShotCutoff" in src, ("一次性会话没有宽限就结算 ⇒ 可能
 assert "quiet-frame-" in lib, "产物 lib 里没有这条规则(改了源码没构建: 宿主面两段式构建的坑)"
 print("一次性会话规则: 源码+产物均在, 且当前会话的待结算项仍先被跳过")
 '
+# ── T207 干预开工前必须保证"至少一条对照臂有推进空间"(2026-09-12 实测缺陷的机制化) ──
+# 用户问"行动帧拦了这么久, 效果对比怎么样"时把这条缺陷逼了出来: 预登记判据是"目标降幅**大于所有对照**",
+# 而实测窗口内三条 active 目标**全部门未满足** ⇒ 对照臂自己也塌成 0 ⇒ 判据**不可能**开火, no-effect 是
+# 被构造出来的(与 T199"饱和 ⇒ 没有开火空间"同型)。故: disable 前预检对照臂空间, 无空间则**拒绝**开窗
+# (确有理由须显式 --allow-no-headroom 并在 reason 写明), 把探测结果与是否豁免落盘, 且判读行必须回显它
+# (否则那条预检又是一份没人消费的声明)。
+echo "[T207] 干预开工前须保证至少一条对照臂有推进空间(无空间须显式豁免且判读回显)"
+t "无对照空间时 disable 必须拒绝, 显式豁免后才可开窗(并落盘探测结果)" python3 -c '
+import json, os, subprocess, tempfile
+TOOL = os.path.expanduser("~/dsh-fork/dsh-wake-intervention.py")
+def pool(tmp, ctl_wait):
+    open(os.path.join(tmp, "dormant-goals.jsonl"), "w", encoding="utf8").write("".join(
+        json.dumps(r, ensure_ascii=False) + "\n" for r in [
+            {"id": "goal-target", "status": "active", "nextAction": "x", "waitChecker": "/bin/true"},
+            {"id": "goal-ctl1", "status": "active", "nextAction": "y", "waitChecker": ctl_wait}]))
+def run(tmp, *extra):
+    env = dict(os.environ, DSH_COG_DIR=tmp)
+    return subprocess.run(["python3", TOOL, "disable", "goal-target", "--hours", "24",
+                           "--reversal-expectation", "恢复后 30 分钟内应见行动帧"] + list(extra),
+                          capture_output=True, text=True, timeout=600, env=env)
+t1 = tempfile.mkdtemp(); pool(t1, "/bin/false")
+r0 = run(t1)
+assert r0.returncode == 2, "对照臂全无空间却允许开窗(exit %d) —— 判据天生不开火却没人拦" % r0.returncode
+assert not os.path.exists(os.path.join(t1, "wake-interventions.jsonl")), "被拒绝却仍写了干预记录"
+r1 = run(t1, "--allow-no-headroom", "--reason", "明知无空间也要测开关是否真关上")
+assert r1.returncode == 0, "显式豁免后仍被拒: " + (r1.stderr or r1.stdout)[-160:]
+rec = [json.loads(l) for l in open(os.path.join(t1, "wake-interventions.jsonl"), encoding="utf8") if l.strip()][-1]
+assert rec.get("headroomWaived") is True, "豁免没有落盘(事后没人知道这个窗口天生不开火)"
+assert isinstance(rec.get("controlHeadroom"), dict) and rec["controlHeadroom"], "没落盘对照臂探测结果"
+t2 = tempfile.mkdtemp(); pool(t2, "/bin/true")
+r2 = run(t2)
+assert r2.returncode == 0, "有对照臂可驱动却拒绝开窗(误伤): " + (r2.stderr or r2.stdout)[-160:]
+rec2 = [json.loads(l) for l in open(os.path.join(t2, "wake-interventions.jsonl"), encoding="utf8") if l.strip()][-1]
+assert rec2.get("headroomWaived") is False, "有空间却被记成豁免"
+assert rec2["controlHeadroom"]["goal-ctl1"]["headroom"] is True, "探测结果与池不符: %r" % rec2.get("controlHeadroom")
+print("三例: 无空间⇒拒绝(2)且不落盘 / 显式豁免⇒开窗且落盘豁免 / 有空间⇒直接开窗")
+'
+t "判读行必须回显开工时的对照臂空间(否则预检是没人消费的声明)" python3 -c '
+import datetime, json, os, subprocess, tempfile
+RO = os.path.expanduser("~/dsh-fork/dsh-wake-intervention-readout.py")
+T = "goal-x"
+now = datetime.datetime.now().astimezone()
+tmp = tempfile.mkdtemp()
+iso = lambda dt: dt.isoformat()
+start = iso(now - datetime.timedelta(hours=4))
+open(os.path.join(tmp, "attribution-era.json"), "w", encoding="utf8").write(json.dumps({"since": iso(now - datetime.timedelta(hours=6))}))
+open(os.path.join(tmp, "quiet-driver-frames.jsonl"), "w", encoding="utf8").write("")
+open(os.path.join(tmp, "incubation-log.jsonl"), "w", encoding="utf8").write(
+    json.dumps({"ts": iso(now - datetime.timedelta(hours=3)), "goalId": T, "evidence": "pool-change"}) + "\n")
+open(os.path.join(tmp, "dormant-goals.jsonl"), "w", encoding="utf8").write(json.dumps({"id": T, "status": "active"}) + "\n")
+open(os.path.join(tmp, "wake-interventions.jsonl"), "w", encoding="utf8").write(json.dumps(
+    {"ts": start, "event": "disable", "goal": T, "plannedHours": 24,
+     "reversalExpectation": "恢复后 30 分钟内应见行动帧",
+     "controlHeadroom": {"goal-ctl1": {"headroom": False, "why": "门未满足(exit 1)"}},
+     "headroomWaived": True}, ensure_ascii=False) + "\n")
+env = dict(os.environ, DSH_COG_DIR=tmp)
+r = subprocess.run(["python3", RO, "--target", T, "--start", start, "--end", iso(now - datetime.timedelta(hours=2))],
+                   capture_output=True, text=True, timeout=600, env=env)
+assert r.returncode == 0, "判读失败: " + (r.stderr or r.stdout)[-200:]
+p = [json.loads(l) for l in open(os.path.join(tmp, "wake-intervention-readout.jsonl"), encoding="utf8") if l.strip()][-1]
+assert "controlHeadroomAtDisable" in p and "headroomWaivedAtDisable" in p, (
+    "判读行没有消费开工时的对照臂空间 ⇒ 预检成了没人看的声明")
+assert p["headroomWaivedAtDisable"] is True, "豁免标记没被读出来: %r" % p["headroomWaivedAtDisable"]
+assert "对照臂有推进空间" in r.stdout, "判读输出没有把天生不开火写在明面上"
+print("判读行回显: controlHeadroomAtDisable + headroomWaivedAtDisable, 且输出明示天生不开火")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

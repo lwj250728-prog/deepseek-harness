@@ -62,6 +62,43 @@ def current(goal_id: str) -> dict:
     return row
 
 
+def pool_rows() -> dict:
+    """池的 last-wins 视图。"""
+    latest: dict = {}
+    for line in open(POOL, encoding='utf8'):
+        if line.strip():
+            r = json.loads(line)
+            if r.get('id'):
+                latest[str(r['id'])] = r
+    return latest
+
+
+def control_headroom(target: str, timeout: float = 60.0) -> dict:
+    """对照臂**有没有推进空间**(2026-09-12 11:5x 实测缺陷所在的机制化)。
+
+    干预实验的预登记判据是"目标降幅**大于所有对照**"—— 这条判据要能开火, 前提是**至少有一条对照臂
+    真的在推进**。实测: 三条 active 目标全部门未满足时(目标 /bin/false + 孵化的判读门 + 检索的样本门),
+    对照臂自己也塌成 0 ⇒ 判据**不可能**成立, 于是 no-effect 是被构造成出来的、不是测出来的
+    (与 T199"饱和 ⇒ 判据没有开火空间"同型)。故关闭干预前先探测: 无门或门当场 exit 0 ⇒ 有空间。
+    测不出(门跑不动/超时)⇒ 按**没有**空间记(fail-closed: 宁可要求显式豁免)。
+    """
+    out: dict = {}
+    for gid, row in pool_rows().items():
+        if gid == target or str(row.get('status')) != 'active':
+            continue
+        cmd = str(row.get('waitChecker') or '').strip()
+        if not cmd:
+            out[gid] = {'headroom': True, 'why': '无门'}
+            continue
+        try:
+            rc = subprocess.run(cmd, shell=True, capture_output=True, timeout=timeout).returncode
+        except Exception as exc:  # noqa: BLE001
+            out[gid] = {'headroom': False, 'why': '门跑不动(%s)' % type(exc).__name__}
+            continue
+        out[gid] = {'headroom': rc == 0, 'why': '门当场满足' if rc == 0 else '门未满足(exit %d)' % rc}
+    return out
+
+
 def records() -> list[dict]:
     if not os.path.exists(RECORD):
         return []
@@ -94,6 +131,8 @@ def main() -> int:
     d.add_argument('goal')
     d.add_argument('--hours', type=float, default=24.0)
     d.add_argument('--reason', default='')
+    d.add_argument('--allow-no-headroom', action='store_true',
+                   help='明知没有任何对照臂有推进空间仍要开窗(须在 --reason 写明为什么这种窗口仍有信息量)')
     d.add_argument('--reversal-expectation', default='',
                    help='恢复腿预登记: 窗口结束后必须看到什么(留空即拒绝关闭 —— 事后叙事不算预登记)')
     p = sub.add_parser('preregister')
@@ -143,10 +182,19 @@ def main() -> int:
         if orig == OFF_THRESHOLDS and str(orig_wait).strip() == OFF_WAIT_CHECKER:
             print('已经是关闭状态(阈值 %s + waitChecker %s), 幂等返回' % (json.dumps(orig, ensure_ascii=False), OFF_WAIT_CHECKER))
             return 0
+        head = control_headroom(args.goal)
+        no_headroom = not any(v['headroom'] for v in head.values())
+        if no_headroom and not args.allow_no_headroom:
+            print('拒绝关闭: 没有任何对照臂有推进空间(%s) ⇒ 预登记判据"目标降幅大于所有对照"天生没有开火空间, '
+                  '这个窗口只会被构造成 no-effect(2026-09-12 实测: 三条 active 目标全部门未满足时正如此)。'
+                  '确有理由请加 --allow-no-headroom 并在 --reason 写明。' % json.dumps(head, ensure_ascii=False),
+                  file=sys.stderr)
+            return 2
         rc = apply(args.goal, OFF_THRESHOLDS, args.reason or '关闭唤醒做干预实验', OFF_WAIT_CHECKER)
         if rc == 0:
             with open(RECORD, 'a', encoding='utf8') as f:
                 f.write(json.dumps({'ts': now_iso(), 'event': 'disable', 'goal': args.goal,
+                                    'controlHeadroom': head, 'headroomWaived': bool(no_headroom),
                                     'thresholdsBefore': orig, 'thresholdsAfter': OFF_THRESHOLDS,
                                     'waitCheckerBefore': orig_wait, 'waitCheckerAfter': OFF_WAIT_CHECKER,
                                     'triggerCountBefore': row.get('triggerCount'),
