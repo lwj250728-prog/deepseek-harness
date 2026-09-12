@@ -8242,6 +8242,41 @@ assert p["headroomWaivedAtDisable"] is True, "豁免标记没被读出来: %r" %
 assert "对照臂有推进空间" in r.stdout, "判读输出没有把天生不开火写在明面上"
 print("判读行回显: controlHeadroomAtDisable + headroomWaivedAtDisable, 且输出明示天生不开火")
 '
+# ── T208 账本里的时间戳必须可解析(不可解析的字段会被判据静默跳过 ⇒ 制造停滞黑洞) ──
+# 起因(2026-09-12 12:4x 三问帧实查): 我用 fromisoformat 复核"最老未关单项"时**崩在**一条
+# `2026-09-09T12:5x:00` 上 —— 10 条记录的 ts/tsBackfilled 里带着笔记里的占位符 `x`(从"12:5x"这类近似
+# 时刻回填而来)。危害不是难读, 而是**判据会静默跳过**: T143 取 min(ts, createdTs, tsBackfilled) 时用的是
+# try/except, 解析失败的字段被丢掉 ⇒ 那个条目的年龄按更晚的时刻算, 于是"停滞数周"被洗成"刚动过"
+# (正是 cl-055 修过的同一条洞, 只是从另一个入口进来)。故: 账本与测试账本里的时间戳字段一律必须可解析,
+# 且标了 tsApprox 的近似值也必须是**合法的**近似值。
+echo "[T208] 账本时间戳必须可解析(不可解析字段会被判据静默跳过)"
+t "账本/测试账本里的时间戳字段必须全部可解析(近似值也须是合法 ISO)" python3 -c '
+import datetime, json, os
+CLAIMS = os.environ.get("DSH_COG_LEDGER") or os.path.expanduser("~/.dsh/cognitive-pipeline/claims-ledger.jsonl")
+TESTS = os.environ.get("DSH_COG_TESTPENDING") or os.path.expanduser("~/.dsh/cognitive-pipeline/test-pending.jsonl")
+FIELDS = ("ts", "createdTs", "tsBackfilled", "reviewBy", "doneAt", "generatedAt")
+def bad(v):
+    if not v:
+        return False
+    try:
+        datetime.datetime.fromisoformat(str(v)[:19])
+        return False
+    except Exception:
+        return True
+def scan(path, keys):
+    latest = {}
+    for line in open(path, encoding="utf8"):
+        if line.strip():
+            r = json.loads(line)
+            if r.get(keys):
+                latest[r[keys]] = r
+    return [(k, f, str(v.get(f))) for k, v in latest.items() for f in FIELDS if bad(v.get(f))]
+badc = scan(CLAIMS, "id")
+badt = scan(TESTS, "id")
+assert not badc, "言行账本里含不可解析时间戳(停滞判据会静默跳过该字段): %s" % badc[:5]
+assert not badt, "测试账本里含不可解析时间戳: %s" % badt[:5]
+print("两本账的时间戳字段全部可解析(含 tsApprox 近似值)")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
