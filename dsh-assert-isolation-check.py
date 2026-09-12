@@ -13,7 +13,16 @@
     (读不到世界就该失败, 而不是"空过");
   · 取不到 body / 超时 ⇒ 记为 skip 并**显式报数**(不得当成通过)。
 
+第二类可隔离性(2026-09-12 19:5x, T217 触发): 有一条新判据在空世界下**必然判绿却不空洞** —— 它自带合成
+世界(临时目录 + 合成账本), 走的是**变异证伪**而不是世界根注入(和 T214/T216 同一族)。用"空世界判红"判它
+是**口径错配**: 它读世界根的方式就是自己造一个。故本条判据承认两种等价的隔离性证明:
+  (a) 空世界下判红 —— 世界根注入点; 或
+  (b) **登记在 guard-fire.json 的 must-fire 探针被真跑一次且按预期退出**(变异版被抓 ⇒ 判据确实能区分对错)。
+(b) 比 (a) 更强而不是更弱: (a) 只证明"它读世界根", (b) 证明"喂它一个坏件它会红" —— 而是**机器跑出来的**,
+不是文本理由。故 `--exempt` 只留给经不起 (b) 的历史债, 新判据请走登记探针这条正路。
+
 用法: dsh-assert-isolation-check.py [--suite P] [--baseline P] [--timeout S] [--json] [--freeze]
+                                 [--registry P] [--probe-timeout S]
       --freeze 把**当前全部**断言名写入基线(建立历史债快照, 只做一次)
 退出码: 0 = 合规; 1 = 有新判据不可隔离; 3 = 读数失败。
 """
@@ -33,6 +42,54 @@ DEFAULT_SUITE = os.path.expanduser('~/dsh-fork/dsh-cog-tests.sh')
 DEFAULT_BASE = os.path.join(os.environ.get('DSH_COG_DIR') or
                             os.path.expanduser('~/.dsh/cognitive-pipeline'),
                             'assert-isolation-baseline.json')
+# (b) 类隔离性的证据源: guard-fire 登记簿。缺它 ⇒ 只有 (a) 一条路(不做静默放行)。
+DEFAULT_REGISTRY = os.path.join(os.environ.get('DSH_COG_DIR') or
+                                os.path.expanduser('~/.dsh/cognitive-pipeline'),
+                                'guard-fire.json')
+
+
+def mutant_witness(name: str, registry: str, timeout: float):
+    """把某条判据的 must-fire 探针**真跑两臂** → (是否证明, 说明)。
+
+    只认 guard-fire.json 里 `assertion` 名字逐字相同、且带 `command` 的登记项。
+    两臂(缺一不可, 否则"常退 1 的假探针"也能骗过只看出场码的核验):
+      · 变异臂: 按登记的 expectedExit 退出 ⇒ 判据抓得住变异件;
+      · 干净臂: 带 DSH_PROBE_CLEAN=1 再跑 ⇒ 必须退出 0 ⇒ 判据在**原件**上不红。
+    探针自身失效(exit 3) / 没开火 / 干净臂也红 ⇒ 一律不算证明(不做静默放行)。
+    """
+    if not os.path.exists(registry):
+        return False, '无登记簿(%s)' % registry
+    try:
+        reg = json.load(open(registry, encoding='utf8'))
+    except Exception as exc:
+        return False, '登记簿读不了(%s)' % exc
+    cmds = []
+    for g in (reg.get('guards') or []):
+        for mf in (g.get('mustFire') or []):
+            if str(mf.get('assertion') or '').strip() == name and str(mf.get('command') or '').strip():
+                cmds.append((g.get('guard'), mf['command'], int(mf.get('expectedExit', 1))))
+    if not cmds:
+        return False, '登记簿里没有本条判据的 must-fire 探针'
+    fails = []
+    for guard, cmd, want in cmds:
+        try:
+            r = subprocess.run(['bash', '-lc', cmd], capture_output=True, text=True,
+                               timeout=timeout, env=dict(os.environ))
+            if r.returncode != want:
+                fails.append('登记的探针 %s 没按预期开火(变异臂 exit %d, 期望 %d): %s' % (
+                    guard, r.returncode, want, (r.stderr or r.stdout).strip()[-120:]))
+                continue
+            c = subprocess.run(['bash', '-lc', cmd], capture_output=True, text=True,
+                               timeout=timeout, env=dict(os.environ, DSH_PROBE_CLEAN='1'))
+        except subprocess.TimeoutExpired:
+            fails.append('探针 %s 超时(>%.0fs)' % (guard, timeout))
+            continue
+        if c.returncode != 0:
+            fails.append('探针 %s 缺干净臂/干净臂也红(exit %d): 只证明"判据会红", 没证明"红在变异上" —— '
+                         '常退 %d 的假探针同样通不过这条' % (guard, c.returncode, want))
+            continue
+        return True, '变异探针 %s 双臂可区分(变异臂 exit %d / 干净臂 exit 0)' % (guard, want)
+    return False, ('; '.join(fails) if fails else '无可用探针')
 
 
 def assertions(suite: str):
@@ -61,6 +118,9 @@ def main() -> int:
     ap.add_argument('--freeze', action='store_true')
     ap.add_argument('--exempt', default=None, help='把某条断言显式排除(须配 --reason)')
     ap.add_argument('--reason', default='')
+    ap.add_argument('--registry', default=DEFAULT_REGISTRY)
+    ap.add_argument('--probe-timeout', type=float, default=180.0)
+    ap.add_argument('--no-probe', action='store_true', help='只按空世界口径判(不跑变异探针)')
     args = ap.parse_args()
     if not os.path.exists(args.suite):
         print('[isolation] 读不到套件: %s' % args.suite, file=sys.stderr)
@@ -99,6 +159,7 @@ def main() -> int:
     empty = tempfile.mkdtemp(prefix="isolation-empty-")
     env = dict(os.environ, DSH_COG_DIR=empty)
     bad, skipped = [], []
+    mutant_ok, mutant_no = [], []
     for name, body in new_items:
         if not body.strip() or "npx tsx" in body:
             skipped.append(name)
@@ -110,18 +171,32 @@ def main() -> int:
             skipped.append(name)
             continue
         if r.returncode == 0:
-            bad.append(name)
+            # 空世界仍判绿 ⇒ 不读世界根。若它自带合成世界, 则须拿**变异探针真跑一次**来抵账。
+            if args.no_probe:
+                bad.append(name)
+                continue
+            proven, why = mutant_witness(name, args.registry, args.probe_timeout)
+            if proven:
+                mutant_ok.append('%s(%s)' % (name, why))
+            else:
+                mutant_no.append('%s(%s)' % (name, why))
+                bad.append(name)
     if args.json:
         print(json.dumps({'new': len(new_items), 'notIsolatable': bad, 'skipped': skipped,
-                          'rotten': rotten}, ensure_ascii=False))
+                          'rotten': rotten, 'mutantIsolatable': mutant_ok,
+                          'mutantRejected': mutant_no}, ensure_ascii=False))
     if rotten:
         print('红: 冻结基线里有断言已消失(基线腐烂, 应同步缩减): %s' % rotten[:5], file=sys.stderr)
         return 1
     if bad:
-        print('红: 新判据在空世界下仍判绿(= 不读世界根, 喂不了缺陷件, 只能等活世界真坏): %s' % bad[:5], file=sys.stderr)
+        print('红: 新判据不可隔离(空世界下判绿且无开火的变异探针 ⇒ 既喂不了缺陷件也只能等活世界真坏): %s'
+              % bad[:5], file=sys.stderr)
         return 1
-    print('[isolation] 新判据 %d 条均可隔离(空世界下判红); 历史债 %d 条; 跳过 %d 条(重活/取不到 body)'
-          % (len(new_items) - len(skipped), len(base), len(skipped)))
+    print('[isolation] 新判据 %d 条均可隔离(空世界下判红 %d 条; 变异探针已开火 %d 条); 历史债 %d 条; 跳过 %d 条'
+          % (len(new_items) - len(skipped), len(new_items) - len(skipped) - len(mutant_ok),
+             len(mutant_ok), len(base), len(skipped)))
+    if mutant_ok:
+        print('[isolation] 变异可隔离(靠 guard-fire 登记的探针真跑开火): %s' % '; '.join(mutant_ok))
     return 0
 
 

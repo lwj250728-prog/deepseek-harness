@@ -7,11 +7,26 @@
 
 用法: python3 dsh-citation-by-trigger.py
 """
-import json, os, sys
+import datetime, json, os, sys
 from collections import defaultdict
 
 D = os.path.expanduser('~/.dsh/cognitive-pipeline')
 MIN_SETTLED = 50
+
+
+def load_era(d: str):
+    """返回 (since_ms, since_iso)。读不到/解析不了直接抛 —— 调用方 fail-closed。
+
+    cl-274: 引用率的**采集方式**在 09-10 05:28 前后变了(注入块里加了引用契约,
+    commit 8e5b7dc)。09-04~09-09 的 0%~5% 测的是"我有没有自发写 ID", 不是
+    "经验有没有用"; 混在一起算平均会把"信号不存在"读成"通道死亡"。
+    """
+    p = os.path.join(d, 'citation-era.json')
+    since = str(json.load(open(p, encoding='utf8')).get('since') or '')
+    if not since:
+        raise ValueError('citation-era.json 缺 since')
+    ms = int(datetime.datetime.fromisoformat(since).timestamp() * 1000)
+    return ms, since
 
 
 def cls(ts: str) -> str:
@@ -26,8 +41,17 @@ def cls(ts: str) -> str:
 
 
 def main() -> int:
-    path = os.path.join(D, 'injections.jsonl')
-    rows = [json.loads(l) for l in open(path, encoding='utf8') if l.strip()]
+    d = os.environ.get('DSH_COG_DIR') or D
+    try:
+        era_ms, era_since = load_era(d)
+    except Exception as exc:
+        print('缺时代: 读不到/解析不了 citation-era.json(%s) ⇒ 拒绝出数(跨时代平均会把'
+              '"信号不存在"读成"经验没用")' % exc, file=sys.stderr)
+        return 1
+    path = os.path.join(d, 'injections.jsonl')
+    all_rows = [json.loads(l) for l in open(path, encoding='utf8') if l.strip()]
+    rows = [r for r in all_rows if (r.get('createdAt') or 0) >= era_ms]
+    pre_era = len(all_rows) - len(rows)
     agg = defaultdict(lambda: [0, 0])
     for r in rows:
         if r.get('cited') is None:
@@ -38,7 +62,10 @@ def main() -> int:
             agg[c][0] += 1
     total_cited = sum(v[0] for v in agg.values())
     total_settled = sum(v[1] for v in agg.values())
-    print(f'注入 {len(rows)} 条｜已结算 {total_settled}｜总引用率 {total_cited / max(total_settled, 1) * 100:.1f}%')
+    print(f'注入 {len(rows)} 条｜已结算 {total_settled}｜总引用率 {total_cited / max(total_settled, 1) * 100:.1f}%'
+          f'｜时代 since={era_since}(跨时代剔除 {pre_era} 条: 那段时间 cited 不可观测, 分子分母都不计)')
+    if total_settled < MIN_SETTLED:
+        print(f'  证据不足: 时代内已结算仅 {total_settled} 条(< {MIN_SETTLED}) ⇒ 死亡通道判定与引用率均不可读, 先攒数据。')
     dead = []
     for k, (cited, settled) in sorted(agg.items()):
         rate = cited / max(settled, 1) * 100

@@ -8392,11 +8392,44 @@ print("纯文本声明 %d 条仍冻结(另有 %d 条写明 exempt); 本帧无新
 # 此后**新增**的断言必须在空世界下判红(或显式 --exempt 留理由)。
 echo "[T210] 新判据必须可隔离(空世界下判红), 历史债冻结且不许腐烂"
 t "新判据必须在空世界下判红, 且冻结基线不得腐烂" python3 -c '
-import os, subprocess, sys
+import json, os, subprocess, sys, tempfile
 CHK = "/home/ubuntu/dsh-fork/dsh-assert-isolation-check.py"
 r = subprocess.run([sys.executable, CHK], capture_output=True, text=True, timeout=1200)
 assert r.returncode == 0, "新判据隔离性检查转红: " + (r.stderr or r.stdout)[-300:]
 print(r.stdout.strip()[:200])
+# 2026-09-12 20:0x: 本条判据承认了第二条隔离性证明(变异探针双臂开火), 那么**这条新路自己**也必须被行为消费:
+# 常退 1 的假探针(永不分变异与原件)不得放行, 只有"变异臂红 + 干净臂绿"的双臂探针才放行。
+# 用合成套件/合成基线/合成登记簿跑两遍 —— 否则新路就是一张免费通行证。
+Q = chr(39); DQ = chr(34)
+tmp = tempfile.mkdtemp()
+suite = os.path.join(tmp, "suite.sh")
+def line(name, body):
+    return "t " + DQ + name + DQ + " python3 -c " + Q + "\n" + body + "\n" + Q + "\n"
+with open(suite, "w", encoding="utf8") as f:
+    f.write(line("老判据(冻结)", "print(1)"))
+    f.write(line("新判据(自带合成世界)", "print(2)"))
+base = os.path.join(tmp, "baseline.json")
+json.dump({"at": "synth", "names": ["老判据(冻结)"], "reason": "合成基线"},
+          open(base, "w", encoding="utf8"), ensure_ascii=False)
+fake = os.path.join(tmp, "fake.sh")
+open(fake, "w", encoding="utf8").write("#!/usr/bin/env bash\nexit 1\n")
+two = os.path.join(tmp, "two.sh")
+open(two, "w", encoding="utf8").write(
+    "#!/usr/bin/env bash\nif [ ${DSH_PROBE_CLEAN:-0} = 1 ]; then exit 0; fi\nexit 1\n")
+def reg(tool):
+    p = os.path.join(tmp, "reg.json")
+    json.dump({"guards": [{"guard": "TX", "mustFire": [{"assertion": "新判据(自带合成世界)",
+              "command": "bash " + tool, "expectedExit": 1}]}]},
+              open(p, "w", encoding="utf8"), ensure_ascii=False)
+    return p
+def chk(tool):
+    return subprocess.run([sys.executable, CHK, "--suite", suite, "--baseline", base, "--registry", reg(tool)],
+                          capture_output=True, text=True, timeout=900)
+rf = chk(fake)
+assert rf.returncode == 1, "常退 1 的假探针被放行 —— 它根本不区分变异与原件, 等于给一切开绿灯"
+rt = chk(two)
+assert rt.returncode == 0, "双臂探针没被放行(新路形同虚设): " + (rt.stderr or rt.stdout)[-200:]
+print("变异可隔离: 假探针(常退 1)被拒; 双臂探针(变异红/干净绿)放行")
 '
 # ── T211 引用/采纳率的消费方必须声明时代(采集方式变了就不可跨时代平均) ──
 # cl-274 取证: 末次引用停在 09-08 06:47, 09-09 全天 126 条注入 0 引用, 09-10 05:28 才出现第一条 —— 而让"引用"
@@ -8578,6 +8611,52 @@ assert len(kept) == 2, "账本应只剩每个 id 一行(实得 %d 行)" % len(ke
 archived = [json.loads(l) for l in open(arch, encoding="utf8") if l.strip()]
 assert len(archived) == 2, "归档行数应为 2(实得 %d)" % len(archived)
 print("压缩: last-wins 不变; 账本 4→2 行, 归档 %d 行" % len(archived))
+'
+# ── T217 引用率消费方必须按"引用时代"过滤(cl-274) ──
+# 起因: 引用率的**采集方式**在 09-10 05:28 前后变了(commit 8e5b7dc 在注入块里加了引用契约),
+# 09-04~09-09 的 0%~5% 测的是"我有没有自发写出 ID", 不是"经验有没有用"。混算会把**信号不存在**
+# 读成**通道死亡** —— 实测 dsh-citation-by-trigger.py 跨时代时会给 jump/other 通道打"死亡"标记,
+# 按时代过滤后死亡通道 0 条、总引用率 8.0%→21.1%。本组用合成账本证明"时代"是被**行为消费**的,
+# 而不是脚本里的一句注释: 改时代起点 ⇒ 读数必须跟着变。
+echo "[T217] 引用率消费方必须按引用时代过滤(声明须被行为消费)"
+t "引用率消费方必须按时代过滤且缺时代拒出数" python3 -c '
+import json, os, subprocess, sys, tempfile, datetime
+TOOL = os.environ.get("DSH_CBT_TOOL") or os.path.expanduser("~/dsh-fork/dsh-citation-by-trigger.py")
+tmp = tempfile.mkdtemp()
+def ms(iso):
+    return int(datetime.datetime.fromisoformat(iso).timestamp() * 1000)
+# 时代前 3 条(全未引用) + 时代后 2 条(1 引用) —— 混算 20.0%, 按时代 50.0%
+rows = [{"triggerSource": "static:x", "cited": False, "createdAt": ms("2026-09-01T10:00:00+08:00")},
+        {"triggerSource": "static:x", "cited": False, "createdAt": ms("2026-09-02T10:00:00+08:00")},
+        {"triggerSource": "static:x", "cited": False, "createdAt": ms("2026-09-03T10:00:00+08:00")},
+        {"triggerSource": "static:x", "cited": True,  "createdAt": ms("2026-09-11T10:00:00+08:00")},
+        {"triggerSource": "static:x", "cited": False, "createdAt": ms("2026-09-11T11:00:00+08:00")}]
+with open(os.path.join(tmp, "injections.jsonl"), "w", encoding="utf8") as f:
+    for r in rows:
+        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+def era(since):
+    with open(os.path.join(tmp, "citation-era.json"), "w", encoding="utf8") as f:
+        json.dump({"since": since}, f, ensure_ascii=False)
+def run():
+    return subprocess.run([sys.executable, TOOL], capture_output=True, text=True,
+                          timeout=300, env=dict(os.environ, DSH_COG_DIR=tmp))
+era("2026-09-10T05:28:20+08:00")
+r = run()
+assert r.returncode == 0, "工具没跑通(exit %d): %s" % (r.returncode, (r.stderr or r.stdout)[-200:])
+assert "总引用率 50.0%" in r.stdout, "时代过滤没生效: 时代内应为 1/2=50.0%(混算才是 20.0%), 实得: " + r.stdout.splitlines()[0]
+assert "剔除 3 条" in r.stdout, "没有如实报告被剔除的跨时代行数: " + r.stdout.splitlines()[0]
+# 判决性变异: 把时代推到未来 ⇒ 时代内行数必须归零(声明若只是注释, 这里不会变)
+era("2030-01-01T00:00:00+08:00")
+r2 = run()
+assert r2.returncode == 0, "变异跑失败(exit %d)" % r2.returncode
+assert "已结算 0" in r2.stdout, "时代起点未被行为消费(推到 2030 后仍算出已结算>0): " + r2.stdout.splitlines()[0]
+assert "证据不足" in r2.stdout, "证据不足时必须明说, 不能把 0 条当读数输出"
+# 缺时代 ⇒ 拒出数(fail-closed), 决不允许退回混算
+os.remove(os.path.join(tmp, "citation-era.json"))
+r3 = run()
+assert r3.returncode != 0, "缺 citation-era.json 时必须非 0 退出(否则跨时代平均会静默回来)"
+assert "缺时代" in (r3.stderr + r3.stdout), "缺时代时须明说原因, 实得: " + (r3.stderr or r3.stdout)[-160:]
+print("时代门: 混算 20.0%% -> 按时代 50.0%%(剔 3 条); 推到 2030 => 已结算 0; 缺时代 => exit %d" % r3.returncode)
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
