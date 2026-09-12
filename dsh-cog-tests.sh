@@ -7824,6 +7824,94 @@ assert d["no_checker_waiting_text"] is True, "无 checker 时文本启发式兜�
 assert d["no_checker_action_text"] is False, "无 checker 的行动型文本被误跳过"
 print("四组合正确: 未满足⇒跳过 / 已满足⇒不跳 / 无checker⇒看文本(等待跳过, 行动不跳)")
 '
+# ── T201 精排样本门带时限: 时限只放行"测得出但样本不足", 不得成为绕过 fail-closed 的后门 ──
+# 2026-09-12 09:4x 取证: A1·真提升 全史仅 6 条、已结算停在 2 条, 自 09-09 18:45 起 63 小时未动(另 4 条
+# 从未结算), 而 predictions.jsonl 每回合都在写 ⇒ 纯样本门在静默期会自我饿死(cl-250/cl-266 同族)。
+# 故给门加声明式时限(--deadline)。本组守两条边界: ①"到点就放行"**不得**覆盖"测不出来"(否则时限就是
+# 绕过 fail-closed 的后门); ②时限放行必须自称"证据不足", 否则下游会把它读成"样本已足、可以对账了"。
+echo "[T201] 精排样本门: 时限放行 ≠ 样本已足, 且 fail-closed 优先于时限"
+t "样本门: 时限只放行「测得出但样本不足」, 测不出/时限写错一律不放行, 两种放行可判别" python3 -c '
+import datetime, os, subprocess, tempfile
+REF = os.path.expanduser("~/dsh-fork/dsh-wait-check-refine.py")
+tmp = tempfile.mkdtemp()
+def shim(name, lines):
+    p = os.path.join(tmp, name)
+    open(p, "w", encoding="utf8").write("\n".join(lines) + "\n")
+    return p
+low = shim("low.py", ["print(\"A1·真提升(changed): 已结算 2 条, 平均误差 0.417\")",
+                      "print(\"B·未开火(审计后): 已结算 2 条, 平均误差 0.082\")"])
+met = shim("met.py", ["print(\"A1·真提升(changed): 已结算 7 条, 平均误差 0.410\")",
+                      "print(\"B·未开火(审计后): 已结算 6 条, 平均误差 0.090\")"])
+bad = shim("bad.py", ["print(\"完全不是预期格式的输出\")"])
+err = shim("err.py", ["import sys", "sys.exit(2)"])
+now = datetime.datetime.now().astimezone()
+past = (now - datetime.timedelta(hours=1)).isoformat()
+future = (now + datetime.timedelta(hours=1)).isoformat()
+def run(tool, *extra):
+    return subprocess.run(["python3", REF] + list(extra), capture_output=True, text=True,
+                          timeout=600, env=dict(os.environ, DSH_REFINE_EVAL=tool))
+a = run(low, "--min-n", "5", "--deadline", past)
+assert a.returncode == 0, "时限已到且测得出但样本不足, 却没放行(exit %d)" % a.returncode
+assert "证据不足" in a.stdout, "时限放行却没显式标注证据不足 —— 下游会把它读成样本已足"
+assert "放行理由=deadline" in a.stdout, "时限放行没有可判别的理由行"
+b = run(low, "--min-n", "5", "--deadline", future)
+assert b.returncode == 1, "时限未到就该继续等待(exit %d)" % b.returncode
+c = run(low, "--min-n", "5")
+assert c.returncode == 1, "无时限时应继续等待(exit %d)" % c.returncode
+d = run(bad, "--min-n", "5", "--deadline", past)
+assert d.returncode == 3, "**测不出来**却按时限放行了(exit %d) —— 时限成了绕过 fail-closed 的后门" % d.returncode
+e = run(met, "--min-n", "5", "--deadline", past)
+assert e.returncode == 0 and "放行理由=samples" in e.stdout, "样本已足时理由必须是 samples(两种放行可判别)"
+f = run(low, "--min-n", "5", "--deadline", "明天")
+assert f.returncode == 3, "时限字符串写错却没 fail-closed(exit %d)" % f.returncode
+g = run(low, "--min-n", "5", "--deadline", "2026-09-13T08:30:00")
+assert g.returncode == 3, "时限缺时区却没 fail-closed(exit %d)" % g.returncode
+# 两条 fail-closed 分支必须都被覆盖(bad.py 输出垃圾但 exit 0 ⇒ 走**解析**分支; err.py 非零退出 ⇒ 走**度量器失败**分支)
+h = run(err, "--min-n", "5", "--deadline", past)
+assert h.returncode == 3, "度量器非零退出却没 fail-closed(exit %d)" % h.returncode
+print("八例: 过点放行(标证据不足) / 未到等待 / 无时限等待 / 解析不了仍 fail-closed / 度量器失败仍 fail-closed / 样本已足标 samples / 坏时限 fail-closed / 裸时间 fail-closed")
+'
+# ── T202 目标池不得全体无界挂门(cl-266 的正面判据; 时限须被**行为**消费) ──
+# cl-266 原提议的代理判据是"该门的输入产物过去 24h 有写入" —— 2026-09-12 09:4x 取证**证伪**了它:
+# refine 门的输入 predictions.jsonl 每回合都在写(09:32 刚写过), 而它的决定性计数器(A1·已结算)自
+# 09-09 18:45 起 63 小时未动(全史 6 条里 4 条从未结算) ⇒ 该代理会把一道饿死的门判成活门。
+# 故改用可判定判据(dsh-goal-gate-liveness.py): 至少一条 active 目标能"自行解冻"; 且时限必须被**行为**
+# 消费 —— 把命令行里那串时限换成过去必须放行; `/bin/false --deadline <D>` 这类装饰性时限须判红
+# (这正是"结构判据抓不住接线错"的行为化版本)。
+echo "[T202] 门不得全体无界: 至少一条能自行解冻 + 时限须被行为消费"
+t "池内至少有一条门能自行解冻(不得全体无界 ⇒ 永久静默)" python3 /home/ubuntu/dsh-fork/dsh-goal-gate-liveness.py --quiet
+t "判据可判别: 全无界池与装饰性时限池必须判红, 真消费时限的池判绿" python3 -c '
+import datetime, json, os, subprocess, tempfile
+LINT = os.path.expanduser("~/dsh-fork/dsh-goal-gate-liveness.py")
+tmp = tempfile.mkdtemp()
+D = (datetime.datetime.now().astimezone() + datetime.timedelta(hours=20)).isoformat()
+def pool(name, rows):
+    p = os.path.join(tmp, name)
+    open(p, "w", encoding="utf8").write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+    return p
+def run(p):
+    return subprocess.run(["python3", LINT, "--pool", p, "--quiet"], capture_output=True, text=True, timeout=300)
+all_unbounded = pool("a.jsonl", [{"id": "g1", "status": "active", "waitChecker": "/bin/false"},
+                                 {"id": "g2", "status": "active", "waitChecker": "/bin/false"}])
+decorative = pool("b.jsonl", [{"id": "g1", "status": "active", "waitChecker": "/bin/false --deadline " + D,
+                               "waitCheckerDeadline": D}])
+shim = os.path.join(tmp, "shim.py")
+open(shim, "w", encoding="utf8").write(
+  "import sys, datetime\n"
+  "a = sys.argv\n"
+  "d = [a[i + 1] for i, x in enumerate(a) if x == \"--deadline\"][0]\n"
+  "sys.exit(0 if datetime.datetime.now().astimezone() >= datetime.datetime.fromisoformat(d) else 1)\n")
+real = pool("c.jsonl", [{"id": "g1", "status": "active", "waitChecker": "python3 " + shim + " --deadline " + D,
+                         "waitCheckerDeadline": D}])
+mixed = pool("d.jsonl", [{"id": "g1", "status": "active", "waitChecker": "/bin/false"},
+                         {"id": "g2", "status": "active", "waitChecker": "python3 " + shim + " --deadline " + D,
+                          "waitCheckerDeadline": D}])
+assert run(all_unbounded).returncode == 1, "全体无界的池没判红 —— 静默死锁拦不住"
+assert run(decorative).returncode == 1, "装饰性时限(逐字包含却不被消费)没判红 —— 这正是结构判据抓不住的接线错"
+assert run(real).returncode == 0, "真消费时限的池被判红(误伤)"
+assert run(mixed).returncode == 0, "只要有一条能自行解冻就不该判红(判据是存在量词)"
+print("四例: 全无界⇒红 / 装饰时限⇒红 / 真消费⇒绿 / 一条可解冻⇒绿")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
