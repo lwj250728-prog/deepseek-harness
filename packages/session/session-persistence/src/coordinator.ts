@@ -17,7 +17,7 @@ import {
 } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionId, SessionHeader } from '@deepseek-ai/dsh-session'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
-import type { SessionInspection, SessionLocation } from './index.ts'
+import type { SessionInspection, SessionLocation, SessionTailReadOptions } from './index.ts'
 import type { SessionPersistenceRevision } from './revision.ts'
 import { observeQueuedAbort, SessionPreparations } from './preparations.ts'
 import type { SessionPreparationReservation } from './preparations.ts'
@@ -61,6 +61,38 @@ export class SessionFormatUnsupportedError extends Error {
   constructor(message: string, readonly location?: SessionLocation) {
     super(message)
     this.name = 'SessionFormatUnsupportedError'
+  }
+}
+
+/**
+ * Refusal raised when a read would have to materialize a session artifact
+ * larger than the configured budget.
+ *
+ * Some reads are inherently whole-log (resume, crash repair, raw export) and
+ * their memory scales with the transcript, so an extremely long session can
+ * exhaust the host's heap — the process dies with no error a client can show
+ * and nothing the user can do. This refusal turns that into a precise failure:
+ * the transcript still serves through bounded reads, while whole-log operations
+ * name the artifact, the measured size, and the way out (raise the budget
+ * deliberately, or continue the conversation in a successor session).
+ */
+export class SessionMaterializationLimitError extends Error {
+  /**
+   * @param message - stable refusal text naming the artifact and the budget.
+   * @param details - the artifact, its measured size, and the configured budget.
+   */
+  constructor(message: string, readonly details: {
+    /** Stored session id that was refused, when the caller knew it. */
+    readonly id?: SessionId
+    /** Artifact path when the backend keeps one file per session. */
+    readonly path?: string
+    /** Measured artifact size in bytes. */
+    readonly bytes: number
+    /** Configured budget in bytes. */
+    readonly limitBytes: number
+  }) {
+    super(message)
+    this.name = 'SessionMaterializationLimitError'
   }
 }
 
@@ -112,6 +144,13 @@ export interface StoredPrefix<TornMarker = unknown> {
 export interface StoredSuffix {
   meta: SessionHeader
   events: SessionEvent[]
+}
+
+/** One backend-answered bounded tail read: the retained window and whether older events were dropped. */
+export interface StoredTail {
+  meta: SessionHeader
+  events: SessionEvent[]
+  truncated: boolean
 }
 
 /**
@@ -174,6 +213,29 @@ export interface PersistenceBackend<TornMarker = unknown> {
    * @param signal - optional cancellation for backend read work.
    */
   loadStoredFrom?(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<StoredSuffix | undefined>
+
+  /**
+   * Optional bounded visit behind the service's `contains`: decide one fact
+   * about a stored log without materializing it. A sequential medium implements
+   * this so the answer costs bounded memory however long the transcript is; a
+   * backend without it falls back to a whole-log inspection.
+   * @param id - the persisted session to scan.
+   * @param match - predicate applied to each stored event in seq order.
+   * @param signal - optional cancellation for backend read work.
+   * @returns whether any stored event matched, or `undefined` when no stored session has that id.
+   */
+  containsStored?(id: SessionId, match: (event: SessionEvent) => boolean, signal?: AbortSignal): Promise<boolean | undefined>
+
+  /**
+   * Optional bounded window read behind the service's `readTail`: return the
+   * newest message groups without materializing the log. Runs on the per-id
+   * chain so a read never overtakes a queued write for the same session.
+   * @param id - the persisted session to read.
+   * @param options - the retention request.
+   * @param signal - optional cancellation for backend read work.
+   * @returns the retained window, or `undefined` when no stored session has that id.
+   */
+  loadStoredTail?(id: SessionId, options: SessionTailReadOptions, signal?: AbortSignal): Promise<StoredTail | undefined>
 
   /**
    * Durably append a CONTIGUOUS batch, lazily materializing the session first
@@ -836,6 +898,74 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     const retired = Promise.resolve(this.retirements.get(id))
     const waited = signal === undefined ? retired : observeQueuedAbort(retired, signal, () => false)
     return waited.then(() => this.serialize(id, () => this.readFromCore(id, fromSeq, signal), signal))
+  }
+
+  /**
+   * Read only a bounded tail window of one stored session, on the per-id chain
+   * so the window never overtakes a write queued for the same session.
+   *
+   * A backend that can retain a window answers without materializing the log;
+   * every other backend serves the whole stored prefix and reports it as
+   * untruncated, which keeps the result correct and merely unbounded.
+   * @param id - persisted session to read.
+   * @param options - how many newest message groups the caller needs.
+   * @param signal - optional cancellation for queued and backend read work.
+   * @returns the retained window, or the whole log when nothing was dropped.
+   */
+  readTail(id: SessionId, options: SessionTailReadOptions, signal?: AbortSignal): Promise<StoredTail> {
+    const retired = Promise.resolve(this.retirements.get(id))
+    const waited = signal === undefined ? retired : observeQueuedAbort(retired, signal, () => false)
+    return waited.then(() => this.serialize(id, () => this.readTailCore(id, options, signal), signal))
+  }
+
+  private async readTailCore(
+    id: SessionId,
+    options: SessionTailReadOptions,
+    signal?: AbortSignal,
+  ): Promise<StoredTail> {
+    signal?.throwIfAborted()
+    if (this.backend.loadStoredTail !== undefined) {
+      const tail = await this.backend.loadStoredTail(id, options, signal)
+      signal?.throwIfAborted()
+      if (tail === undefined) throw new Error(`session "${id}" not found`)
+      this.assertStoredId(id, tail.meta)
+      this.assertVersion(tail.meta)
+      const events = snapshotStoredEvents(tail.events, id)
+      this.assertEventsSupported(tail.meta, events)
+      return { meta: structuredClone(tail.meta), events, truncated: tail.truncated }
+    }
+    const whole = await this.readStoredPrefix(id, signal)
+    return { ...whole, truncated: false }
+  }
+
+  /**
+   * Decide one fact about a stored log, on the per-id chain so a pending write
+   * for the same session is never overtaken by the read.
+   * @param id - persisted session to scan.
+   * @param match - predicate applied to each stored event in seq order.
+   * @param signal - optional cancellation for queued and backend read work.
+   * @returns whether any stored event satisfied the predicate.
+   */
+  contains(id: SessionId, match: (event: SessionEvent) => boolean, signal?: AbortSignal): Promise<boolean> {
+    const retired = Promise.resolve(this.retirements.get(id))
+    const waited = signal === undefined ? retired : observeQueuedAbort(retired, signal, () => false)
+    return waited.then(() => this.serialize(id, () => this.containsCore(id, match, signal), signal))
+  }
+
+  private async containsCore(
+    id: SessionId,
+    match: (event: SessionEvent) => boolean,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    signal?.throwIfAborted()
+    if (this.backend.containsStored !== undefined) {
+      const found = await this.backend.containsStored(id, match, signal)
+      signal?.throwIfAborted()
+      if (found === undefined) throw new Error(`session "${id}" not found`)
+      return found
+    }
+    const whole = await this.readStoredPrefix(id, signal)
+    return whole.events.some(match)
   }
 
   private async readFromCore(

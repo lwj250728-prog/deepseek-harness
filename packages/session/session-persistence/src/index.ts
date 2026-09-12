@@ -73,6 +73,7 @@ export {
   MAX_WRITE_BATCH_DELAY_MS,
   PersistenceCoordinator,
   SessionFormatUnsupportedError,
+  SessionMaterializationLimitError,
   SessionPersistenceCorruptionError,
   sessionFormatVersionRefusal,
 } from './coordinator.ts'
@@ -81,6 +82,7 @@ export type {
   PersistenceCoordinatorOptions,
   StoredPrefix,
   StoredSuffix,
+  StoredTail,
 } from './coordinator.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -270,6 +272,30 @@ export abstract class SessionPersistence extends Service {
     const inspected = await this.inspect(id, signal)
     signal?.throwIfAborted()
     return { meta: inspected.meta, events: inspected.events, truncated: false }
+  }
+
+  /**
+   * Decide whether one stored session contains an event satisfying `match`,
+   * without requiring the caller to materialize the log.
+   *
+   * A read model that must verify one fact — "does this message still exist in
+   * this log?" — would otherwise load an entire transcript to answer it, which
+   * is how a sidecar lookup turns a page render into a host-wide OOM. The
+   * predicate stays in-process and the answer is a boolean, so a backend that
+   * can stream decides it in bounded memory.
+   *
+   * The default implementation inspects the whole log, so a backend without a
+   * streaming read stays correct and merely keeps the old memory profile.
+   * @param id - the persisted session to scan.
+   * @param match - predicate applied to each stored event in seq order.
+   * @param signal - optional cancellation for the scan work.
+   * @returns whether any stored event satisfied the predicate.
+   */
+  async contains(id: SessionId, match: (event: SessionEvent) => boolean, signal?: AbortSignal): Promise<boolean> {
+    signal?.throwIfAborted()
+    const inspected = await this.inspect(id, signal)
+    signal?.throwIfAborted()
+    return inspected.events.some(match)
   }
 
   /**

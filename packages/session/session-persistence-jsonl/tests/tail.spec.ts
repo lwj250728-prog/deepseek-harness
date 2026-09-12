@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { SessionMaterializationLimitError } from '@deepseek-ai/dsh-session-persistence'
 import { SessionLogScanner, scanLog, toHeaderLine } from '../src/format.ts'
 import { meta } from '../../session-persistence/tests/contract.ts'
 
@@ -233,5 +234,90 @@ describe('JsonlSessionPersistence: bounded tail reads', () => {
     const ctx = await mounted('zstd')
     await expect(ctx.sessionPersistence.readTail(meta('absent', '/work').id, { retainMessages: 1 }))
       .rejects.toThrow(/not found/)
+  })
+})
+
+describe('JsonlSessionPersistence: whole-log materialize budget', () => {
+  async function mounted(budget: number): Promise<Context> {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(JsonlSessionPersistence, {
+      root: await freshRoot(),
+      compression: 'zstd',
+      maxMaterializeBytes: budget,
+    })
+    return ctx
+  }
+
+  it('refuses a whole-log read past the budget while bounded reads still serve', async () => {
+    // Zstandard compresses these synthetic turns hard, so the budget is set
+    // below any artifact this fixture can produce.
+    const ctx = await mounted(64)
+    const header = meta('over-budget', '/work')
+    const log = turnLog(4)
+    await ctx.sessionPersistence.create(header)
+    await ctx.sessionPersistence.append(header.id, log)
+
+    // The operations that must hold the whole transcript refuse ...
+    await expect(ctx.sessionPersistence.load(header.id)).rejects.toBeInstanceOf(SessionMaterializationLimitError)
+    await expect(ctx.sessionPersistence.inspect(header.id)).rejects.toBeInstanceOf(SessionMaterializationLimitError)
+    await expect(ctx.sessionPersistence.load(header.id)).rejects.toThrow(/too large to load whole/u)
+
+    // ... while the transcript itself still serves, bounded.
+    const tail = await ctx.sessionPersistence.readTail(header.id, { retainMessages: 3 })
+    expect(tail.events.length).toBeGreaterThan(0)
+    expect(tail.events.at(-1)?.seq).toBe(log.at(-1)?.seq)
+    await expect(ctx.sessionPersistence.contains(header.id, event => event.type === 'turn/start'))
+      .resolves.toBe(true)
+  })
+
+  it('loads a log inside the budget and can opt out of the ceiling entirely', async () => {
+    const inside = await mounted(1024 * 1024)
+    const header = meta('inside-budget', '/work')
+    const log = turnLog(2)
+    await inside.sessionPersistence.create(header)
+    await inside.sessionPersistence.append(header.id, log)
+    await expect(inside.sessionPersistence.load(header.id)).resolves.toMatchObject({ meta: { id: 'inside-budget' } })
+
+    // 0 disables the ceiling: an explicit operator opt-out, not a silent default.
+    const unlimited = await mounted(0)
+    const other = meta('unlimited', '/work')
+    await unlimited.sessionPersistence.create(other)
+    await unlimited.sessionPersistence.append(other.id, turnLog(3))
+    await expect(unlimited.sessionPersistence.load(other.id)).resolves.toBeDefined()
+  })
+})
+
+describe('JsonlSessionPersistence: bounded existence checks', () => {
+  it('answers a single-fact question without materializing the log', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    // A budget far below the log size: only a bounded scan can answer.
+    await ctx.plugin(JsonlSessionPersistence, {
+      root: await freshRoot(),
+      compression: 'zstd',
+      maxMaterializeBytes: 512,
+    })
+    const header = meta('presence', '/work')
+    const log = turnLog(5)
+    await ctx.sessionPersistence.create(header)
+    await ctx.sessionPersistence.append(header.id, log)
+
+    const lastAssistant = log.filter(event => event.type === 'assistant/message').at(-1)
+    const targetId = (lastAssistant as { data: { message: { id: string } } }).data.message.id
+    const seen: string[] = []
+
+    await expect(ctx.sessionPersistence.contains(header.id, (event) => {
+      seen.push(event.type)
+      return event.type === 'assistant/message'
+        && (event as { data: { message: { id: string } } }).data.message.id === targetId
+    })).resolves.toBe(true)
+    // Every scanned event stays bounded: nothing above the 1-group window is retained.
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen).toContain('turn/start')
+
+    await expect(ctx.sessionPersistence.contains(header.id, () => false)).resolves.toBe(false)
+    await expect(ctx.sessionPersistence.contains(SessionId('absent'), () => true))
+      .rejects.toThrow(/not found/u)
   })
 })

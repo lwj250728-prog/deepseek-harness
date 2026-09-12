@@ -8,8 +8,9 @@ import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import s from '@deepseek-ai/schemastery'
 import { deriveEventMessage, isAppendSurfaceEvent } from '@deepseek-ai/dsh-session/surface'
-import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session/types'
-import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
+import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session/types'
+// Ambient Context augmentation: `ctx.sessions` and `ctx.sessionPersistence`.
+import type {} from '@deepseek-ai/dsh-session-persistence'
 import type { KvTable } from '@deepseek-ai/dsh-storage-domain'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import { messageFeedbackDomainSpec } from './spec.ts'
@@ -97,6 +98,13 @@ function rejected<E extends MessageFeedbackFailure>(error: E): MessageFeedbackRe
   return Object.freeze({ ok: false, error: Object.freeze(error) })
 }
 
+/** Whether one stored event is an append-origin assistant message with this id. */
+function isFeedbackTarget(event: SessionEvent, messageId: MessageFeedbackItem['messageId']): boolean {
+  if (event.type !== 'assistant/message' || !isAppendSurfaceEvent(event)) return false
+  const message = deriveEventMessage(event)
+  return message?.role === 'assistant' && message.id === messageId
+}
+
 /** Project the Session fields that distinguish one persisted log lifecycle. */
 function identityOf(header: SessionHeader): MessageFeedbackSessionIdentity {
   return Object.freeze({
@@ -133,9 +141,9 @@ function nextVersion(): MessageFeedbackVersion {
   return randomUUID() as MessageFeedbackVersion
 }
 
-/** Session inspection result that keeps absence inside the business union. */
-type KnownSession =
-  | MessageFeedbackSuccess<SessionInspection>
+/** Session header result that keeps absence inside the business union. */
+type KnownSessionHeader =
+  | MessageFeedbackSuccess<SessionHeader>
   | MessageFeedbackRejected<MessageFeedbackSessionNotFound>
 
 /** Validated note or one explicit request failure. */
@@ -188,10 +196,13 @@ export class MessageFeedbackService extends TypertRemoteService {
    */
   @Remote('list')
   async list(request: MessageFeedbackListRequest): Promise<MessageFeedbackListResult> {
-    const known = await this.inspectSession(request.sessionId)
+    // Listing needs the stored rows and the Session's IDENTITY — never its
+    // transcript. Loading the whole log here made every page render of an
+    // extremely long Session a host-wide OOM.
+    const known = await this.resolveSessionHeader(request.sessionId)
     if (!known.ok) return known
     const row = this.requireTable().get(request.sessionId)
-    const items = row !== undefined && sameIdentity(row, known.value.meta) ? row.items : EMPTY_ITEMS
+    const items = row !== undefined && sameIdentity(row, known.value) ? row.items : EMPTY_ITEMS
     return success(snapshotList(items))
   }
 
@@ -207,19 +218,38 @@ export class MessageFeedbackService extends TypertRemoteService {
     const note = this.resolveNote(request.note)
     if (!note.ok) return Promise.resolve(note)
     return this.enqueue(request.sessionId, async () => {
-      const known = await this.inspectSession(request.sessionId)
+      const known = await this.resolveSessionHeader(request.sessionId)
       if (!known.ok) return known
-      if (!this.hasFeedbackTarget(known.value, request.messageId)) {
+      const header = known.value
+      const live = this.ctx.sessions.get(header.id)
+      let durable: KnownSessionHeader
+      if (live !== undefined && sameHeaderIdentity(live.header, header)) {
+        // A live owner's events are the logical target authority — and they are
+        // already in memory, so checking them costs nothing extra.
+        if (!this.hasFeedbackTargetIn(live.events, request.messageId)) {
+          return rejected({
+            code: 'target-not-found',
+            sessionId: request.sessionId,
+            messageId: request.messageId,
+          })
+        }
+        // Durability barrier FIRST, physical verification second: the sidecar
+        // must never name a target the durable log cannot yet show.
+        if (!(await this.ctx.sessions.flush(live))) {
+          throw new Error(
+            `message-feedback: no durability listener participated for live session '${header.id}'`,
+          )
+        }
+      }
+      if (!await this.containsTarget(header.id, request.messageId)) {
         return rejected({
           code: 'target-not-found',
           sessionId: request.sessionId,
           messageId: request.messageId,
         })
       }
-
-      const durable = await this.ensureTargetDurable(known.value)
-      if (!sameHeaderIdentity(durable.meta, known.value.meta)
-        || !this.hasFeedbackTarget(durable, request.messageId)) {
+      durable = await this.resolveSessionHeader(header.id)
+      if (!durable.ok || !sameHeaderIdentity(durable.value, header)) {
         return rejected({
           code: 'target-not-found',
           sessionId: request.sessionId,
@@ -229,7 +259,7 @@ export class MessageFeedbackService extends TypertRemoteService {
 
       const table = this.requireTable()
       const stored = table.get(request.sessionId)
-      const current = stored !== undefined && sameIdentity(stored, durable.meta) ? stored : undefined
+      const current = stored !== undefined && sameIdentity(stored, durable.value) ? stored : undefined
       const items = current?.items ?? EMPTY_ITEMS
       const index = items.findIndex(item => item.messageId === request.messageId)
       const existing = items[index]
@@ -256,7 +286,7 @@ export class MessageFeedbackService extends TypertRemoteService {
       else nextItems[index] = item
       await table.put(
         request.sessionId,
-        rowSnapshot(identityOf(durable.meta), nextItems),
+        rowSnapshot(identityOf(durable.value), nextItems),
       )
       return success(snapshotItem(item))
     })
@@ -271,12 +301,12 @@ export class MessageFeedbackService extends TypertRemoteService {
   @Remote('delete')
   delete(request: MessageFeedbackDeleteRequest): Promise<MessageFeedbackDeleteResult> {
     return this.enqueue(request.sessionId, async () => {
-      const known = await this.inspectSession(request.sessionId)
+      const known = await this.resolveSessionHeader(request.sessionId)
       if (!known.ok) return known
 
       const table = this.requireTable()
       const stored = table.get(request.sessionId)
-      const current = stored !== undefined && sameIdentity(stored, known.value.meta) ? stored : undefined
+      const current = stored !== undefined && sameIdentity(stored, known.value) ? stored : undefined
       const items = current?.items ?? EMPTY_ITEMS
       const existing = items.find(item => item.messageId === request.messageId)
       if (existing === undefined) {
@@ -288,54 +318,48 @@ export class MessageFeedbackService extends TypertRemoteService {
 
       await table.put(
         request.sessionId,
-        rowSnapshot(identityOf(known.value.meta), items.filter(item => item !== existing)),
+        rowSnapshot(identityOf(known.value), items.filter(item => item !== existing)),
       )
       return success<MessageFeedbackDeleteValue>(Object.freeze({ absent: true }))
     })
   }
 
   /**
-   * Resolve a live owner directly; otherwise use the storage catalog as the
-   * existence authority before inspecting the log. Inspection failures for a
-   * catalogued Session remain infrastructure failures rather than being
-   * guessed into the business `session-not-found` branch.
+   * Resolve one Session's identity WITHOUT reading its transcript: a live owner
+   * is authoritative, otherwise the storage catalog answers existence and
+   * identity from metadata alone. Absence stays a business failure; only the
+   * operations that must inspect the log read further, and they read bounded.
    */
-  private async inspectSession(sessionId: SessionId): Promise<KnownSession> {
-    if (this.ctx.sessions.get(sessionId) === undefined) {
-      const snapshots = await this.ctx.sessionPersistence.listSnapshots()
-      if (!snapshots.some(snapshot => snapshot.header.id === sessionId)
-        && this.ctx.sessions.get(sessionId) === undefined) {
-        return rejected({ code: 'session-not-found', sessionId })
-      }
-    }
-    return success(await this.ctx.sessionPersistence.inspect(sessionId))
+  private async resolveSessionHeader(sessionId: SessionId): Promise<KnownSessionHeader> {
+    const live = this.ctx.sessions.get(sessionId)
+    if (live !== undefined) return success(live.header)
+    const snapshots = await this.ctx.sessionPersistence.listSnapshots()
+    const found = snapshots.find(snapshot => snapshot.header.id === sessionId)
+    if (found !== undefined) return success(found.header)
+    // The catalog scan is asynchronous: a Session that attached while it ran is
+    // live now, and must not be reported absent.
+    const attached = this.ctx.sessions.get(sessionId)
+    if (attached !== undefined) return success(attached.header)
+    return rejected({ code: 'session-not-found', sessionId })
   }
 
-  /** Require the exact finalized append-origin assistant message projection. */
-  private hasFeedbackTarget(inspection: SessionInspection, messageId: MessageFeedbackItem['messageId']): boolean {
-    return inspection.events.some((event) => {
-      if (event.type !== 'assistant/message' || !isAppendSurfaceEvent(event)) return false
-      const message = deriveEventMessage(event)
-      return message?.role === 'assistant' && message.id === messageId
-    })
+  /** Whether one already-held event list carries the exact feedback target. */
+  private hasFeedbackTargetIn(
+    events: readonly SessionEvent[],
+    messageId: MessageFeedbackItem['messageId'],
+  ): boolean {
+    return events.some(event => isFeedbackTarget(event, messageId))
   }
 
   /**
-   * Put the target log prefix behind a durability barrier before its sidecar.
-   * A live owner flushes through the SessionStore's canonical checkpoint; a
-   * cold owner is re-read from the physical durable prefix.
+   * Whether one feedback target exists in the Session's stored log.
+   *
+   * This is a single-fact question about a log that may hold hundreds of
+   * thousands of events: the persistence service answers it by streaming, so a
+   * rating can never cost the host its heap the way a whole-log inspection did.
    */
-  private async ensureTargetDurable(inspection: SessionInspection): Promise<SessionInspection> {
-    const live = this.ctx.sessions.get(inspection.meta.id)
-    if (live !== undefined && sameHeaderIdentity(live.header, inspection.meta)) {
-      if (!(await this.ctx.sessions.flush(live))) {
-        throw new Error(
-          `message-feedback: no durability listener participated for live session '${inspection.meta.id}'`,
-        )
-      }
-      return await this.ctx.sessionPersistence.readFrom(inspection.meta.id, 0)
-    }
-    return await this.ctx.sessionPersistence.readFrom(inspection.meta.id, 0)
+  private containsTarget(sessionId: SessionId, messageId: MessageFeedbackItem['messageId']): Promise<boolean> {
+    return this.ctx.sessionPersistence.contains(sessionId, event => isFeedbackTarget(event, messageId))
   }
 
   /** Validate optional-note semantics and the configured complete UTF-8 byte bound. */

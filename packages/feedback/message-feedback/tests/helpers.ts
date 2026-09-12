@@ -118,7 +118,10 @@ class TestPersistence extends SessionPersistence {
   inspectFailure: Error | undefined
   inspectCalls = 0
   readFromCalls = 0
+  /** Physical single-fact scans; the durability witness for a sidecar write. */
+  containsCalls = 0
   onReadFrom: (() => void | Promise<void>) | undefined
+  onContains: (() => void | Promise<void>) | undefined
   onListSnapshots: (() => void | Promise<void>) | undefined
 
   locate(_meta: SessionHeader): SessionLocation | undefined { return undefined }
@@ -152,6 +155,20 @@ class TestPersistence extends SessionPersistence {
     return stored === undefined
       ? Promise.reject(new Error(`test persistence: session '${id}' not found`))
       : { meta: stored.meta, events: stored.events.filter(event => event.seq >= fromSeq) }
+  }
+
+  /**
+   * Single-fact scan over the PHYSICALLY durable bytes, mirroring the JSONL
+   * backend: the durable log is what a whole-log scan can see, so a target only
+   * present in the recovered logical view is not durable. Absence of the log
+   * itself stays an infrastructure failure, exactly as `readFrom` reports it.
+   */
+  override async contains(id: SessionId, match: (event: SessionEvent) => boolean): Promise<boolean> {
+    this.containsCalls += 1
+    await this.onContains?.()
+    const stored = this.durable.get(id)
+    if (stored === undefined) throw new Error(`test persistence: session '${id}' not found`)
+    return stored.events.some(match)
   }
 
   list(): Promise<SessionHeader[]> {

@@ -63,9 +63,16 @@ describe('MessageFeedbackService public contract', () => {
 
     const fixture = messageFixture('corrupt-session')
     persistence.setDurable({ meta: fixture.session.header, events: fixture.session.events })
+    // Existence comes from the catalog: a failure there is infrastructure, and
+    // must never be guessed into the business `session-not-found` branch.
     const corruption = new Error('stored log checksum mismatch')
-    persistence.inspectFailure = corruption
+    persistence.onListSnapshots = () => { throw corruption }
     await expect(ctx.messageFeedback.list({ sessionId: fixture.session.id })).rejects.toBe(corruption)
+    persistence.onListSnapshots = undefined
+    // The transcript itself is never read just to list feedback rows.
+    expect(persistence.inspectCalls).toBe(0)
+    await expect(ctx.messageFeedback.list({ sessionId: fixture.session.id }))
+      .resolves.toEqual({ ok: true, value: { items: [] } })
   })
 
   it('rechecks live ownership before returning a cold catalog miss', async () => {
@@ -84,7 +91,8 @@ describe('MessageFeedbackService public contract', () => {
     release.resolve(undefined)
 
     await expect(pending).resolves.toEqual({ ok: true, value: { items: [] } })
-    expect(persistence.inspectCalls).toBe(1)
+    // The live owner answered with its header: no transcript read at all.
+    expect(persistence.inspectCalls).toBe(0)
   })
 
   it('returns session-not-found from mutations and conflicts on an observed version for an absent item', async () => {
@@ -471,7 +479,7 @@ describe('MessageFeedbackService item concurrency', () => {
     const release = Promise.withResolvers<undefined>()
     let physicalReads = 0
     let committed = 0
-    persistence.onReadFrom = async () => {
+    persistence.onContains = async () => {
       physicalReads += 1
       if (physicalReads !== 1) return
       started.resolve(undefined)
@@ -535,7 +543,7 @@ describe('MessageFeedbackService durability ordering', () => {
         messageId: fixture.assistantMessageIds[0],
       },
     })
-    expect(persistence.readFromCalls).toBe(1)
+    expect(persistence.containsCalls).toBe(1)
     await expect(ctx.messageFeedback.list({ sessionId: fixture.session.id })).resolves.toEqual({
       ok: true,
       value: { items: [] },
@@ -556,7 +564,7 @@ describe('MessageFeedbackService durability ordering', () => {
     ctx.on('domain/changed', (change) => {
       if (change.domain === 'message_feedback') order.push('sidecar:durable')
     })
-    persistence.onReadFrom = () => { order.push('session:verified') }
+    persistence.onContains = () => { order.push('session:verified') }
 
     expectItem(await ctx.messageFeedback.put({
       sessionId: session.id,
@@ -565,7 +573,7 @@ describe('MessageFeedbackService durability ordering', () => {
       ifVersion: null,
     }))
     expect(order).toEqual(['session:durable', 'session:verified', 'sidecar:durable'])
-    expect(persistence.readFromCalls).toBe(1)
+    expect(persistence.containsCalls).toBe(1)
     expect(persistence.durable.get(session.id)?.events).toContainEqual(
       expect.objectContaining({ type: 'assistant/message' }),
     )
@@ -646,7 +654,7 @@ describe('MessageFeedbackService durability ordering', () => {
     expect(ctx.sessions.get(session.id)).toBeUndefined()
     release.resolve(undefined)
     expectItem(await pending)
-    expect(persistence.readFromCalls).toBe(1)
+    expect(persistence.containsCalls).toBe(1)
     await expect(ctx.messageFeedback.list({ sessionId: session.id })).resolves.toMatchObject({
       ok: true,
       value: { items: [{ messageId: fixture.assistantMessageIds[0] }] },

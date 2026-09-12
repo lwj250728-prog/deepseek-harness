@@ -261,6 +261,13 @@ export interface SessionLogScannerOptions {
    * contiguity is still validated across the dropped region.
    */
   dropFromSeq?: number
+  /**
+   * Visit every decoded event in seq order, retained or not. A caller that
+   * needs one fact from a log ("is this message still here?") answers it during
+   * the scan instead of holding the transcript, which is what lets a sidecar
+   * lookup stay bounded on an extremely long session.
+   */
+  observe?: (event: SessionEvent) => void
 }
 
 /** Parse one complete header record supplied independently from event rows. */
@@ -308,6 +315,7 @@ export class SessionLogScanner {
   private readonly events: SessionEvent[] = []
   private readonly retainMessages: number | undefined
   private readonly dropFromSeq: number | undefined
+  private readonly observe: ((event: SessionEvent) => void) | undefined
   /** Seq of `events[0]`: retention drops from the front, so the array index is not the seq. */
   private retainedFromSeq = 0
   /** Next expected event seq, independent of how many events are still retained. */
@@ -338,6 +346,7 @@ export class SessionLogScanner {
     this.dropFromSeq = options.dropFromSeq === undefined
       ? undefined
       : Math.max(0, Math.floor(options.dropFromSeq))
+    this.observe = options.observe
   }
 
   /**
@@ -428,12 +437,14 @@ export class SessionLogScanner {
         // Above the caller's window: still counted for seq contiguity, never retained.
         this.truncated = true
         this.nextSeq += 1
+        this.observe?.(event)
         continue
       }
       if (this.isGroupBoundary(event)) {
         const start = this.groupStartIndex(event)
         if (start !== undefined) this.groupStarts.push(start)
       }
+      this.observe?.(event)
       this.events.push(event)
       this.nextSeq += 1
     }

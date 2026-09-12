@@ -17,10 +17,11 @@ import { randomBytes } from 'node:crypto'
 import {
   DEFAULT_PREPARED_SESSION_CACHE_SIZE, DEFAULT_WRITE_BATCH_MAX_DELAY_MS, MAX_WRITE_BATCH_DELAY_MS,
   SessionPersistence, SessionPersistenceRevision, PersistenceCoordinator, SessionFormatUnsupportedError,
+  SessionMaterializationLimitError,
   type PersistenceBackend, type SessionLocation, type SessionPersistenceSnapshot,
   type SessionInspection, type SessionPersistenceRevision as PersistenceRevision, type SessionRawArtifact,
   type SessionTailRead, type SessionTailReadOptions,
-  type StoredPrefix,
+  type StoredPrefix, type StoredTail,
 } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionEvent, SessionId, SessionHeader, SessionPreparation } from '@deepseek-ai/dsh-session'
 import {
@@ -36,6 +37,14 @@ import { ensureDurableDirectoryWin32, publishNewFileWin32 } from './win32.ts'
 export type { JsonlCompression } from './format.ts'
 
 const DEFAULT_PACK_CHUNKS = true
+/**
+ * Default ceiling for a whole-log read. A log this size already costs hundreds
+ * of megabytes to decode and retain, so the budget is set where a cold resume
+ * stays inside a normal host heap; a deployment that genuinely needs to load a
+ * larger session raises it deliberately instead of discovering the limit as an
+ * out-of-memory kill.
+ */
+const DEFAULT_MAX_MATERIALIZE_BYTES = 16 * 1024 * 1024
 const DEFAULT_COMPRESSION: JsonlCompression = 'zstd'
 /**
  * Internal scheduling constant, not deployment configuration: balance
@@ -81,6 +90,15 @@ export interface Config {
   preparedSessionCacheSize?: number
   /** Fixed live-event coalescing window; not a backend completion deadline. */
   writeBatchMaxDelayMs?: number
+  /**
+   * Ceiling, in bytes, for operations that must materialize one whole log
+   * (cold resume, crash repair, raw export). Reads that exceed it refuse with
+   * {@link SessionMaterializationLimitError} instead of exhausting the heap,
+   * which would kill the host and every other session in it. Defaults to
+   * {@link DEFAULT_MAX_MATERIALIZE_BYTES}; `0` removes the ceiling entirely.
+   * Transcript reads are unaffected: they stream a bounded window.
+   */
+  maxMaterializeBytes?: number
 }
 
 /** Opaque coordinator token for replacing bytes recovered from a torn frame. */
@@ -131,6 +149,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     preparedSessionCacheSize: z.number().step(1).min(1).default(DEFAULT_PREPARED_SESSION_CACHE_SIZE),
     writeBatchMaxDelayMs: z.number().step(1).min(1).max(MAX_WRITE_BATCH_DELAY_MS)
       .default(DEFAULT_WRITE_BATCH_MAX_DELAY_MS),
+    maxMaterializeBytes: z.number().step(1).min(0).default(DEFAULT_MAX_MATERIALIZE_BYTES),
   })
 
   /**
@@ -143,6 +162,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   private root: string
   private packChunks: boolean
   private compression: JsonlCompression
+  private materializeBudgetBytes: number | undefined
   private coordinator: PersistenceCoordinator<JsonlTornMarker>
   private rootEncodingCheck: Promise<void> | undefined
 
@@ -157,6 +177,11 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
       ?? DEFAULT_WRITE_BATCH_MAX_DELAY_MS
     this.packChunks = config.packChunks ?? DEFAULT_PACK_CHUNKS
     this.compression = config.compression ?? DEFAULT_COMPRESSION
+    // 0 disables the ceiling entirely: an explicit opt-out for a deployment
+    // that would rather load any log than see the refusal.
+    this.materializeBudgetBytes = config.maxMaterializeBytes === 0
+      ? undefined
+      : config.maxMaterializeBytes ?? DEFAULT_MAX_MATERIALIZE_BYTES
     this.assertUsableRoot()
     this.coordinator = new PersistenceCoordinator<JsonlTornMarker>(this.ctx, this, {
       preparedSessionCacheSize,
@@ -256,6 +281,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     signal?.throwIfAborted()
     const path = await this.findLog(id, signal)
     if (path === undefined) return undefined
+    await this.assertWithinMaterializeBudget(path, id, signal)
     const { buffer } = await this.readStableFile(path, signal)
     let content: string
     if (this.compression === 'zstd') {
@@ -298,12 +324,28 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
    * @param signal - optional cancellation for the stat/read/decode work.
    * @returns the retained tail window, or the whole log when nothing was dropped.
    */
-  override async readTail(id: SessionId, options: SessionTailReadOptions, signal?: AbortSignal): Promise<SessionTailRead> {
+  override readTail(id: SessionId, options: SessionTailReadOptions, signal?: AbortSignal): Promise<SessionTailRead> {
+    return this.coordinator.readTail(id, options, signal)
+  }
+
+  /**
+   * Backend half of {@link SessionPersistence.readTail}: stream the artifact and
+   * retain only the requested window.
+   * @param id - the persisted session to read.
+   * @param options - the retention request.
+   * @param signal - optional cancellation for the stat/read/decode work.
+   * @returns the retained window, or `undefined` when no stored log has that id.
+   */
+  async loadStoredTail(
+    id: SessionId,
+    options: SessionTailReadOptions,
+    signal?: AbortSignal,
+  ): Promise<StoredTail | undefined> {
     signal?.throwIfAborted()
     await this.ensureRootEncoding()
     signal?.throwIfAborted()
     const path = await this.findLog(id, signal)
-    if (path === undefined) throw new Error(`session "${id}" not found`)
+    if (path === undefined) return undefined
     const { buffer } = await this.readStableFile(path, signal)
     signal?.throwIfAborted()
 
@@ -341,6 +383,83 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   }
 
   /**
+   * Decide whether one stored session contains an event satisfying `match`.
+   *
+   * Answers a single-fact question about a log ("is this message still here?")
+   * by streaming every frame through the scanner with a one-group retention
+   * window, so memory stays flat however long the transcript is, and stops
+   * decoding at the first frame whose events satisfied the predicate.
+   * @param id - the persisted session to scan.
+   * @param match - predicate applied to each stored event in seq order.
+   * @param signal - optional cancellation for the stat/read/decode work.
+   * @returns whether any stored event satisfied the predicate.
+   */
+  override contains(
+    id: SessionId,
+    match: (event: SessionEvent) => boolean,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    return this.coordinator.contains(id, match, signal)
+  }
+
+  /**
+   * Backend half of {@link SessionPersistence.contains}: stream every frame
+   * through a one-group retention window, stopping at the first match.
+   * @param id - the persisted session to scan.
+   * @param match - predicate applied to each stored event in seq order.
+   * @param signal - optional cancellation for the stat/read/decode work.
+   * @returns whether any stored event matched, or `undefined` when no stored log has that id.
+   */
+  async containsStored(
+    id: SessionId,
+    match: (event: SessionEvent) => boolean,
+    signal?: AbortSignal,
+  ): Promise<boolean | undefined> {
+    signal?.throwIfAborted()
+    await this.ensureRootEncoding()
+    signal?.throwIfAborted()
+    const path = await this.findLog(id, signal)
+    if (path === undefined) return undefined
+    const { buffer } = await this.readStableFile(path, signal)
+    signal?.throwIfAborted()
+
+    let found = false
+    const scannerOptions = {
+      retainMessages: 1,
+      observe: (event: SessionEvent) => {
+        if (match(event)) found = true
+      },
+    }
+    let scan: SessionLogScan
+    if (this.compression === 'zstd') {
+      const { frames } = scanZstdFrames(buffer)
+      if (frames.length === 0) throw new Error('empty or header-less Zstandard session log')
+      const decoder = createZstdFrameDecoder()
+      const decoded = decoder.decode(buffer, frames)
+      const headerFrame = decoded.next()
+      /* v8 ignore next -- a non-empty structural frame list makes the decoder yield its first frame or throw. */
+      if (headerFrame.done) throw new Error('empty or header-less Zstandard session log')
+      assertZstdHeaderFrame(headerFrame.value)
+      const scanner = new SessionLogScanner(headerFrame.value, scannerOptions)
+      for (const plaintext of decoded) {
+        signal?.throwIfAborted()
+        scanner.write(plaintext)
+        if (found) break
+      }
+      scan = scanner.finish()
+    } else {
+      const headerEnd = buffer.indexOf(0x0A)
+      if (headerEnd === -1) throw new Error('empty or header-less session log')
+      const scanner = new SessionLogScanner(buffer.subarray(0, headerEnd + 1), scannerOptions)
+      scanner.write(buffer.subarray(headerEnd + 1))
+      scan = scanner.finish()
+    }
+    signal?.throwIfAborted()
+    await this.assertStoredIdentity(path, scan.meta, id, signal)
+    return found
+  }
+
+  /**
    * Read a file's bytes under a revision-stable loop: a writer appending
    * between stat and readFile would yield a torn physical file, so retry
    * while the stat revision changes.
@@ -363,6 +482,46 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   }
 
   /**
+   * Refuse a whole-log read whose artifact exceeds the configured budget.
+   *
+   * Memory here scales with the transcript (a 78MB log measured ~3GB during
+   * decode and event retention), so an unbounded read of an extremely long
+   * session does not fail — it kills the process, taking every other session
+   * with it and leaving the client nothing to display. A refusal is worse for
+   * exactly one operation (the one that needed the whole log) and better for
+   * everything else: bounded reads still serve the transcript.
+   * @param path - the artifact about to be materialized.
+   * @param id - the stored session id, for the refusal text.
+   * @param signal - optional cancellation for the stat work.
+   */
+  private async assertWithinMaterializeBudget(
+    path: string,
+    id: SessionId | undefined,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const limitBytes = this.materializeBudgetBytes
+    if (limitBytes === undefined) return
+    signal?.throwIfAborted()
+    let bytes: number
+    try {
+      bytes = (await stat(path)).size
+    } catch (error: unknown) {
+      if (isENOENT(error)) return
+      throw error
+    }
+    signal?.throwIfAborted()
+    if (bytes <= limitBytes) return
+    const subject = id === undefined ? 'session log' : `session "${id}"`
+    throw new SessionMaterializationLimitError(
+      `${subject} is too large to load whole: ${path} is ${bytes} bytes, over the configured `
+      + `materialize budget of ${limitBytes} bytes. Its transcript still serves through bounded `
+      + `reads; raise the jsonl \`maxMaterializeBytes\` budget deliberately, or continue the `
+      + 'conversation in a successor session.',
+      { ...id === undefined ? {} : { id }, path, bytes, limitBytes },
+    )
+  }
+
+  /**
    * Read a stored prefix and convert torn-tail state to the opaque marker the
    * coordinator can round-trip without knowing the physical encoding.
    */
@@ -371,6 +530,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     expectedId?: SessionId,
     signal?: AbortSignal,
   ): Promise<StoredPrefix<JsonlTornMarker>> {
+    await this.assertWithinMaterializeBudget(path, expectedId, signal)
     const { buffer, revision } = await this.readStableFile(path, signal)
     let prefix: Omit<StoredPrefix<JsonlTornMarker>, 'revision'>
     try {
