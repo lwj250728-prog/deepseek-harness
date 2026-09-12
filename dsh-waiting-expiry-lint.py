@@ -114,10 +114,29 @@ def main() -> int:
         print("[读数失败] 判据输出无法解析: " + probe.stdout.strip()[-200:], file=sys.stderr)
         return 3
 
+    # 2026-09-12 09:2x **判据随机制更新(cl-267)**: "是否该跳过"现在**有 checker 时由 checker 说了算**
+    # (文本启发式只在无 checker 时兜底)。所以"文本看着像行动型"不再能证明它不该被跳过 —— 实测:
+    # 检索目标的 nextAction 是行动型措辞, 但它的 refine checker 未满足 ⇒ 标 skipped:waiting 是**正确**的,
+    # 而本 lint 用旧口径 (只看文本) 把它判成红。修正: 有 checker 的目标, 以 checker 的当场退出码为准。
+    goals_by_id = latest   # 池内目标(last-wins), 见上面的读取循环
+
+    def checker_unmet(gid: str) -> bool | None:
+        cmd = str(goals_by_id.get(gid, {}).get("waitChecker") or "").strip()
+        if cmd == "":
+            return None
+        try:
+            return subprocess.run(cmd, shell=True, capture_output=True, timeout=60).returncode != 0
+        except Exception:
+            return True   # fail-closed: 测不出就不当"已到点"
+
     bad = []
     for (gid, ts, action), waiting in zip(meta, verdicts):
-        if waiting is False:
-            bad.append("%s@%s nextAction 已不等待却仍 skipped:waiting → %s" % (gid, str(ts)[11:16], action[:48]))
+        checked = checker_unmet(gid)
+        if checked is True:
+            continue          # checker 未满足 ⇒ 跳过是正确的, 与文本无关
+        if checked is None and waiting is False:
+            bad.append("%s@%s 无 checker 且 nextAction 已不等待却仍 skipped:waiting → %s"
+                       % (gid, str(ts)[11:16], action[:48]))
     if bad:
         print("红: " + "; ".join(bad[:3]), file=sys.stderr)
         return 1

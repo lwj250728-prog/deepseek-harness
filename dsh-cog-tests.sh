@@ -6950,6 +6950,12 @@ def build(with_bg):
         audit.append(row)
     open(os.path.join(tmp, "retrieval-audit.jsonl"), "w", encoding="utf8").write(
         "\n".join(json.dumps(r, ensure_ascii=False) for r in audit) + "\n")
+# 2026-09-12 09:0x 判据随机制更新: 现在**未声明时代起点**会被 R-3 闸拦成 insufficient-undeclared-era,
+# 于是本例测不到"阈下未采集"那条分支了 ⇒ 沙箱补一份 sweep-era.json(把本意测回来)。
+import datetime as _dt
+# 时代起点要**早于** fixture 的行时间(那些行固定写在 1789150000000 附近 ⇒ 2026-09-11/12 交界) ⇒ 用 09-11 00:00。
+json.dump({"since": "2026-09-11T00:00:00+08:00", "reason": "沙箱"},
+          open(os.path.join(tmp, "sweep-era.json"), "w", encoding="utf8"), ensure_ascii=False)
 env = dict(os.environ, DSH_COG_DIR=tmp)
 def run():
     r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json"],
@@ -6960,7 +6966,12 @@ build(True);  d1 = run()
 build(False); d2 = run()
 assert d1["subGateDiagnostics"]["belowGate"] > 0, "沙箱未生效(读的不是沙箱数据?): " + json.dumps(d1["subGateDiagnostics"])
 assert not str(d1["verdict"]).startswith("inconclusive"), "有 belowGate 却仍报 inconclusive(消费侧没接): " + str(d1["verdict"])
-assert d2["subGateDiagnostics"]["belowGate"] == 0 and str(d2["verdict"]).startswith("inconclusive"), "无 belowGate 时未如实报 inconclusive"
+# 2026-09-12 09:1x 判据随机制更新(第二次): 一条 belowGate 都没有时, **先**命中的是 R-1(埋点后回合 <10 ⇒
+# insufficient-post-instrumentation), 而不是 sub-gate 那条分支 ⇒ 两种都算"如实拒绝出裁决"。真正要守的是:
+# 有 belowGate ⇒ 必须给真判读; 没有 ⇒ 必须**不是**真判读。
+assert d2["subGateDiagnostics"]["belowGate"] == 0, "沙箱里 belowGate 没被清掉"
+assert str(d2["verdict"]).startswith("insufficient"), ("无 belowGate 时竟出了真裁决: " + str(d2["verdict"]))
+assert not str(d1["verdict"]).startswith("insufficient"), ("有 belowGate 却仍拒绝裁决: " + str(d1["verdict"]))
 assert os.path.exists(os.path.join(tmp, "threshold-sweep.json")), "沙箱产物没落在沙箱里(会污染真库的读数文件)"
 print("消费侧接通: 有 belowGate ⇒ %s / 无 ⇒ %s" % (d1["verdict"], d2["verdict"]))
 '
@@ -6973,7 +6984,10 @@ D = os.path.expanduser("~/.dsh/cognitive-pipeline")
 r0 = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-library-replay.py"],
                     capture_output=True, text=True, timeout=900)
 assert r0.returncode == 0, "replay 重算失败: " + (r0.stderr or r0.stdout)[-200:]
-r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json"],
+# 2026-09-12 09:0x: 扫描工具现在**默认走 sweep-era.json 声明的时代**(14 回合), 而 replay 用全史(122+ 回合),
+# 两边总体不同 ⇒ 那个差是"没在同口径上比"(实测 0.338 vs 0.428), 不是口径漂移。传远古边界让两边都算全史。
+r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json",
+                    "--post-since", "2000-01-01T00:00:00+08:00"],
                    capture_output=True, text=True, timeout=900)
 assert r.returncode == 0, "扫描工具失败"
 d = json.loads(r.stdout.strip().splitlines()[-1])
@@ -7640,7 +7654,10 @@ for gid, cmd in checkers:
     if not os.path.exists(path):
         bad_frame.append(gid + ":脚本不存在")
         continue
-    src = open(path, encoding="utf8").read()
+    try:
+        src = open(path, encoding="utf8").read()
+    except (UnicodeDecodeError, OSError):
+        continue   # /bin/false 这类非文本 checker: 无源码可查(它按定义不会读行动帧), 但仍须存在
     if any(m in src for m in FRAME_MARKERS):
         bad_frame.append(gid + ":读行动帧")
     delegates = bool(_re.search(r"dsh-[a-z0-9-]+\.(py|tsx|sh)", src))
@@ -7663,9 +7680,12 @@ lib = open(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/lib/inde
 assert "const skipHits = hits.filter" in src, "没有把等待型命中挑出来(提醒照发的老形态)"
 # 2026-09-12 08:2x: 只过滤 shouldSkipAsWaiting(文本与 checker 的**与**)是不够的 —— 行动型措辞+checker 未满足
 # 的目标照样收提醒(实测证伪信号命中) ⇒ 必须**有 checker 时由 checker 说了算**。
-assert "const wc = String((h.goal as { waitChecker?: string }).waitChecker ?? \u0027\u0027).trim()" in src, "没有取 checker"
-assert "if (wc !== \u0027\u0027) return !waitConditionMet(wc)" in src, "有 checker 时没有让它说了算(仍是文本与checker的与)"
-assert "return shouldSkipAsWaiting(h.goal" in src, "没有保留无 checker 时的文本启发式兜底"
+# 2026-09-12 09:2x: 判据已抽到独立模块 reminder-gate.ts(为了可行为断言) ⇒ 结构断言随之改查两处。
+gate = open(os.path.expanduser("~/dsh-fork/packages/context/dormant-goal/src/reminder-gate.ts"), encoding="utf8").read()
+assert "shouldSkipReminder" in src and "reminder-gate.js" in src, "哨兵没有调用独立模块的提醒门"
+assert "const wc = String(goal.waitChecker ?? \u0027\u0027).trim()" in gate, "提醒门没有取 checker"
+assert "if (wc !== \u0027\u0027) return !runChecker(wc)" in gate, "有 checker 时没有让它说了算(仍是文本与checker的与)"
+assert "waitingFallback(String(goal.nextAction ?? \u0027\u0027))" in gate, "没有保留无 checker 时的文本启发式兜底"
 assert "const remindHits = hits.filter" in src, "没有从提醒块里排除等待型命中"
 assert "if (remindHits.length === 0)" in src, "全为等待型时没有提前返回(仍会发提醒)"
 assert "remindHits.slice(0, 1)" in src, "提醒块不是从 remindHits 里取的(排除没生效)"

@@ -139,7 +139,7 @@ def main() -> int:
         print('数据源不足(%d 行审计), 不下结论' % raw_records, file=sys.stderr)
         return 1
     if not records:
-        print('该时代内没有注入回合, 不下结论(era 起点: %s)' % args.post_since, file=sys.stderr)
+        print('该时代内没有注入回合, 不下结论(era 起点: %s)' % post_since, file=sys.stderr)
         return 1
 
     grid = [float(x) for x in args.grid.split(',')]
