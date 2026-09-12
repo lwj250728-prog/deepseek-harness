@@ -200,11 +200,19 @@ def main() -> int:
     for t in sorted(set(grid + [CURRENT_GATE])):
         a_mrr, a_top1, rankable, kept = mrr_at(t, 'A')
         b_mrr, b_top1, _, _ = mrr_at(t, 'B')
+        # 2026-09-12 08:0x(反事实探索所得): "要不要放宽门限"真正关心的决策变量是**每回合可注入候选数**,
+        # 而不是可排序集占比 —— 两者会分叉(占比已饱和 100% 时前者仍在动) ⇒ 并列报告。
+        _counts = [sum(1 for c in rec['candidateScores'] if c['similarity'] >= t) for rec in records]
+        _mean_cands = round(sum(_counts) / len(_counts), 2) if _counts else None
         table.append({'threshold': t, 'rankable': rankable, 'keptTurns': kept,
+                      'meanCandidates': _mean_cands,
                       'rankableShare': round(rankable / len(records), 4),
                       'armA_mrr': a_mrr, 'armA_top1': a_top1,
                       'armB_mrr': b_mrr, 'armB_top1': b_top1})
     cur = next(row for row in table if row['threshold'] == CURRENT_GATE)
+    # 2026-09-12 08:0x(实测踩到): 当前门限下可排序集占比已 100% 时, R1 的"占比 +>=10pp"**在数学上没有开火空间** ——
+    # 此时 no-headroom 是被**饱和**造出来的, 必须点明(否则会被读成"找过了, 没空间")。
+    saturated = cur['rankableShare'] >= 1.0
 
     def _wilson(k: int, n: int) -> tuple[float, float]:
         """占比的 Wilson 95% 区间 —— 用来问"这个差是真的还是噪声"。"""
@@ -225,6 +233,7 @@ def main() -> int:
         payload = {'ts': datetime.datetime.now().astimezone().isoformat(),
                    'label': args.label, 'currentGate': CURRENT_GATE, 'turns': len(records),
                    'skippedNoCandidateRecord': skipped_no_record,
+               'saturated': saturated,
                'subGateDiagnostics': diag, 'roundsWithBelowGate': rounds_with_bg,
                    'table': table, 'verdict': 'insufficient-belowgate-capped',
                    'reason': ('有 %d 轮记录的阈下候选顶满上限(%d) ⇒ 记录本身被截断, "阈下有多少候选"不可知, '
@@ -308,7 +317,9 @@ def main() -> int:
             verdict = 'tradeoff-ceiling'
             reason = '放松门限可提可排序集占比, 但 A 档 MRR 同步下降 >0.02 ⇒ 质量↔可排序集的真实权衡'
         else:
-            reason = '门限放松对可排序集占比没什么影响 ⇒ 天花板不在门限上, 转查候选召回端'
+            reason = ('门限放松对可排序集占比没什么影响 ⇒ 天花板不在门限上'
+                  + ('(注: 当前门限下可排序集占比已 **100%(饱和)** ⇒ R1 本无开火空间; '
+                     '决策相关的维是 meanCandidates)' if saturated else ''))
     # 2026-09-12 06:0x (tp-169): 裁决必须**消费**事先写死的期望(threshold-prereg.json) —— 否则预注册只是摆设,
     # 而"期望对不对"这条最便宜的校准检验被浪费。不符时**不直接采信裁决**, 要求先给样本代表性复核的处置位。
     # 2026-09-12 06:3x **硬闸: 真裁决必须由调用方声明时代起点**. 采集方式(埋点/上限)变更过至少两次
@@ -334,6 +345,7 @@ def main() -> int:
     prereg_suspect = mismatch and bool((prereg or {}).get('computedOnTruncatedSample'))
     payload = {'ts': datetime.datetime.now().astimezone().isoformat(),
                'label': args.label, 'currentGate': CURRENT_GATE, 'turns': len(records),
+               'saturated': saturated,
                'skippedNoCandidateRecord': skipped_no_record,
                'preregExpected': expected,
                'preregExpectation': (prereg or {}).get('expectation'),
@@ -352,11 +364,12 @@ def main() -> int:
     print('  诊断: 记录候选 %d 个, 相似度 %.3f~%.3f, **阈下候选 %d 个(%.0f%%)**'
           % (diag['candidates'], diag['min'] or 0, diag['max'] or 0, diag['belowGate'],
              100 * (diag['belowGateShare'] or 0)))
-    print('  %-9s %-9s %-9s %-9s %-9s %-9s' % ('门限', '可排序集', '占比', 'A_MRR', 'A_top1', 'B_MRR'))
+    print('  %-8s %-8s %-7s %-8s %-8s %-8s %-9s' % ('门限', '可排序集', '占比', '均候选', 'A_MRR', 'A_top1', 'B_MRR'))
     for row in table:
-        print('  %-9.2f %-9d %-9s %-9s %-9s %-9s'
+        print('  %-8.2f %-8d %-7s %-8s %-8s %-8s %-9s'
               % (row['threshold'], row['rankable'],
                  '%.0f%%' % (100 * row['rankableShare']),
+                 row.get('meanCandidates'),
                  '%.3f' % row['armA_mrr'] if row['armA_mrr'] is not None else '-',
                  '%.3f' % row['armA_top1'] if row['armA_top1'] is not None else '-',
                  '%.3f' % row['armB_mrr'] if row['armB_mrr'] is not None else '-'))

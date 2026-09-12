@@ -7729,6 +7729,52 @@ d_big = verdict(75, 25)      # 100 回合: 同一份额模式, 区间不重叠
 assert d_big["verdict"] == "widen-gate", "大样本(区间不重叠)却没判出空间: " + str(d_big["verdict"])
 print("小样本(%d 回合)⇒%s / 大样本(%d 回合)⇒%s" % (d_small["turns"], d_small["verdict"], d_big["turns"], d_big["verdict"]))
 '
+# ── T199 裁决必须点明"饱和", 并并列报告决策相关的维(cl-263) ──
+# 08:0x 实测: 新上限时代 14 个回合**本来就全部可排序(100%)** ⇒ R1 的"占比 +>=10pp"数学上没有开火空间,
+# 于是 no-headroom 是**被饱和造出来的**, 却被打印成"找过了, 没空间"。另: 反事实探索发现真正关心的决策变量是
+# **每回合可注入候选数**(meanCandidates), 它会在占比饱和时继续变化(实测 0.50→0.35: 5.0→16.29) ⇒ 必须并列报告。
+echo "[T199] 饱和必须点明 + 候选丰富度必须并列报告"
+t "占比饱和时须点明, 且表里须有平均候选数(决策相关维)" python3 -c '
+import json, os, subprocess, tempfile, datetime
+TZ = datetime.timezone(datetime.timedelta(hours=8))
+def build(tmp):
+    hi = ["hi_%03d" % i for i in range(30)]; lo = ["lo_%03d" % i for i in range(30)]
+    rows_exp = ([{"expId": e, "sar": {"situation": "s", "action": "a", "outcome": "o",
+                                      "outcomeUtility": {"materialGain": 5, "emotionalValence": 5}}} for e in hi]
+                + [{"expId": e, "sar": {"situation": "s", "action": "a", "outcome": "o",
+                                        "outcomeUtility": {"materialGain": 1, "emotionalValence": 0}}} for e in lo])
+    open(os.path.join(tmp, "experiences.jsonl"), "w", encoding="utf8").write(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows_exp) + "\n")
+    now = datetime.datetime.now().timestamp() * 1000; rows = []
+    for i in range(12):     # 每回合 2 个过阈候选 ⇒ 占比恒 100%(饱和), 但阈下候选在 0.35 才回来
+        rows.append({"stage": "injected", "t": now - (i + 1) * 60000, "expIds": [hi[i % 30]], "cited": False,
+                     "candidates": 2, "overThreshold": 2,
+                     "preTop": [{"expId": hi[i % 30], "similarity": 0.6}, {"expId": hi[(i + 1) % 30], "similarity": 0.58}],
+                     "belowGate": [{"expId": lo[j % 30], "similarity": 0.40} for j in range(20)]})
+    for i in range(20):     # 数据源健全性(无候选记录, 会被排除)
+        rows.append({"stage": "injected", "t": now - 30 * 3600 * 1000 + i * 60000, "expIds": [hi[i % 30]],
+                     "cited": False, "candidates": 2, "overThreshold": 1})
+    open(os.path.join(tmp, "retrieval-audit.jsonl"), "w", encoding="utf8").write(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+    json.dump({"ts": "2026-09-12T00:00:00+08:00", "table": [], "expectation": "沙箱"},
+              open(os.path.join(tmp, "threshold-prereg.json"), "w", encoding="utf8"), ensure_ascii=False)
+    era = datetime.datetime.now(TZ) - datetime.timedelta(hours=6)
+    json.dump({"since": era.isoformat(), "reason": "沙箱"},
+              open(os.path.join(tmp, "sweep-era.json"), "w", encoding="utf8"), ensure_ascii=False)
+tmp = tempfile.mkdtemp(); build(tmp)
+r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json"],
+                   capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=tmp), timeout=900)
+assert r.returncode == 0, "扫描失败: " + (r.stderr or r.stdout)[-200:]
+d = json.loads(r.stdout.strip().splitlines()[-1])
+assert d.get("saturated") is True, "占比 100% 却没标 saturated"
+assert "饱和" in str(d.get("reason")), "裁决理由没有点明饱和: " + str(d.get("reason"))[:120]
+cur = next(x for x in d["table"] if abs(x["threshold"] - d["currentGate"]) < 1e-9)
+low = next(x for x in d["table"] if abs(x["threshold"] - 0.40) < 1e-9)
+assert cur.get("meanCandidates") is not None, "表里没有 meanCandidates(决策相关维缺失)"
+assert low["meanCandidates"] > cur["meanCandidates"], ("放宽门限后候选丰富度没升(%.2f → %.2f)"
+                                                       % (cur["meanCandidates"], low["meanCandidates"]))
+print("饱和已点明; 均候选 %.1f(0.50) → %.1f(0.40)" % (cur["meanCandidates"], low["meanCandidates"]))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
