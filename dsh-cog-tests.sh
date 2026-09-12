@@ -7638,8 +7638,9 @@ echo "[T196] 条件门不得依赖行动帧(防饿死) + 必须挂在外部产�
 t "池内条件门不得依赖行动帧产出, 且必须挂在外部产物上" python3 -c '
 import json, os
 D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+POOL = os.environ.get("DSH_COG_POOL") or os.path.join(D, "dormant-goals.jsonl")
 pool = {}
-for l in open(os.path.join(D, "dormant-goals.jsonl"), encoding="utf8"):
+for l in open(POOL, encoding="utf8"):
     if l.strip():
         r = json.loads(l)
         if r.get("id"): pool[r["id"]] = r
@@ -7786,7 +7787,8 @@ def build(tmp):
     json.dump({"since": era.isoformat(), "reason": "沙箱"},
               open(os.path.join(tmp, "sweep-era.json"), "w", encoding="utf8"), ensure_ascii=False)
 tmp = tempfile.mkdtemp(); build(tmp)
-r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json"],
+SWEEP = os.environ.get("DSH_THRESHOLD_SWEEP") or "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py"
+r = subprocess.run(["python3", SWEEP, "--json"],
                    capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=tmp), timeout=900)
 assert r.returncode == 0, "扫描失败: " + (r.stderr or r.stdout)[-200:]
 d = json.loads(r.stdout.strip().splitlines()[-1])
@@ -7806,7 +7808,7 @@ print("饱和已点明; 均候选 %.1f(0.50) → %.1f(0.40)" % (cur["meanCandida
 echo "[T200] 提醒门四组合(有checker未满足必须跳过 / 已满足不跳 / 无checker退回文本启发式)"
 t "提醒门: 有 checker 时以它为准(未满足即跳过), 无 checker 时才看文本" python3 -c '
 import json, os, subprocess
-script = "/home/ubuntu/dsh-fork/packages/context/dormant-goal/src/reminder-gate.ts"
+script = os.environ.get("DSH_REMINDER_GATE") or "/home/ubuntu/dsh-fork/packages/context/dormant-goal/src/reminder-gate.ts"
 r = subprocess.run(["npx", "tsx", "--eval",
   "import { shouldSkipReminder as f } from \"" + script + "\"\n"
   "const unmet = () => false, met = () => true\n"
