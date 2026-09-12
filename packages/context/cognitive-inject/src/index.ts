@@ -423,7 +423,12 @@ async function retrieve(
   topHits: readonly number[], textChars: number,
   preTop: readonly { expId: string, similarity: number,
     channels?: { semantic: number, symptom: number, axis: number } }[],
-  belowGate: readonly { expId: string, similarity: number }[] }> {
+  belowGate: readonly { expId: string, similarity: number }[],
+  // cl-278(测量侧, 不改注入行为): 覆盖率归因此前被记录窗口卡死 —— 每回合只落 preTop(≤5)+belowGate,
+  // 而 rawHits 中位 276 ⇒ 未注入的库里条目**无法区分**"检索到了却排在第 6 名之外"与"根本没被检索到"
+  // (实测: 库 198 条里时代内未注入 133 条, 其中仅 55 条有证据可归因)。这里补落**完整检索 id 列表**
+  // (上限截断并标记), 让"检索到却没注入"可归因 —— 只记录, 不改变注入什么。
+  retrievedIds: readonly string[], retrievedIdsTruncated: boolean }> {
   const vector = actionVector(situation, [])
   const situationVec = situationVector(situation)
   const embedder = service.embedder
@@ -515,7 +520,10 @@ async function retrieve(
       },
     }),
   }))
-  return { hits: covered, rotated, rawHits, topHits, textChars: textChars(covered), preTop, belowGate: droppedByThreshold }
+  const RETRIEVED_IDS_CAP = 500
+  const retrievedIds = hits.slice(0, RETRIEVED_IDS_CAP).map(hit => hit.expId)
+  return { hits: covered, rotated, rawHits, topHits, textChars: textChars(covered), preTop, belowGate: droppedByThreshold,
+    retrievedIds, retrievedIdsTruncated: hits.length > RETRIEVED_IDS_CAP }
 }
 
 /**
@@ -935,13 +943,14 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (record.sessionId !== agent.session.id) continue
       for (const expId of record.expIds) sessionCounts.set(expId, (sessionCounts.get(expId) ?? 0) + 1)
     }
-    const { hits, rotated, rawHits, topHits, textChars, preTop, belowGate } = await retrieve(ctx.cognitivePipeline, situation, threshold, topK,
+    const { hits, rotated, rawHits, topHits, textChars, preTop, belowGate, retrievedIds, retrievedIdsTruncated } = await retrieve(ctx.cognitivePipeline, situation, threshold, topK,
       expId => sessionCounts.get(expId) ?? 0, resolved.noveltyMargin,
       { enabled: config.utilityFusion?.enabled === true,
         base: config.utilityFusion?.base ?? 0.7,
         slope: config.utilityFusion?.slope ?? 0.06 })
+    const retrievalIds = { retrievedIds, retrievedIdsTruncated }
     if (hits.length === 0) {
-      audit({ stage: 'no-candidates', threshold, rotated, rawHits })
+      audit({ stage: 'no-candidates', threshold, rotated, rawHits , ...retrievalIds })
       return decision
     }
     const topHit = hits[0]?.similarity ?? 0
@@ -954,7 +963,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (gateScore < gateThreshold) {
       audit({ stage: 'below-gate', candidates: hits.length, topHit, gateScore, gateThreshold, rotated, rawHits, topHits, textChars,
         belowGate,
-        triggerSource: verdict.triggerSource, triggerScore: verdict.score, matched: verdict.matched })
+        triggerSource: verdict.triggerSource, triggerScore: verdict.score, matched: verdict.matched , ...retrievalIds })
       return decision
     }
     // Cooldown filter: a memory injected into THIS session within the window
@@ -964,7 +973,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       ctx.cognitivePipeline, agent.session.id, hits, resolved.injectCooldownMs, resolved.backoffMaxMs)
     if (cooled.length === 0) {
       audit({ stage: 'cooldown', candidates: hits.length, topHit, backoffDropped, rotated, rawHits, topHits, textChars,
-        backoffDetails, backoffAdmitted, triggerSource: verdict.triggerSource })
+        backoffDetails, backoffAdmitted, triggerSource: verdict.triggerSource , ...retrievalIds })
       return decision
     }
     // Prewarm enrichment for the veto gate: a short message ("重启") may match
@@ -991,7 +1000,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (vetoed.accepted.length === 0) {
       audit({ stage: 'veto-rejected', candidates: hits.length, overThreshold: cooled.length, rotated, rawHits, topHits, textChars,
         vetoJudged: vetoed.judged, vetoSilent: vetoed.rejectedWithoutReason,
-        vetoRejected: vetoed.rejectedNotes.length, topHit, triggerSource: verdict.triggerSource })
+        vetoRejected: vetoed.rejectedNotes.length, topHit, triggerSource: verdict.triggerSource , ...retrievalIds })
       return decision
     }
     // Solidified-strategy priority, AFTER the veto: when the ACCEPTED
@@ -1024,7 +1033,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       preTop,
       // cl-263: 被 minSimilarity 丢掉的候选(阈下), 让门限扫描可判
       belowGate,
-        triggerScore: verdict.score, matched: verdict.matched })
+        triggerScore: verdict.score, matched: verdict.matched, ...retrievalIds })
       return {
         kind: 'enter',
         messages: [...decision.messages, block],
