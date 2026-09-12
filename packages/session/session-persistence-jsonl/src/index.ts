@@ -19,13 +19,14 @@ import {
   SessionPersistence, SessionPersistenceRevision, PersistenceCoordinator, SessionFormatUnsupportedError,
   type PersistenceBackend, type SessionLocation, type SessionPersistenceSnapshot,
   type SessionInspection, type SessionPersistenceRevision as PersistenceRevision, type SessionRawArtifact,
+  type SessionTailRead, type SessionTailReadOptions,
   type StoredPrefix,
 } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionEvent, SessionId, SessionHeader, SessionPreparation } from '@deepseek-ai/dsh-session'
 import {
   encodeSegment, eventLines, logPath, logSuffix, parseHeaderMeta, projectDir, scanLog, sessionDir,
   SessionLogScanner, toHeaderLine,
-  type JsonlCompression,
+  type JsonlCompression, type SessionLogScan,
 } from './format.ts'
 import {
   compressZstdFrame, createZstdFrameDecoder, decompressZstdFrame, decompressZstdPrefix, scanZstdFrames,
@@ -279,6 +280,64 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     // The logical artifact name is `session.jsonl` regardless of the physical
     // encoding suffix (`.jsonl.zstd` marks compression only).
     return { meta, filename: 'session.jsonl', content }
+  }
+
+  /**
+   * Read only the newest message groups of one stored session.
+   *
+   * JSONL is sequential media, so reaching the tail still decodes every frame —
+   * but decoding is streamed frame by frame and the scanner retains only the
+   * window, so the memory this read needs scales with the PAGE rather than with
+   * the transcript. That is the difference between reading a chunk-heavy
+   * multi-hundred-thousand-event session and being killed by the kernel for
+   * trying. Follows {@link SessionPersistence.readTail} semantics: a detached
+   * physical read, with no preparation cache, no synthetic closers, and no
+   * coordinator publication (a torn final frame is ignored like any torn tail).
+   * @param id - the persisted session to read.
+   * @param options - how many newest message groups the caller needs.
+   * @param signal - optional cancellation for the stat/read/decode work.
+   * @returns the retained tail window, or the whole log when nothing was dropped.
+   */
+  override async readTail(id: SessionId, options: SessionTailReadOptions, signal?: AbortSignal): Promise<SessionTailRead> {
+    signal?.throwIfAborted()
+    await this.ensureRootEncoding()
+    signal?.throwIfAborted()
+    const path = await this.findLog(id, signal)
+    if (path === undefined) throw new Error(`session "${id}" not found`)
+    const { buffer } = await this.readStableFile(path, signal)
+    signal?.throwIfAborted()
+
+    const scannerOptions = {
+      retainMessages: options.retainMessages,
+      ...options.beforeSeq === undefined ? {} : { dropFromSeq: options.beforeSeq },
+    }
+    let scan: SessionLogScan
+    if (this.compression === 'zstd') {
+      const { frames } = scanZstdFrames(buffer)
+      if (frames.length === 0) throw new Error('empty or header-less Zstandard session log')
+      const decoder = createZstdFrameDecoder()
+      const decoded = decoder.decode(buffer, frames)
+      const headerFrame = decoded.next()
+      /* v8 ignore next -- a non-empty structural frame list makes the decoder yield its first frame or throw. */
+      if (headerFrame.done) throw new Error('empty or header-less Zstandard session log')
+      assertZstdHeaderFrame(headerFrame.value)
+      const scanner = new SessionLogScanner(headerFrame.value, scannerOptions)
+      for (const plaintext of decoded) {
+        signal?.throwIfAborted()
+        scanner.write(plaintext)
+      }
+      scan = scanner.finish()
+    } else {
+      const headerEnd = buffer.indexOf(0x0A)
+      if (headerEnd === -1) throw new Error('empty or header-less session log')
+      const scanner = new SessionLogScanner(buffer.subarray(0, headerEnd + 1), scannerOptions)
+      scanner.write(buffer.subarray(headerEnd + 1))
+      scan = scanner.finish()
+    }
+    signal?.throwIfAborted()
+    await this.assertStoredIdentity(path, scan.meta, id, signal)
+    signal?.throwIfAborted()
+    return { meta: scan.meta, events: scan.events, truncated: scan.truncated }
   }
 
   /**

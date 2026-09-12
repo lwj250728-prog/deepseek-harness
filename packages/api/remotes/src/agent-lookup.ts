@@ -4,6 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
+import type { SessionTailReadOptions } from '@deepseek-ai/dsh-session-persistence'
 import { TypertLookupFailure } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/dsh-typert-registry'
 
@@ -108,6 +109,46 @@ export async function inspectApiRemoteSession(
     throw new ApiRemoteSessionNotFound(`session "${sessionId}" not found`)
   }
   return { meta: inspected.meta, events: [...inspected.events] }
+}
+
+/**
+ * Read only the window of one cold session that a transcript page needs.
+ *
+ * Same identity and servability rules as {@link inspectApiRemoteSession}, but
+ * a backend that can retain a window serves the page without materializing the
+ * whole transcript — the difference between reading an extremely long session
+ * and taking the host down with it.
+ * @param ctx - Host Context carrying the optional persistence provider.
+ * @param sessionId - durable identity to read.
+ * @param options - how many newest message groups the page needs, and the exclusive upper bound for a backwards page.
+ * @param signal - optional cancellation for the read work.
+ * @returns the tail window plus whether older events were dropped.
+ * @throws {@link ApiRemoteSessionNotFound} when the identity has no project-backed session.
+ */
+export async function inspectApiRemoteSessionTail(
+  ctx: Context,
+  sessionId: SessionId,
+  options: SessionTailReadOptions,
+  signal?: AbortSignal,
+): Promise<{ meta: SessionHeader; events: SessionEvent[]; truncated: boolean }> {
+  const persistence = ctx.get('sessionPersistence')
+  if (persistence === undefined) {
+    throw new Error('session persistence is not configured (load a dsh-session-persistence backend)')
+  }
+  const meta = (await persistence.list()).find(candidate => candidate.id === sessionId)
+  if (meta === undefined || meta.cwd === undefined) {
+    throw new ApiRemoteSessionNotFound(`session "${sessionId}" not found`)
+  }
+  // A provider that predates the bounded read — an out-of-tree backend, or a
+  // fixture standing in for one — serves the whole log instead: correct, merely
+  // unbounded, which is exactly what the service's own default does.
+  const tail = typeof persistence.readTail === 'function'
+    ? await persistence.readTail(sessionId, options, signal)
+    : { ...(await persistence.inspect(sessionId, signal)), truncated: false }
+  if (tail.meta.cwd === undefined) {
+    throw new ApiRemoteSessionNotFound(`session "${sessionId}" not found`)
+  }
+  return { meta: tail.meta, events: [...tail.events], truncated: tail.truncated }
 }
 
 /**

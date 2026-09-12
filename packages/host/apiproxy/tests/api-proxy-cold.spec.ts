@@ -322,6 +322,77 @@ describe('cold history recovery view', () => {
     expect(ctx.sessions.get(sessionId)).toBeUndefined()
     await ctx.fiber.dispose()
   })
+
+  it('serves a cold transcript from a bounded window instead of materializing the whole log', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(UserQuestionService)
+    const sessionId = sid('session-windowed')
+    const meta = header(sessionId, 1000)
+    // Three message groups in the retained window; a two-message page must
+    // therefore stop short of the window's own start and say so.
+    const windowEvents: SessionEvent[] = [1, 2, 3].flatMap((turn): SessionEvent[] => [
+      { type: 'turn/start', seq: (turn - 1) * 3, time: turn, data: { turn } },
+      {
+        type: 'user/message', seq: (turn - 1) * 3 + 1, time: turn,
+        data: createUserMessage({ content: [{ type: 'text', text: `q${turn}` }], source: { kind: 'user' } }),
+        surfaceOp: 'append',
+      },
+      { type: 'turn/end', seq: (turn - 1) * 3 + 2, time: turn, data: { turn, reason: { kind: 'completed' } } },
+    ])
+    const inspect = vi.fn(() => Promise.resolve({ meta, events: [] as SessionEvent[] }))
+    const readTail = vi.fn(() => Promise.resolve({ meta, events: windowEvents, truncated: true }))
+    ctx.provide('sessionPersistence', {
+      list: () => Promise.resolve([meta]),
+      inspect,
+      readTail,
+      locate: () => undefined,
+    } as never)
+    const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
+
+    const history = await api.sessions.history(request({ sessionId, maxMessages: 2 }))
+
+    expect(history.result.ok).toBe(true)
+    if (history.result.ok) {
+      // The cut is the oldest counted message's own group start, so turn 2's
+      // `turn/start` belongs to the older page — the same boundary a full-log
+      // read would have produced.
+      expect(history.result.value.events.map(entry => entry.event.type)).toEqual([
+        'user/message', 'turn/end',
+        'turn/start', 'user/message', 'turn/end',
+      ])
+      expect(history.result.value.events.map(entry => entry.event.seq)).toEqual([4, 5, 6, 7, 8])
+      // The window is the log as far as this read is concerned: the page stops
+      // at the window's start, and older events are still reported as existing.
+      expect(history.result.value.hasMore).toBe(true)
+    }
+    // The whole-log read is what bounded reading exists to avoid: it must not run.
+    expect(readTail).toHaveBeenCalledWith(sessionId, { retainMessages: 3 }, undefined)
+    expect(inspect).not.toHaveBeenCalled()
+    await ctx.fiber.dispose()
+  })
+
+  it('caps a detached page and reports more, rather than handing back an unbounded window', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(UserQuestionService)
+    const sessionId = sid('session-capped')
+    const meta = header(sessionId, 1000)
+    const readTail = vi.fn(() => Promise.resolve({ meta, events: [] as SessionEvent[], truncated: true }))
+    ctx.provide('sessionPersistence', {
+      list: () => Promise.resolve([meta]),
+      inspect: () => Promise.resolve({ meta, events: [] as SessionEvent[] }),
+      readTail,
+      locate: () => undefined,
+    } as never)
+    const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
+
+    const history = await api.sessions.history(request({ sessionId, maxMessages: 100_000 }))
+
+    expect(history.result.ok).toBe(true)
+    expect(readTail).toHaveBeenCalledWith(sessionId, { retainMessages: 201 }, undefined)
+    await ctx.fiber.dispose()
+  })
 })
 
 describe('Remote Agent and Session lookup policy', () => {

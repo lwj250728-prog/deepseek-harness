@@ -107,7 +107,9 @@ import {
   createApiRemoteAgentResolver,
   hasApiRemoteSubagentOwner,
   inspectApiRemoteSession,
+  inspectApiRemoteSessionTail,
 } from '@deepseek-ai/dsh-api-remotes'
+import type { SessionTailReadOptions } from '@deepseek-ai/dsh-session-persistence'
 import { canOpenNativePath, openNativePath, openNativeTextFile } from './native-path-opener.ts'
 
 /** Page size when history is called without maxMessages. */
@@ -511,7 +513,13 @@ function sessionBlank(session: Session): boolean {
 /** Advance the Session-list hint projection by one committed event. */
 function applySessionListMetadata(state: SessionListMetadata, event: SessionEvent): SessionListMetadata {
   const blank = state.blank && event.type !== 'turn/start'
-  const lastPromptAt = event.type === 'user/message' && event.data.source.kind === 'user'
+  // `source` is required by the message type, but a plugin building a user
+  // message can omit it at runtime; a missing source means "not a human prompt",
+  // never a reason to fail the whole listing (2026-09-09 incident).
+  const source = event.type === 'user/message'
+    ? (event.data as { source?: { kind?: string } }).source
+    : undefined
+  const lastPromptAt = source?.kind === 'user'
     ? event.time
     : state.lastPromptAt
   return blank === state.blank && lastPromptAt === state.lastPromptAt
@@ -836,7 +844,25 @@ function historyPage(
  */
 type HistorySource =
   | { readonly kind: 'attached'; readonly session: Session }
-  | { readonly kind: 'detached'; readonly header: SessionHeader; readonly events: SessionEvent[] }
+  | ({ readonly kind: 'detached'; readonly header: SessionHeader; readonly events: SessionEvent[] } & {
+    /**
+     * Set when the events are a retained window rather than the whole log, so
+     * the read must not treat "the oldest thing I hold" as the log's start.
+     */
+    readonly truncated?: boolean
+  })
+
+/** The detached arm of {@link HistorySource}, where a retained window can appear. */
+type DetachedHistorySource = Extract<HistorySource, { kind: 'detached' }>
+
+/**
+ * Largest transcript page a detached read materializes. The wire schema leaves
+ * `maxMessages` open, and an unbounded page would hand the retention window back
+ * to the caller as the very materialization bounded reading exists to avoid; the
+ * cap keeps a page-sized read page-sized and reports `hasMore` so a client that
+ * asked for more can keep paging.
+ */
+const MAX_DETACHED_PAGE_MESSAGES = 200
 
 function projectionsFor(ctx: Context, session: Session): SessionProjectionsBlock | undefined {
   const registry = ctx.get('sessionProjections')
@@ -869,11 +895,23 @@ function listProjectionsFor(ctx: Context, meta: SessionHeader, session: Session 
 /** Projection baseline for a detached history tail without Agent activation. */
 function detachedProjectionsFor(
   ctx: Context,
-  events: readonly SessionEvent[],
+  source: DetachedHistorySource,
 ): SessionProjectionsBlock | undefined {
   const registry = ctx.get('sessionProjections')
   if (registry === undefined) return undefined
-  return registry.restore({}, events, 0).snapshot
+  if (source.truncated === true) {
+    // A retained window is not the whole log: folding it would publish values
+    // that silently ignore everything older. The persisted projection cache is
+    // the identity-checked baseline that exists for exactly this read; an
+    // absent cache degrades to no block rather than to wrong values.
+    try {
+      return ctx.get('sessionProjectionCache')?.cachedSnapshot(source.header)
+    } catch (error: unknown) {
+      ctx.logger.warn(`history: cached projections for "${source.header.id}" failed: ${String(error)}`)
+      return undefined
+    }
+  }
+  return registry.restore({}, source.events, 0).snapshot
 }
 
 /**
@@ -1340,8 +1378,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         id: message.id,
         // Only user-origin messages are steering; injected context (approval
         // notices, task completion, attached snapshots) is not a user action
-        // and must not render as a pending steering bubble.
-        placement: message.source.kind === 'user' ? 'steering' as const : 'context' as const,
+        // and must not render as a pending steering bubble. A plugin-built
+        // message may omit the (type-required) source at runtime; it is
+        // injected context, never a user action.
+        placement: (message.source as { kind?: string } | undefined)?.kind === 'user' ? 'steering' as const : 'context' as const,
         message,
       })),
     ]
@@ -1530,11 +1570,17 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
    * @returns the attached session, or the inspected detached header and events.
    * @throws {@link ApiRemoteSessionNotFound} when no project-backed session has that identity.
    */
-  async function historySourceFor(sessionId: SessionId): Promise<HistorySource> {
+  async function historySourceFor(sessionId: SessionId, window: SessionTailReadOptions): Promise<HistorySource> {
     const attached = ctx.sessions.get(sessionId)
     if (attached !== undefined) return { kind: 'attached', session: attached }
-    const inspected = await inspectServable(sessionId)
-    return { kind: 'detached', header: inspected.meta, events: inspected.events }
+    // A detached read is served from a retained window when the backend can
+    // read bounded: folding a transcript of hundreds of thousands of events
+    // into memory just to show its last page is what makes opening such a
+    // session fatal to the host rather than merely slow.
+    const tail = await inspectApiRemoteSessionTail(ctx, sessionId, window)
+    return tail.truncated
+      ? { kind: 'detached', header: tail.meta, events: tail.events, truncated: true }
+      : { kind: 'detached', header: tail.meta, events: tail.events }
   }
 
   /**
@@ -1565,7 +1611,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     includeProjections: boolean,
   ): { events: SessionEvent[]; projections?: SessionProjectionsBlock } {
     if (source.kind === 'detached') {
-      const projections = includeProjections ? detachedProjectionsFor(ctx, source.events) : undefined
+      const projections = includeProjections ? detachedProjectionsFor(ctx, source) : undefined
       return { events: source.events, ...projections === undefined ? {} : { projections } }
     }
     const events = [...source.session.events]
@@ -2242,7 +2288,14 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       async history(request) {
         const { sessionId, beforeSeq, maxMessages } = request.payload
         try {
-          const source = await historySourceFor(sessionId)
+          // A detached read retains only what the page it serves can show; the
+          // cap makes that bounded even when the caller asks for an unbounded
+          // page, and `hasMore` tells such a caller to keep paging.
+          const windowPage = Math.min(maxMessages ?? DEFAULT_MAX_MESSAGES, MAX_DETACHED_PAGE_MESSAGES)
+          const source = await historySourceFor(sessionId, {
+            retainMessages: windowPage + 1,
+            ...beforeSeq === undefined ? {} : { beforeSeq },
+          })
           // Both awaits happen BEFORE the cut. Ensuring the recorded
           // composition's standing mount is what registers its projection
           // units, so a first cold read would otherwise serve a baseline
@@ -2251,7 +2304,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           // at N with a baseline folded to N+1.
           const scope = await presenterScopeFor(sessionId, sourceSession(source))
           const cut = historyCutOf(source, beforeSeq === undefined)
-          const page = historyPage(ctx, cut.events, beforeSeq, maxMessages, scope)
+          const page = historyPage(
+            ctx,
+            cut.events,
+            beforeSeq,
+            source.kind === 'detached' && source.truncated === true ? windowPage : maxMessages,
+            scope,
+          )
           return ok(request, {
             events: page.events,
             hasMore: page.hasMore,
@@ -2692,7 +2751,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             header = inspected.meta
             events = inspected.events
             projections = beforeSeq === undefined
-              ? subagentHistoryProjections(ctx, childSessionId, () => detachedProjectionsFor(ctx, inspected.events))
+              ? subagentHistoryProjections(ctx, childSessionId, () => detachedProjectionsFor(ctx, {
+                kind: 'detached',
+                header: inspected.meta,
+                events: inspected.events,
+              }))
               : undefined
           } catch (error: unknown) {
             if (signal?.aborted) {

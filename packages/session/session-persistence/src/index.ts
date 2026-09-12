@@ -40,6 +40,32 @@ export interface SessionRawArtifact {
   readonly content: string
 }
 
+/** Retention request for one {@link SessionPersistence.readTail} read. */
+export interface SessionTailReadOptions {
+  /**
+   * How many newest append-origin message groups the caller needs. A backend
+   * that can retain a window keeps at least this many, plus room to prove an
+   * older page exists; a backend that cannot read bounded returns the whole log.
+   */
+  readonly retainMessages: number
+  /**
+   * Exclusive upper bound for a backwards page: retain nothing at or above this
+   * seq. Absent reads the tail. A backend that retains a window may drop the
+   * region above it; a whole-log fallback returns it and the caller filters.
+   */
+  readonly beforeSeq?: number
+}
+
+/** One bounded tail read: the newest retained events, oldest first. */
+export interface SessionTailRead {
+  /** Validated session metadata. */
+  readonly meta: SessionHeader
+  /** The retained tail window — the whole log when nothing was dropped. */
+  readonly events: readonly SessionEvent[]
+  /** Whether retention dropped older events, so `events` starts after the log's first event. */
+  readonly truncated: boolean
+}
+
 // The backend-agnostic write-path orchestration first-party backends compose.
 export {
   DEFAULT_PREPARED_SESSION_CACHE_SIZE,
@@ -219,6 +245,32 @@ export abstract class SessionPersistence extends Service {
    */
   abstract readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal):
   Promise<{ meta: SessionHeader; events: SessionEvent[] }>
+
+  /**
+   * Read only a bounded tail window of one stored session — the read a
+   * transcript tail page needs, and nothing more.
+   *
+   * {@link inspect} materializes a whole session, so its memory scales with the
+   * transcript: a log holding hundreds of thousands of events cannot be read
+   * inside a bounded heap at all, which makes opening such a session a way to
+   * take the host down rather than a way to read it. A backend whose medium can
+   * retain a window implements this so the read scales with the PAGE instead.
+   *
+   * The default implementation serves the whole log through {@link inspect}
+   * (`truncated: false`), so a backend that cannot read bounded stays correct
+   * and simply keeps the old memory profile.
+   * @param id - the persisted session to read.
+   * @param options - how many newest message groups the caller needs.
+   * @param signal - optional cancellation for the read work.
+   * @returns the tail window, or the whole log when nothing was dropped.
+   */
+  async readTail(id: SessionId, options: SessionTailReadOptions, signal?: AbortSignal): Promise<SessionTailRead> {
+    signal?.throwIfAborted()
+    void options
+    const inspected = await this.inspect(id, signal)
+    signal?.throwIfAborted()
+    return { meta: inspected.meta, events: inspected.events, truncated: false }
+  }
 
   /**
    * Lightweight listing from metadata, without a full-log parse.

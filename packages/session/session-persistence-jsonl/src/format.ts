@@ -9,7 +9,7 @@
  */
 
 import { join } from 'node:path'
-import { decodeStorageRecord, packChunkRuns, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
+import { decodeStorageRecord, isAppendSurfaceEvent, packChunkRuns, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader, SessionId, StorageRecord } from '@deepseek-ai/dsh-session'
 import { SessionFormatUnsupportedError, sessionFormatVersionRefusal } from '@deepseek-ai/dsh-session-persistence'
 
@@ -223,10 +223,44 @@ export function eventLines(events: readonly SessionEvent[], packChunks: boolean)
   return records.map(record => JSON.stringify(record)).join('\n')
 }
 
-interface SessionLogScan {
+export interface SessionLogScan {
   meta: SessionHeader
   events: SessionEvent[]
   committedBytes: number
+  /** Whether retention dropped older events, making `events` a tail window rather than the whole log. */
+  truncated: boolean
+}
+
+/**
+ * Message-shaped event types whose append-surface members open one message
+ * group. Kept in step with the transcript paginator: a read model that cuts a
+ * page at a message boundary must be able to recognize the same boundary.
+ */
+const MESSAGE_TYPES: ReadonlySet<string> = new Set(['user/message', 'assistant/message'])
+
+/**
+ * Retention policy for one scan.
+ *
+ * Every existing caller retains the whole log, which is correct for resume and
+ * recovery but makes memory scale with the transcript: a session whose log
+ * holds hundreds of thousands of events (long autonomous runs, chunk-heavy
+ * streaming) cannot be materialized in a bounded heap at all. A read model that
+ * only needs a tail page opts into a bounded window instead.
+ */
+export interface SessionLogScannerOptions {
+  /**
+   * Retain only the newest N append-origin message groups, dropping older
+   * events as scanning proceeds. One extra group is kept beyond N so a reader
+   * that paginates N messages off the tail still sees that an older page
+   * exists. Values below 1 are treated as 1. Absent retains everything.
+   */
+  retainMessages?: number
+  /**
+   * Drop events at or above this seq, retaining nothing a page ending there
+   * cannot show (a reader paginating backwards passes its `beforeSeq`). Seq
+   * contiguity is still validated across the dropped region.
+   */
+  dropFromSeq?: number
 }
 
 /** Parse one complete header record supplied independently from event rows. */
@@ -272,6 +306,15 @@ function parseHeaderRecord(record: Buffer): SessionHeader {
 export class SessionLogScanner {
   private readonly meta: SessionHeader
   private readonly events: SessionEvent[] = []
+  private readonly retainMessages: number | undefined
+  private readonly dropFromSeq: number | undefined
+  /** Seq of `events[0]`: retention drops from the front, so the array index is not the seq. */
+  private retainedFromSeq = 0
+  /** Next expected event seq, independent of how many events are still retained. */
+  private nextSeq = 0
+  /** Retained-array indices where each retained message group starts, oldest first. */
+  private groupStarts: number[] = []
+  private truncated = false
   private fragments: Buffer[] = []
   private fragmentBytes = 0
   private inputBytes: number
@@ -283,11 +326,18 @@ export class SessionLogScanner {
   /**
    * Create an event scanner from exactly one newline-terminated header record.
    * @param headerRecord - the complete first JSONL record, including its newline.
+   * @param options - optional bounded-retention policy; absent retains the whole log.
    */
-  constructor(headerRecord: Buffer) {
+  constructor(headerRecord: Buffer, options: SessionLogScannerOptions = {}) {
     this.meta = parseHeaderRecord(headerRecord)
     this.inputBytes = headerRecord.length
     this.committedBytes = headerRecord.length
+    this.retainMessages = options.retainMessages === undefined
+      ? undefined
+      : Math.max(1, Math.floor(options.retainMessages))
+    this.dropFromSeq = options.dropFromSeq === undefined
+      ? undefined
+      : Math.max(0, Math.floor(options.dropFromSeq))
   }
 
   /**
@@ -336,11 +386,11 @@ export class SessionLogScanner {
 
   /**
    * Finish scanning, ignoring a final record without a newline as a torn tail.
-   * @returns the header, contiguous event prefix, and safe truncation offset.
+   * @returns the header, contiguous event prefix (or the retained window), and safe truncation offset.
    */
   finish(): SessionLogScan {
     this.finished = true
-    return { meta: this.meta, events: this.events, committedBytes: this.committedBytes }
+    return { meta: this.meta, events: this.events, committedBytes: this.committedBytes, truncated: this.truncated }
   }
 
   /** Decode one complete event row and update the contiguous prefix. */
@@ -359,11 +409,14 @@ export class SessionLogScanner {
       return
     }
 
-    const rowStart = this.events.length
+    const rowStartSeq = this.nextSeq
+    const rowStartIndex = this.events.length
     for (const event of decoded) {
-      if (event.seq !== this.events.length) {
-        const expected = this.events.length
-        this.events.length = rowStart
+      if (event.seq !== this.nextSeq) {
+        const expected = this.nextSeq
+        this.events.length = rowStartIndex
+        this.nextSeq = rowStartSeq
+        this.discardGroupStartsFrom(rowStartIndex)
         this.issue = new Error(
           `corrupt session log: seq gap in committed region at line ${this.eventLine} `
           + `(expected ${expected}, got ${event.seq})`,
@@ -371,9 +424,72 @@ export class SessionLogScanner {
         if (decoded.some(candidate => candidate.type === 'turn/end')) throw this.issue
         return
       }
+      if (this.dropFromSeq !== undefined && event.seq >= this.dropFromSeq) {
+        // Above the caller's window: still counted for seq contiguity, never retained.
+        this.truncated = true
+        this.nextSeq += 1
+        continue
+      }
+      if (this.isGroupBoundary(event)) {
+        const start = this.groupStartIndex(event)
+        if (start !== undefined) this.groupStarts.push(start)
+      }
       this.events.push(event)
+      this.nextSeq += 1
     }
     this.committedBytes = endByte
+    this.trimToWindow()
+  }
+
+  /** Whether one event opens a new append-origin message group. */
+  private isGroupBoundary(event: SessionEvent): boolean {
+    return MESSAGE_TYPES.has(event.type) && isAppendSurfaceEvent(event)
+  }
+
+  /**
+   * The retained-array index where one boundary event's message group starts.
+   *
+   * A message's streaming chunks carry lower seqs than the message event that
+   * closes them (`sourceEventSeqs`), so the group begins earlier than the
+   * boundary event itself; a window cut at the boundary event would drop the
+   * oldest message's own chunks. Returns `undefined` when that start is already
+   * outside the retained window.
+   */
+  private groupStartIndex(event: SessionEvent): number | undefined {
+    const sources = (event as { sourceEventSeqs?: number[] }).sourceEventSeqs
+    const startSeq = sources !== undefined && sources.length > 0
+      ? Math.min(event.seq, ...sources)
+      : event.seq
+    const index = startSeq - this.retainedFromSeq
+    if (index < 0) return undefined
+    const last = this.groupStarts.at(-1)
+    if (last !== undefined && last >= index) return undefined
+    return index
+  }
+
+  /** Forget recorded group starts that a rolled-back row just removed. */
+  private discardGroupStartsFrom(index: number): void {
+    while (this.groupStarts.length > 0 && (this.groupStarts.at(-1) as number) >= index) this.groupStarts.pop()
+  }
+
+  /**
+   * Drop the oldest retained message groups once the window holds more than the
+   * configured retention plus its one-group margin. Dropping at a group start —
+   * and never inside a group — keeps the window a suffix of whole messages, so
+   * a reader paginating from the tail still cuts on a real boundary.
+   */
+  private trimToWindow(): void {
+    const retain = this.retainMessages
+    if (retain === undefined) return
+    while (this.groupStarts.length > retain + 1) {
+      const dropToIndex = this.groupStarts[1] as number
+      if (dropToIndex <= 0) break
+      this.events.splice(0, dropToIndex)
+      this.retainedFromSeq += dropToIndex
+      this.truncated = true
+      const shifted = this.groupStarts.slice(1).map(index => index - dropToIndex)
+      this.groupStarts = shifted
+    }
   }
 }
 

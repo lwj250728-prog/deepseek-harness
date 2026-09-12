@@ -21,6 +21,7 @@ export {
   createApiRemoteAgentResolver,
   hasApiRemoteSubagentOwner,
   inspectApiRemoteSession,
+  inspectApiRemoteSessionTail,
 } from './agent-lookup.ts'
 export type {
   ApiRemoteAgentOptions,
