@@ -27,6 +27,16 @@ COG = os.path.expanduser('~/.dsh/cognitive-pipeline')
 LOG_RE = re.compile(r'>>?\s*(\S+)')
 
 
+DECL = os.path.join(COG, 'cron-witness-kinds.json')
+
+
+def witness_kind(cmd: str, kinds: dict):
+    for key, meta in (kinds or {}).items():
+        if key in cmd:
+            return meta.get('kind', 'periodic'), meta.get('reason', ''), meta.get('witnessOverride')
+    return 'periodic', '', None
+
+
 def schedule_minutes(spec: str):
     """把 5 段 cron 表达式折算成'最大间隔(分钟)'的粗略估计, 用于新鲜度判定。"""
     m, h = spec.split()[0], spec.split()[1]
@@ -52,6 +62,11 @@ def main() -> int:
         print('[cron-liveness] 读不到 crontab: %s' % exc, file=sys.stderr)
         return 3
     now = time.time()
+    kinds = {}
+    try:
+        kinds = (json.load(open(DECL, encoding='utf8')) or {}).get('kinds') or {}
+    except Exception:  # noqa: BLE001
+        kinds = {}
     rows = []
     for line in cron.splitlines():
         line = line.strip()
@@ -64,13 +79,25 @@ def main() -> int:
         every = schedule_minutes(spec)
         m = LOG_RE.search(cmd)
         witness, age_min, verdict = None, None, 'no-witness'
+        # 见证类型声明(2026-09-12 19:2x 加, 由首批 6 条标红里 5 条是假阳性逼出):
+        # 'event' = 只在事件时写日志(久未更新正常) / 'none' = 无见证(不可判) / 'periodic' = 应随每次运行增长。
+        kind, reason, override = witness_kind(cmd, kinds)
+        if override:
+            m = LOG_RE.match('>> ' + override) or m
         if m:
             witness = os.path.expanduser(m.group(1))
             if os.path.exists(witness):
                 age_min = (now - os.path.getmtime(witness)) / 60.0
-                verdict = 'fresh' if age_min <= every * args.grace else 'stale'
+                if kind in ('event', 'schedule'):
+                    verdict = 'fresh-by-design'
+                else:
+                    verdict = 'fresh' if age_min <= every * args.grace else 'stale'
             else:
-                verdict = 'missing'
+                # 事件型/排期型: 见证文件还没被创建**不是**故障(还没到事件/还没到首个执行日)
+                verdict = 'not-yet' if kind in ('event', 'schedule') else 'missing'
+        if kind == 'none':
+            verdict = 'no-witness'
+            witness = witness or m.group(1) if m else witness
         rows.append({'schedule': spec, 'everyMinutes': every, 'cmd': cmd[:90],
                      'witness': witness, 'ageMinutes': None if age_min is None else round(age_min, 1),
                      'verdict': verdict})
@@ -84,7 +111,8 @@ def main() -> int:
                   % (r['schedule'], r['everyMinutes'], r['cmd'][:46], r['witness'], r['ageMinutes'] or -1))
         fresh = sum(1 for r in rows if r['verdict'] == 'fresh')
         nw = sum(1 for r in rows if r['verdict'] == 'no-witness')
-        print('  新鲜 %d / 无重定向(不可判) %d' % (fresh, nw))
+        byd = sum(1 for r in rows if r['verdict'] == 'fresh-by-design')
+        print('  新鲜 %d / 按声明豁免(事件型/排期型) %d / 无见证(不可判) %d' % (fresh, byd, nw))
     return 1 if stale else 0
 
 
