@@ -8413,6 +8413,38 @@ else:
     print("源码顶层齐备; 最新行含 retrievedIds(%d 条, truncated=%s)" % (len(last["retrievedIds"]), last.get("retrievedIdsTruncated")))
 '
 # ── T212 审计字段必须接在**每一个**审计点上(cl-278 首次部署的实证缺陷) ──
+# ── T213 读侧帧层判据必须与写侧同一口径(cl-280, 跨会话发现 + 主会话复核) ──
+# 实测: experiences-frames.jsonl 135 条里 **131 条 utility 完全相同(1,0,2)且 135/135 负极性**; 而读侧
+# isSelfFrameExperience 只看 situation 前缀, 对现帧格式("三问帧旁路评估 #N")**命中 0/135**(写侧 134/134)
+# ⇒ 这个 novelty 恒 0 的同质失败吸引子被 coverViewpoints 轮换系统性捞进上下文: 时代内 535 条注入里
+# 161 条是帧层(30.1%), 最近 30 次注入 37%。修法=读侧改用写侧同一判据(kind 优先, 回退 action 前缀)。
+echo "[T213] 读侧帧层判据与写侧同口径(帧层全中 / 任务层零误伤)"
+t "读侧帧层判据必须与写侧同一口径(帧层全中、任务层不误伤)" python3 -c '
+import json, os, subprocess, sys
+SF = os.environ.get("DSH_SELF_FRAME") or os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/self-frame.ts")
+D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+for f in ("experiences-frames.jsonl", "experiences.jsonl"):
+    assert os.path.exists(os.path.join(D, f)), "缺账本 %s(判据前提不成立)" % f
+probe = (
+    "import { isSelfFrameExperience as f } from \"" + SF + "\"\n"
+    "import * as fs from \"node:fs\"\n"
+    "const D = process.env.DSH_COG_DIR\n"
+    "const rd = (n) => fs.readFileSync(D + \"/\" + n, \"utf8\").split(\"\\n\").filter(Boolean).map(l => JSON.parse(l))\n"
+    "const fr = rd(\"experiences-frames.jsonl\"), tk = rd(\"experiences.jsonl\")\n"
+    "const hitF = fr.filter(r => f(r)).length\n"
+    "const fp = tk.filter(r => f(r)).map(r => r.expId)\n"
+    "console.log(JSON.stringify({ frames: fr.length, caught: hitF, falsePositives: fp.length, ids: fp.slice(0,3) }))\n"
+)
+r = subprocess.run(["npx", "tsx", "--eval", probe], cwd=os.path.expanduser("~/dsh-fork"),
+                   capture_output=True, text=True, timeout=600, env=dict(os.environ, DSH_COG_DIR=D))
+assert r.returncode == 0, "判据跑不动: " + (r.stderr or r.stdout)[-200:]
+d = json.loads(r.stdout.strip().splitlines()[-1])
+assert d["frames"] > 0, "帧层账本为空(判据前提不成立)"
+assert d["caught"] == d["frames"], ("读侧判据漏掉了 %d/%d 条帧层经验 ⇒ 它们会被注入回上下文(同质负样本吸引子): %s"
+                                    % (d["frames"] - d["caught"], d["frames"], d["ids"]))
+assert d["falsePositives"] == 0, "读侧判据误伤任务层经验(会白丢真实经验): %s" % d["ids"]
+print("帧层 %d 条全中, 任务层零误伤" % d["caught"])
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

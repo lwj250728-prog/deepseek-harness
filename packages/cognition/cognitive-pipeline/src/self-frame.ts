@@ -19,12 +19,28 @@
  * @module @deepseek-ai/dsh-cognitive-pipeline/self-frame
  */
 
-/** The minimal SAR slice this detector reads (an Experience or a raw triplet). */
+/** The minimal slice this detector reads (an Experience or a raw triplet).
+ *
+ * cl-280(2026-09-12 16:0x, **跨会话发现 + 主会话复核**): 读侧此前只看 `sar.situation` 的前缀, 而现帧格式
+ * 的 situation 是"三问帧旁路评估 #N（原因：…）" ⇒ 对 135 条帧层经验 **命中 0/135**, 而同一条判据在写侧
+ * (`store.isFrameExperience`, 按 `kind`/`action` 前缀) 命中 134/134。后果被实测到: 帧层 135 条里 **131 条
+ * utility 完全相同(1,0,2)且 135/135 为负极性**, 这个"novelty 恒 0 的同质失败吸引子"被 coverViewpoints 的
+ * 轮换系统性捞进上下文 —— 时代内注入的 535 条条目里 **161 条是帧层(30.1%)**, 最近 30 次注入里 37%。
+ * 故读侧改用与写侧**同一判据**(kind 优先, 回退 action 前缀), 而不是继续往 situation 前缀表里加条目。
+ */
 export interface SelfFrameCandidate {
+  /** Write-side layer tag: 'frame' rows live in experiences-frames.jsonl. */
+  readonly kind?: string
   readonly sar: {
     readonly situation: string
+    readonly action?: string
   }
 }
+
+/** The frame template the write side prefixes onto frame-layer actions. */
+const SELF_FRAME_ACTION_PREFIX = 'quiet-driver 旁路三问帧'
+/** Current frame-narration format in `situation` (kept as a defence-in-depth rule). */
+const SELF_FRAME_SITUATION_PREFIXES = ['三问帧旁路评估'] as const
 
 /** Situation prefixes that mark a record as born from an autonomous frame. */
 const SELF_FRAME_PREFIXES = ['自主回合', '检索路由歧义'] as const
@@ -36,7 +52,13 @@ const SELF_FRAME_MARKER = '自主回合(无用户在场)'
  * @returns true when the situation is frame-derived self-narration.
  */
 export function isSelfFrameExperience(candidate: SelfFrameCandidate): boolean {
+  // 与写侧同一判据: kind 优先(cl-102/cl-033: 文本嗅探曾把一条引用了模板字符串的任务经验误判成帧经验)。
+  if (candidate.kind === 'frame') return true
+  if (candidate.kind === 'task') return false
   const situation = candidate.sar.situation
-  return SELF_FRAME_PREFIXES.some(prefix => situation.startsWith(prefix))
+  const action = String(candidate.sar.action ?? '')
+  return SELF_FRAME_ACTION_PREFIX.length > 0 && action.startsWith(SELF_FRAME_ACTION_PREFIX)
+    || SELF_FRAME_SITUATION_PREFIXES.some(prefix => situation.startsWith(prefix))
+    || SELF_FRAME_PREFIXES.some(prefix => situation.startsWith(prefix))
     || situation.includes(SELF_FRAME_MARKER)
 }
