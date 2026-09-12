@@ -52,8 +52,14 @@ rows.append({'id': rid, 'ts': now,
              'source': 'dsh-cog-tests.sh T0 自检', 'status': 'open',
              'reviewBy': now[:10], 'reviewBasis': '修复语法后自动恢复',
              'note': '修法: bash -n 整文件后再执行; 修复后重跑套件, 该告警由恢复逻辑关闭。'})
-with open(ledger, 'w', encoding='utf8') as f:
+# 原子写(2026-09-12 16:4x): 非原子重写在账本变大后一旦被打断就截断记忆主干
+_tmp = ledger + '.tmp'
+with open(_tmp, 'w', encoding='utf8') as f:
     f.write(chr(10).join(json.dumps(x, ensure_ascii=False) for x in rows) + chr(10))
+    f.flush()
+    import os as _os
+    _os.fsync(f.fileno())
+_os.replace(_tmp, ledger)
 PYINNER
   exit 2
 fi
@@ -8514,9 +8520,14 @@ for d in rows:
         d['doneNote'] = '测试套件恢复全过, 自动关闭(design-spec-wire-up-verification P0)'
         changed = True
 if changed:
-    with open(ledger, 'w', encoding='utf8') as f:
+    import os as _os
+    _tmp = ledger + '.tmp'
+    with open(_tmp, 'w', encoding='utf8') as f:
         for d in rows:
             f.write(json.dumps(d, ensure_ascii=False) + '\n')
+        f.flush()
+        _os.fsync(f.fileno())
+    _os.replace(_tmp, ledger)
     print('[test-alert] 测试恢复全过——已自动关闭遗留告警')
 PYEOF
 exit 0

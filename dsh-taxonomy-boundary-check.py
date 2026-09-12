@@ -92,8 +92,15 @@ def main() -> int:
                 'reviewBy': (datetime.datetime.now(TZ) + datetime.timedelta(days=2)).strftime('%Y-%m-%d'),
                 'disposition': '达标即重试一次 local 重建; 若仍 deferred/拒绝, 记录为"该路径在现数据下仍不可用"并隔 7 天再算',
             })
-            with open(LEDGER, 'w', encoding='utf8') as fh:
+            # 2026-09-12 16:4x(用户问'账本变大有什么影响'时实测所得): 整文件重写**必须原子** ——
+            # 账本已有 739 行/844KB 且按今日 170 行/天增长, 而非原子重写一旦被重启/OOM 打断, 截断的
+            # 就是记忆主干(今天已重启载体 3 次)。改成 temp + os.replace。
+            _tmp = LEDGER + '.tmp-%d' % os.getpid()
+            with open(_tmp, 'w', encoding='utf8') as fh:
                 fh.write('\n'.join(json.dumps(x, ensure_ascii=False) for x in rows) + '\n')
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(_tmp, LEDGER)
             print('已写入提示条目 %s' % cid)
     if '--json' in args:
         print(json.dumps(rec, ensure_ascii=False))
