@@ -7988,6 +7988,47 @@ assert cur.get("triggerThresholds") == {"kernel": 0.6, "focus": 0.55}, "往返�
 assert str(cur.get("waitChecker")) == orig_wait, "往返没回到原门: %r" % cur.get("waitChecker")
 print("disable→restore 往返: 阈值与原门均回滚")
 '
+t "判读器必须消费恢复腿预期(回显+复核时点), 且四类判定可判别" python3 -c '
+import datetime, json, os, shutil, subprocess, tempfile
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+RO = os.path.expanduser("~/dsh-fork/dsh-wake-intervention-readout.py")
+tmp = tempfile.mkdtemp()
+for f in ("dormant-goals.jsonl", "wake-intervention-baseline.json", "attribution-era.json"):
+    src = os.path.join(D, f)
+    if os.path.exists(src):
+        shutil.copy(src, os.path.join(tmp, f))
+open(os.path.join(tmp, "incubation-log.jsonl"), "w", encoding="utf8").write("")
+open(os.path.join(tmp, "quiet-driver-frames.jsonl"), "w", encoding="utf8").write("")
+now = datetime.datetime.now().astimezone()
+end = (now - datetime.timedelta(hours=2)).isoformat()
+start = (now - datetime.timedelta(hours=4)).isoformat()
+open(os.path.join(tmp, "wake-interventions.jsonl"), "w", encoding="utf8").write(json.dumps(
+    {"ts": start, "event": "disable", "goal": "goal-experience-library", "plannedHours": 24,
+     "reversalExpectation": "恢复后 30 分钟内应见行动帧"}, ensure_ascii=False) + "\n")
+env = dict(os.environ, DSH_COG_DIR=tmp)
+def run(*extra):
+    return subprocess.run(["python3", RO, "--target", "goal-experience-library", "--start", start, "--end", end] + list(extra),
+                          capture_output=True, text=True, timeout=600, env=env)
+r = run()
+assert r.returncode == 0, "正常判读失败: " + (r.stderr or r.stdout)[-200:]
+rows = [json.loads(l) for l in open(os.path.join(tmp, "wake-intervention-readout.jsonl"), encoding="utf8") if l.strip()]
+p = rows[-1]
+for k in ("reversalExpectation", "reversalCheckAt", "reversalPending", "reversalVerdict"):
+    assert k in p, "判读行没有消费恢复腿预期(缺 %s) —— 登记就成了装饰性声明(与 T202 的装饰性时限同型)" % k
+assert p["reversalVerdict"] == "unmet", "结束后零推进却判成 %r" % p["reversalVerdict"]
+u = run("--reversal-eval")
+assert u.returncode == 1, "零推进未兑现却没判 1(exit %d)" % u.returncode
+with open(os.path.join(tmp, "quiet-driver-frames.jsonl"), "a", encoding="utf8") as fh:
+    fh.write(json.dumps({"ts": int((now - datetime.timedelta(hours=1, minutes=30)).timestamp() * 1000),
+                         "kind": "action-frame", "goalId": "goal-experience-library", "frameNo": 1}) + "\n")
+m = run("--reversal-eval")
+assert m.returncode == 0, "窗口结束后确有推进却判未兑现(exit %d)" % m.returncode
+open(os.path.join(tmp, "wake-interventions.jsonl"), "w", encoding="utf8").write("")
+n = subprocess.run(["python3", RO, "--reversal-eval", "--target", "goal-experience-library",
+                    "--start", start, "--end", end], capture_output=True, text=True, timeout=600, env=env)
+assert n.returncode == 2, "未预登记却仍给出判定(exit %d) —— 事后叙事被采信了" % n.returncode
+print("四例: 判读行消费预期(含复核时点) / 零推进⇒unmet(1) / 有推进⇒met(0) / 未预登记⇒2")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

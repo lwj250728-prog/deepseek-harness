@@ -53,6 +53,9 @@ def main() -> int:
     ap.add_argument('--start', default=None, help='干预窗口开始(ISO); 缺省=wake-interventions.jsonl 里最后一次 disable')
     ap.add_argument('--end', default=None, help='干预窗口结束(ISO); 缺省=该次 disable 之后最近一次 restore, 或现在')
     ap.add_argument('--json', action='store_true')
+    ap.add_argument('--reversal-eval', action='store_true',
+                    help='只做恢复腿复核: 判定窗口结束后 N 分钟内该目标是否真被推进(0=兑现 / 1=未兑现 / 2=未预登记 / 3=复核时点未到)')
+    ap.add_argument('--reversal-window-min', type=float, default=30.0)
     args = ap.parse_args()
 
     recs = []
@@ -176,6 +179,60 @@ def main() -> int:
     else:
         verdict, reason = 'no-effect', ('目标推进速率 %.3f→%.3f 次/h(比 %s) 未达 >=50%% 降幅或未超过对照 %s '
                                         '⇒ 提醒对该目标无独立贡献' % (t_rate_b, t_rate_i, ratio, ctrl_ratios))
+    # ── 恢复腿预登记的**消费方**(2026-09-12 10:5x; T203 的另一半) ──
+    # 上一步给 disable 加了强制的 reversalExpectation(预登记), 但**没有任何东西评估它是否兑现** ——
+    # 这与 T202 判红的"装饰性时限"同型, 只是升了一层: 声明在账本里, 无人消费。故判读行必须回显预期
+    # 并给出复核时点; `--reversal-eval` 时给出兑现判定(窗口结束 + N 分钟内的推进证据)。
+    exp_rows = [r for r in recs if r.get('goal') == args.target and str(r.get('reversalExpectation') or '').strip()]
+    expectation = str(exp_rows[-1]['reversalExpectation']) if exp_rows else ''
+    check_at = end_ms + float(args.reversal_window_min) * 60000.0
+
+    def counts_in(lo: float, hi: float) -> tuple[int, int]:
+        af = 0
+        try:
+            for line in open(os.path.join(D, 'quiet-driver-frames.jsonl'), encoding='utf8'):
+                if not line.strip():
+                    continue
+                f = json.loads(line)
+                if f.get('kind') != 'action-frame' or str(f.get('goalId')) != args.target:
+                    continue
+                m = ms_of(f.get('ts'))
+                if m is not None and lo <= m < hi:
+                    af += 1
+        except Exception:  # noqa: BLE001
+            pass
+        pc = sum(1 for c in changes if str(c.get('goalId')) == args.target
+                 and (ms_of(c.get('ts')) or -1) >= lo and (ms_of(c.get('ts')) or -1) < hi)
+        return af, pc
+
+    now_ms = datetime.datetime.now().timestamp() * 1000.0
+    if not expectation:
+        rev = {'verdict': 'none', 'reason': '未预登记恢复腿预期 ⇒ 无从评估(事后叙事不予采信)'}
+    elif now_ms < check_at:
+        rev = {'verdict': 'pending', 'reason': '复核时点未到(结束 + %g 分钟)' % args.reversal_window_min}
+    else:
+        af, pc = counts_in(end_ms, check_at)
+        rev = {'verdict': 'met' if (af + pc) > 0 else 'unmet',
+               'actionFrames': af, 'poolChanges': pc,
+               'reason': ('窗口结束后 %g 分钟内该目标有 %d 条行动帧 + %d 条池变更 ⇒ 恢复腿兑现'
+                          % (args.reversal_window_min, af, pc)) if (af + pc) > 0 else
+                         ('窗口结束后 %g 分钟内该目标零行动帧、零池变更 ⇒ 恢复腿未兑现'
+                          '(门→可驱动这条链可能断了, 与唤醒机制无关)' % args.reversal_window_min)}
+
+    if args.reversal_eval:
+        row = {'ts': datetime.datetime.now().astimezone().isoformat(), 'event': 'reversal', 'target': args.target,
+               'startIso': datetime.datetime.fromtimestamp(start_ms / 1000).astimezone().isoformat(),
+               'endIso': datetime.datetime.fromtimestamp(end_ms / 1000).astimezone().isoformat(),
+               'checkAt': datetime.datetime.fromtimestamp(check_at / 1000).astimezone().isoformat(),
+               'expectation': expectation[:300], 'verdict': rev['verdict'], 'detail': rev}
+        with open(OUT, 'a', encoding='utf8') as f:
+            f.write(json.dumps(row, ensure_ascii=False) + '\n')
+        print('恢复腿复核 %s | 结束 %s + %g 分钟 ⇒ %s' % (args.target, row['endIso'][11:16],
+                                                         args.reversal_window_min, rev['verdict']))
+        print('  预期: %s' % (expectation[:160] or '(未登记)'))
+        print('  %s' % rev['reason'])
+        return {'met': 0, 'unmet': 1, 'none': 2, 'pending': 3}[rev['verdict']]
+
     payload = {'ts': datetime.datetime.now().astimezone().isoformat(), 'target': args.target,
                'baselineSource': baseline_src,
                'startIso': datetime.datetime.fromtimestamp(start_ms / 1000).astimezone().isoformat(),
@@ -184,6 +241,10 @@ def main() -> int:
                'targetBaselineRate': round(t_rate_b, 3), 'targetInterventionRate': round(t_rate_i, 3),
                'targetRatio': ratio if ratio is None else (round(ratio, 3) if ratio != float('inf') else 'inf'),
                'framesInWindow': frames_in_window,
+               'reversalExpectation': expectation[:300],
+               'reversalCheckAt': datetime.datetime.fromtimestamp(check_at / 1000).astimezone().isoformat(),
+               'reversalPending': rev['verdict'] == 'pending',
+               'reversalVerdict': rev['verdict'],
                'controls': controls, 'verdict': verdict, 'reason': reason}
     with open(OUT, 'a', encoding='utf8') as f:
         f.write(json.dumps(payload, ensure_ascii=False) + '\n')
