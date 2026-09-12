@@ -71,6 +71,21 @@ def main() -> int:
         for path in entry.get('records') or []:
             if not os.path.exists(path):
                 problems.append('%s 声明的记录文件不存在: %s' % (os.path.basename(script), path))
+    # 2026-09-12 19:0x **实测事故**: crontab 直接调用 `dsh-cog-tests.sh`(不是 `bash <file>`), 而它的可执行位
+    # 在 17:19 那次提交里被抹掉(git 记录 100644) ⇒ **cron 的套件从此静默不跑**, 日志里只留一行
+    # `/bin/sh: 1: ...: Permission denied`(18:17 那次实证)。故本判据扩一条: 凡 crontab 里被调用的脚本
+    # 必须**可执行** —— 排程机制的"存在性"之外, 还要它的"可运行性"。
+    for script, line in sorted(cron.items()):
+        if not os.path.exists(script):
+            continue
+        # **区分调用方式**(第一版没区分 ⇒ 误报 dsh-claims-ledger-heal.py): crontab 里以 `python3 <脚本>` /
+        # `bash <脚本>` 调用时**不需要可执行位**; 只有**直接调用**(不以解释器开头)才需要。
+        import re as _re
+        direct = _re.search(r'(^|[\s&|;(])(/[^\s;&|()]*%s)(\s|$)' % _re.escape(os.path.basename(script)),
+                            _re.sub(r'\b(python3|python|bash|sh|node|npx)\s+[^\s;&|()]*%s' % _re.escape(os.path.basename(script)), ' <interp>', line)) is not None
+        if direct and not os.access(script, os.X_OK):
+            problems.append('%s 被 crontab 调用但**不可执行**(cron 会静默失败): chmod +x 并用 '
+                            'git update-index --chmod=+x 让 git 记住' % os.path.basename(script))
 
     payload = {'cronScripts': len(cron), 'inventory': len(entries), 'exempt': len(exempt),
                'problems': problems,

@@ -10,6 +10,14 @@ def safe_write(path, text):
         f.write(text)
         f.flush()
         os.fsync(f.fileno())
+    # **保留原文件的权限位**(2026-09-12 19:0x 实测教训): temp 文件默认 644, 直接 replace 会把可执行位抹掉 ——
+    # 而 `dsh-cog-tests.sh` 是被 **cron 直接调用**的(不是 bash <file>), 于是它静默停止运行, 日志里只留一行
+    # `/bin/sh: 1: ...: Permission denied`(18:17 那次就是)。工具必须保持"改内容不改权限"。
+    if os.path.exists(path):
+        try:
+            os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+        except Exception:  # noqa: BLE001
+            pass
     os.replace(tmp, path)
 
 
