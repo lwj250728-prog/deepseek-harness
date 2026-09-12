@@ -8458,6 +8458,37 @@ assert d["caught"] == d["frames"], ("读侧判据漏掉了 %d/%d 条帧层经验
 assert d["falsePositives"] == 0, "读侧判据误伤任务层经验(会白丢真实经验): %s" % d["ids"]
 print("帧层 %d 条全中, 任务层零误伤" % d["caught"])
 '
+# ── T214 帧生判据三处同口径(工具侧 = 写侧产物) ──
+# cl-283 实测: 同一判据曾有**三份副本** —— 写侧 store.isFrameExperience(kind/action 前缀)、读侧 self-frame.ts
+# (本帧已对齐写侧, 见 T213)、以及 dsh-injection-noise.py 自带的 FRAME_BORN_PREFIXES(只看 situation 前缀)。
+# 三者偏离的后果: 修复后注入侧帧层占比已 44.7%→0, 套件 T84 仍判红 —— 工具把一条按写侧规则属于**任务层**的
+# 经验算成帧生。本组守: 工具侧判据必须与**写侧产物**(哪些 expId 落在 experiences-frames.jsonl)一致:
+# 帧层全中、任务层零误伤。
+echo "[T214] 帧生判据三处同口径(工具侧须与写侧产物一致)"
+t "帧生判据三处同口径(工具侧须与写侧产物一致)" python3 -c '
+import importlib.util, json, os
+TOOL = os.environ.get("DSH_NOISE_TOOL") or os.path.expanduser("~/dsh-fork/dsh-injection-noise.py")
+D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+assert os.path.exists(os.path.join(D, "experiences-frames.jsonl")), "缺帧层账本(判据前提不成立)"
+spec = importlib.util.spec_from_file_location("noise", TOOL)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+def load(name):
+    rows = {}
+    for l in open(os.path.join(D, name), encoding="utf8"):
+        if l.strip():
+            r = json.loads(l)
+            if r.get("expId"): rows[r["expId"]] = r
+    return rows
+fr, tk = load("experiences-frames.jsonl"), load("experiences.jsonl")
+assert fr and tk, "两个层都要有数据(判据前提不成立)"
+hit = [k for k, r in fr.items() if mod.is_frame_born(r)]
+fp = [k for k, r in tk.items() if mod.is_frame_born(r)]
+assert len(hit) == len(fr), ("工具侧判据漏掉 %d/%d 条帧层经验 ⇒ 它们会被算成普通经验注入回上下文(第三份判据偏离写侧)"
+                             % (len(fr) - len(hit), len(fr)))
+assert not fp, "工具侧判据误伤任务层经验(会白丢真实经验): %s" % fp[:5]
+print("工具侧判据与写侧产物一致: 帧层 %d/%d 全中, 任务层零误伤" % (len(hit), len(fr)))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
