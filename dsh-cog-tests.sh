@@ -8508,6 +8508,44 @@ assert rows <= ROWS_MAX, ("账本 %d 行 > 阈 %d: " % (rows, ROWS_MAX)) + why
 assert size <= BYTES_MAX, ("账本 %.2fMB > 阈 %.1fMB: " % (size / 1048576, BYTES_MAX / 1048576)) + why
 print("账本 %d 行 / %.2fMB(阈 %d 行 / %.0fMB)" % (rows, size / 1048576, ROWS_MAX, BYTES_MAX / 1048576))
 '
+# ── T216 账本压缩的不变量: last-wins 视图不得变(cl-282 工具的安全性质) ──
+# 压缩会重写**记忆主干**, 所以它的安全性质不是"跑得动"而是"压缩前后 last-wins 视图逐字节相同"。
+# 本组用合成账本(A 三行+B 一行)实跑压缩: 校验视图不变、历史行进归档、账本只剩每个 id 一行。
+echo "[T216] 账本压缩必须保持 last-wins 视图不变(否则拒写)"
+t "账本压缩必须保持 last-wins 视图不变(否则拒写)" python3 -c '
+import json, os, subprocess, sys, tempfile
+TOOL = os.environ.get("DSH_COMPACT_TOOL") or os.path.expanduser("~/dsh-fork/dsh-claims-ledger-compact.py")
+tmp = tempfile.mkdtemp()
+led = os.environ.get("DSH_COMPACT_LEDGER") or os.path.join(tmp, "ledger.jsonl")
+rows = [{"id": "cl-a", "ts": "2026-09-01T10:00:00+08:00", "status": "open", "claim": "旧1", "reviewBy": "2026-09-20"},
+        {"id": "cl-a", "ts": "2026-09-02T10:00:00+08:00", "status": "open", "claim": "旧2", "reviewBy": "2026-09-20"},
+        {"id": "cl-a", "ts": "2026-09-03T10:00:00+08:00", "status": "open", "claim": "当前", "reviewBy": "2026-09-20"},
+        {"id": "cl-b", "ts": "2026-09-01T11:00:00+08:00", "status": "open", "claim": "B", "reviewBy": "2026-09-20"}]
+if not os.path.exists(led):
+    with open(led, "w", encoding="utf8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+def lw(path):
+    out = {}
+    for l in open(path, encoding="utf8"):
+        if l.strip():
+            r = json.loads(l)
+            if r.get("id"): out[str(r["id"])] = r
+    return json.dumps(out, ensure_ascii=False, sort_keys=True)
+before = lw(led)
+arch = os.path.join(os.path.dirname(led), "claims-ledger-archive-test.jsonl")
+r = subprocess.run([sys.executable, TOOL, "--ledger", led, "--retention-days", "0.0001",
+                    "--archive", arch, "--write"], capture_output=True, text=True, timeout=300)
+assert r.returncode == 0, "压缩工具没跑通(exit %d): %s" % (r.returncode, (r.stderr or r.stdout)[-160:])
+after = lw(led)
+assert before == after, "压缩改动了 last-wins 视图 —— 压缩/归档**绝不允许**改读数(工具本应拒绝写入)"
+assert os.path.exists(arch), "历史行没有进归档文件"
+kept = [json.loads(l) for l in open(led, encoding="utf8") if l.strip()]
+assert len(kept) == 2, "账本应只剩每个 id 一行(实得 %d 行)" % len(kept)
+archived = [json.loads(l) for l in open(arch, encoding="utf8") if l.strip()]
+assert len(archived) == 2, "归档行数应为 2(实得 %d)" % len(archived)
+print("压缩: last-wins 不变; 账本 4→2 行, 归档 %d 行" % len(archived))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
