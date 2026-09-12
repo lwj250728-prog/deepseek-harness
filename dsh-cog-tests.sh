@@ -7775,6 +7775,35 @@ assert low["meanCandidates"] > cur["meanCandidates"], ("放宽门限后候选丰
                                                        % (cur["meanCandidates"], low["meanCandidates"]))
 print("饱和已点明; 均候选 %.1f(0.50) → %.1f(0.40)" % (cur["meanCandidates"], low["meanCandidates"]))
 '
+# ── T200 提醒门必须行为化可测(cl-267 的教训: 结构断言挡不住"语义错") ──
+# v1 的失败形态: 我把"排除提醒"复用成 shouldSkipAsWaiting(文本启发式 AND checker 未满足) ⇒ **行动型措辞但
+# checker 未满足**的目标照样收提醒(实测 08:26:47 命中), 而当时三条结构断言全绿。故把判据抽成独立模块的纯函数,
+# 用**行为断言**钉住四种组合 —— 这一条如果早存在, v1 当场就会被抓住。
+echo "[T200] 提醒门四组合(有checker未满足必须跳过 / 已满足不跳 / 无checker退回文本启发式)"
+t "提醒门: 有 checker 时以它为准(未满足即跳过), 无 checker 时才看文本" python3 -c '
+import json, os, subprocess
+script = "/home/ubuntu/dsh-fork/packages/context/dormant-goal/src/reminder-gate.ts"
+r = subprocess.run(["npx", "tsx", "--eval",
+  "import { shouldSkipReminder as f } from \"" + script + "\"\n"
+  "const unmet = () => false, met = () => true\n"
+  "const waitingText = (t) => t.startsWith(\"待\")\n"
+  "const out = {\n"
+  "  checker_unmet_action_text: f({ nextAction: \"① 稀疏召回两阶段(可执行)\", waitChecker: \"/bin/false\" }, unmet, waitingText),\n"
+  "  checker_met_action_text: f({ nextAction: \"① 稀疏召回两阶段(可执行)\", waitChecker: \"/bin/true\" }, met, waitingText),\n"
+  "  no_checker_waiting_text: f({ nextAction: \"待用户拍板换模\" }, unmet, waitingText),\n"
+  "  no_checker_action_text: f({ nextAction: \"跑一次离线对照\" }, unmet, waitingText),\n"
+  "}\n"
+  "console.log(JSON.stringify(out))"],
+  cwd="/home/ubuntu/dsh-fork", capture_output=True, text=True, timeout=600)
+assert r.returncode == 0, "tsx 跑不动提醒门: " + (r.stderr or r.stdout)[-200:]
+d = json.loads(r.stdout.strip().splitlines()[-1])
+assert d["checker_unmet_action_text"] is True, ("有 checker 且未满足, 却仍要发提醒(这正是 v1 的缺陷): %s"
+                                                % d["checker_unmet_action_text"])
+assert d["checker_met_action_text"] is False, "checker 已满足却仍被跳过(该提醒时不提醒)"
+assert d["no_checker_waiting_text"] is True, "无 checker 时文本启发式兜底失效"
+assert d["no_checker_action_text"] is False, "无 checker 的行动型文本被误跳过"
+print("四组合正确: 未满足⇒跳过 / 已满足⇒不跳 / 无checker⇒看文本(等待跳过, 行动不跳)")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

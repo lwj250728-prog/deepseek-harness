@@ -19,6 +19,7 @@
  */
 
 import { execSync } from 'node:child_process'
+import { shouldSkipReminder } from './reminder-gate.js'
 import { appendFile, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { createRequire } from 'node:module'
@@ -484,11 +485,11 @@ function parseWaitingMomentLocal(text: string, now: Date = new Date()): Date | n
     // "文本像等待型 **且** checker 未满足"的**与**: nextAction 写成行动型措辞的目标(checker 却未满足)照样收提醒 ——
     // 实测 08:26 重启后检索目标(行动型措辞 + refine checker 未满足)仍收到孵化提醒, 我的证伪信号命中。
     // 正确语义: **有 checker 就由 checker 说了算**(两侧同一判据); 没有 checker 时才退回文本启发式兜底。
-    const skipHits = hits.filter(h => {
-      const wc = String((h.goal as { waitChecker?: string }).waitChecker ?? '').trim()
-      if (wc !== '') return !waitConditionMet(wc)
-      return shouldSkipAsWaiting(h.goal as { nextAction?: string, waitChecker?: string })
-    })
+    const skipHits = hits.filter(h => shouldSkipReminder(
+      h.goal as { nextAction?: string, waitChecker?: string },
+      waitConditionMet,
+      text => shouldSkipAsWaiting({ nextAction: text } as { nextAction?: string }, isWaitingNextActionLocal),
+    ))
     const skippedIds = new Set(skipHits.map(h => h.goal.id))
     const remindHits = hits.filter(h => !skippedIds.has(h.goal.id))
     const registerAndCount = (): void => {
