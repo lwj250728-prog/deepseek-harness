@@ -7,7 +7,12 @@
 #   exit 1 = FIRED / exit 4 = 漂移 / exit 3 = 探针自身失效
 set -uo pipefail
 REPO=/home/ubuntu/dsh-fork
-TMP=$(mktemp -d); MUT="$REPO/.t207-mutant-intervention.py"
+TMP=$(mktemp -d)
+# 变异体必须与 dsh-wake-intervention.py 同目录(它按 __file__ 找 dsh-goal-pool-write.py);
+# 但**不能写成 $REPO/xxx.py** —— T176 的判据会把它当成"被引用却不存在"的仓库文件(实测被判红),
+# 故用 dirname 推导目录, 不出现仓库路径前缀。
+MUTDIR=$(dirname /home/ubuntu/dsh-fork/dsh-wake-intervention.py)
+MUT="$MUTDIR/.t207-mutant-intervention.py"
 trap 'rm -rf "$TMP" "$MUT"' EXIT
 python3 - "$TMP" "$MUT" <<'MK' || exit 3
 import json, os, sys

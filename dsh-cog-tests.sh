@@ -7205,7 +7205,9 @@ W = "/home/ubuntu/dsh-fork/dsh-wake-intervention.py"
 tmp = tempfile.mkdtemp(); pool = os.path.join(tmp, "dormant-goals.jsonl")
 open(pool, "w", encoding="utf8").write(json.dumps({"id": "g-i", "status": "active", "nextAction": "步",
                                                    "triggerThresholds": {"kernel": 0.6, "focus": 0.55},
-                                                   "waitChecker": "/bin/true"}, ensure_ascii=False) + "\n")
+                                                   "waitChecker": "/bin/true"}, ensure_ascii=False) + "\n"
+    + json.dumps({"id": "g-ctl", "status": "active", "nextAction": "控", "waitChecker": "/bin/true"},
+                 ensure_ascii=False) + "\n")
 env = dict(os.environ, DSH_COG_DIR=tmp)
 def run(*a): return subprocess.run(["python3", W] + list(a), capture_output=True, text=True, env=env, timeout=300)
 def cur():
@@ -7230,7 +7232,9 @@ import json, os, subprocess, tempfile
 W = "/home/ubuntu/dsh-fork/dsh-wake-intervention.py"
 tmp = tempfile.mkdtemp(); pool = os.path.join(tmp, "dormant-goals.jsonl")
 open(pool, "w", encoding="utf8").write(json.dumps({"id": "g-i", "status": "active", "nextAction": "步",
-                                                   "triggerThresholds": {"kernel": 0.6, "focus": 0.55}}, ensure_ascii=False) + "\n")
+                                                   "triggerThresholds": {"kernel": 0.6, "focus": 0.55}}, ensure_ascii=False) + "\n"
+    + json.dumps({"id": "g-ctl", "status": "active", "nextAction": "控", "waitChecker": "/bin/true"},
+                 ensure_ascii=False) + "\n")
 env = dict(os.environ, DSH_COG_DIR=tmp)
 def run(*a):
     return subprocess.run(["python3", W] + list(a), capture_output=True, text=True, env=env, timeout=300)
@@ -7955,10 +7959,14 @@ tmp = tempfile.mkdtemp()
 pool = os.path.join(tmp, "dormant-goals.jsonl")
 open(pool, "w", encoding="utf8").write(json.dumps({"id": "g1", "status": "active", "nextAction": "n",
     "triggerThresholds": {"kernel": 0.6, "focus": 0.55},
-    "waitChecker": "/home/ubuntu/dsh-fork/dsh-wait-check-sweep.py"}, ensure_ascii=False) + "\n")
+    "waitChecker": "/home/ubuntu/dsh-fork/dsh-wait-check-sweep.py"}, ensure_ascii=False) + "\n"
+    + json.dumps({"id": "g-ctl", "status": "active", "nextAction": "控", "waitChecker": "/bin/true"},
+                 ensure_ascii=False) + "\n")
 env = dict(os.environ, DSH_COG_DIR=tmp)
 r0 = subprocess.run(["python3", TOOL, "disable", "g1"], capture_output=True, text=True, timeout=300, env=env)
 assert r0.returncode == 2, "缺恢复腿预期却允许关闭(exit %d) —— 恢复腿会变成事后叙事" % r0.returncode
+assert "--reversal-expectation" in (r0.stderr or ""), ("拒绝理由不是缺恢复腿预期(是别的失败) —— 以坏充火: "
+                                        + (r0.stderr or r0.stdout)[-160:])
 r1 = subprocess.run(["python3", TOOL, "disable", "g1", "--hours", "24",
                      "--reversal-expectation", "恢复后 30 分钟内应出现行动帧"],
                     capture_output=True, text=True, timeout=300, env=env)
@@ -7977,7 +7985,9 @@ tmp = tempfile.mkdtemp()
 pool = os.path.join(tmp, "dormant-goals.jsonl")
 orig_wait = "/home/ubuntu/dsh-fork/dsh-wait-check-sweep.py"
 open(pool, "w", encoding="utf8").write(json.dumps({"id": "g1", "status": "active", "nextAction": "n",
-    "triggerThresholds": {"kernel": 0.6, "focus": 0.55}, "waitChecker": orig_wait}, ensure_ascii=False) + "\n")
+    "triggerThresholds": {"kernel": 0.6, "focus": 0.55}, "waitChecker": orig_wait}, ensure_ascii=False) + "\n"
+    + json.dumps({"id": "g-ctl", "status": "active", "nextAction": "控", "waitChecker": "/bin/true"},
+                 ensure_ascii=False) + "\n")
 env = dict(os.environ, DSH_COG_DIR=tmp)
 def call(*a):
     return subprocess.run(["python3", TOOL] + list(a), capture_output=True, text=True, timeout=300, env=env)
