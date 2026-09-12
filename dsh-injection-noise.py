@@ -58,9 +58,25 @@ def load_last_wins(path: str, key: str) -> dict[str, dict]:
 
 
 def is_frame_born(exp: dict | None) -> bool:
+    """帧生判定 —— **与产品侧同口径**(cl-280/cl-283)。
+
+    本工具原先自带第三份判据(只看 situation 前缀), 与写侧 `store.isFrameExperience`(kind/action 前缀)、
+    读侧 `self-frame.ts`(2026-09-12 已对齐写侧)三者**互相偏离**: 实测本工具把一条 situation 以
+    「自主回合」开头、却按写侧规则属于**任务层**的经验算成"帧生", 于是套件 T84 在**效果已经达标**
+    (注入侧帧层占比 44.7%→0)的情况下仍判红 —— 典型的"同一指标三套口径"。
+    改法: 先认**写侧的产物**——该 expId 是否落在 `experiences-frames.jsonl`(写侧已分流)即为权威;
+    只有两边都查不到(历史遗留)时才回退到文本前缀兜底。
+    """
     if not isinstance(exp, dict):
         return False
+    if exp.get('kind') == 'frame':
+        return True
+    if exp.get('kind') == 'task':
+        return False
+    action = str((exp.get('sar') or {}).get('action') or '')
     situation = ((exp.get('sar') or {}).get('situation') or '')
+    if action.startswith('quiet-driver 旁路三问帧') or situation.startswith(('三问帧旁路评估',)):
+        return True
     return situation.startswith(FRAME_BORN_PREFIXES) or FRAME_BORN_MARKER in situation
 
 
@@ -212,6 +228,13 @@ def main() -> int:
     cited_with_frame = sum(1 for r in cited_true if any(frame_born(x) for x in (r.get('expIds') or [])))
 
     n = len(window)
+    # 构建边界之后的注入(与 frameBornSinceBuild 同一边界)
+    _since_build_injections = [r for r in ordered if (r.get('createdAt') or 0) > build_ms]
+    metrics_since_build = {
+        'n': len(_since_build_injections),
+        'frame': sum(1 for r in _since_build_injections if any(frame_born(e) for e in (r.get('expIds') or []))),
+    }
+
     metrics = {
         'generatedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
         'generatedAtLocal': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -220,6 +243,10 @@ def main() -> int:
         'experienceTotal': len(experiences),
         'frameLayerTotal': len(frames),
         'frameBornInjectionShare': round(with_frame / n, 4) if n else 0.0,
+        # 2026-09-12 17:0x(cl-283): 窗口内的占比会**跨修复边界**混合历史(cl-280 修好读侧判据后,
+        # 窗口 200 条里仍有 44.7% 的修复前注入)⇒ 判据必须看**构建后**这一段, 否则'已经修好'会被读成'没修好'。
+        'frameBornInjectionShareSinceBuild': (round(metrics_since_build['frame'] / metrics_since_build['n'], 4)
+                                              if metrics_since_build['n'] else None),
         'frameBornExpIdShare': round(frame_ids / total_ids, 4) if total_ids else 0.0,
         'staticTriggerShare': round(static / n, 4) if n else 0.0,
         'frameBornExperiencesLast24h': len(recent_frame_experiences),
@@ -273,7 +300,9 @@ def main() -> int:
     metrics['jumpChannelDead'] = jump_dead
     metrics['jumpStaleOverThreshold'] = jump_stale
     metrics['overThreshold'] = (
-        metrics['frameBornInjectionShare'] > FRAME_BORN_INJECTION_MAX
+        # 有构建后样本就按**边界后**判(否则窗口口径会把修复前的历史算进当前状态)
+        (metrics['frameBornInjectionShareSinceBuild'] if metrics['frameBornInjectionShareSinceBuild'] is not None
+         else metrics['frameBornInjectionShare']) > FRAME_BORN_INJECTION_MAX
         or metrics['staticTriggerShare'] > STATIC_TRIGGER_MAX
         or jump_dead
         or jump_stale

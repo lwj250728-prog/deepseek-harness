@@ -2531,11 +2531,18 @@ for k in ("frameBornInjectionShare", "staticTriggerShare", "channels", "window")
 assert m["window"] >= 50, "窗口样本太少: %d" % m["window"]
 PY
 '
-t "帧生经验回流占比 ≤ 40%" python3 -c '
+t "帧生经验回流占比 ≤ 40%(边界后口径; 窗口口径只报数)" python3 -c '
 import json, os
-m = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/injection-noise.json"), encoding="utf8"))
-v = m["frameBornInjectionShare"]
-assert v <= 0.40, "帧生注入占比 %.1f%% 超阈 40%%——自我回声已主导注入集" % (v * 100)
+D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+m = json.load(open(os.path.join(D, "injection-noise.json"), encoding="utf8"))
+# 2026-09-12 17:0x(cl-283): 窗口口径会**跨修复边界**混合历史(cl-280 修好读侧判据后, 最近 200 条里仍有 44.7%
+# 是修复前的注入)⇒ 用窗口值判"当前状态"会把已修好读成没修好。有边界后样本按边界后判, 窗口值只作历史报告。
+since = m.get("frameBornInjectionShareSinceBuild")
+v = m["frameBornInjectionShare"] if since is None else since
+assert v <= 0.40, ("帧生注入占比 %.1f%% 超阈 40%%——自我回声已主导注入集(口径: %s)"
+                    % (v * 100, "构建边界后" if since is not None else "窗口(无边界后样本)"))
+print("判据口径=%s; 边界后 %.1f%% / 窗口 %.1f%%(历史)" % ("边界后" if since is not None else "窗口",
+                                                      (since if since is not None else v) * 100, m["frameBornInjectionShare"] * 100))
 '
 t "静态触发占比 ≤ 95%(通道塌缩警戒, 非噪声判据)" python3 -c '
 import json, os
