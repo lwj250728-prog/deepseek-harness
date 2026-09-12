@@ -8310,6 +8310,19 @@ rotten = sorted(frozen - still)
 assert not rotten, "冻结清单里有条目已消失或已带上命令(基线腐烂, 应同步缩减清单): %s" % rotten[:5]
 print("纯文本声明 %d 条仍冻结(另有 %d 条写明 exempt); 本帧无新增装饰性声明" % (len(still), exempted))
 '
+# ── T210 新判据必须**可隔离**(空世界下判红) —— cl-273 的落地 ──
+# 起因: 我用 DSH_COG_DIR=<空目录> 批量跑冻结组里的断言, 想证明"判据抓得住缺陷", 结果 22/22 全绿、判红 0 条
+# —— 不是空洞, 是**它们根本不读这个变量**(几乎全部把 ~/.dsh/cognitive-pipeline 写成绝对路径)。不可隔离的
+# 判据喂不了合成缺陷件, 只能等活世界真坏才转红(发现延迟 = 实际损失)。故: 历史 431 条冻结为债(只减不增),
+# 此后**新增**的断言必须在空世界下判红(或显式 --exempt 留理由)。
+echo "[T210] 新判据必须可隔离(空世界下判红), 历史债冻结且不许腐烂"
+t "新判据必须在空世界下判红, 且冻结基线不得腐烂" python3 -c '
+import os, subprocess, sys
+CHK = "/home/ubuntu/dsh-fork/dsh-assert-isolation-check.py"
+r = subprocess.run([sys.executable, CHK], capture_output=True, text=True, timeout=1200)
+assert r.returncode == 0, "新判据隔离性检查转红: " + (r.stderr or r.stdout)[-300:]
+print(r.stdout.strip()[:200])
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
