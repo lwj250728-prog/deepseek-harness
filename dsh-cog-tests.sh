@@ -4225,6 +4225,15 @@ d = json.loads(r.stdout.strip().splitlines()[-1])
 assert d["n"] == 1, "同消息重复调用不是幂等(落盘 %d 行)" % d["n"]
 print("部署告警路径: 不崩 + 落盘 + 同消息幂等(落盘 %d 行)" % d["n"])
 '
+t "排程机制的活性: 不得有过期或不可判的 cron(它们会静默不跑)" python3 -c '
+import json, os, subprocess, sys
+TOOL = os.path.expanduser("~/dsh-fork/dsh-cron-liveness.py")
+r = subprocess.run([sys.executable, TOOL, "--json"], capture_output=True, text=True, timeout=600)
+assert r.returncode == 0, ("排程活性核查报异常(过期/缺见证的 cron 会**静默不跑**; 实证 2026-09-12 套件可执行位被抹掉后 cron 死了 1.5 小时, 日志只留一行 Permission denied): " + (r.stdout or r.stderr)[-260:])
+d = json.loads(r.stdout.strip().splitlines()[-1])
+assert d["entries"] >= 20, "排程条目数异常(%d), 判据前提不成立" % d["entries"]
+print("排程 %d 条: 无过期/缺见证(含按声明豁免的事件型/排期型)" % d["entries"])
+'
 echo "[T121] 离线整合层可判读(年龄 / 重建尝试落盘 / 记录字段完整)"
 t "重建尝试必须落盘且字段完整" python3 -c '
 import json, os
