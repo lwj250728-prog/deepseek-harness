@@ -8141,6 +8141,31 @@ zerop = os.path.join(tmp, "zero.json"); json.dump(zero, open(zerop, "w", encodin
 assert run(zerop).returncode == 1, "有时代覆盖的臂被写成 0 却没判红(0 会被读成测过且为零)"
 print("三例: 真基线⇒绿 / 旧口径⇒红 / 有覆盖却写 0⇒红")
 '
+# ── T206 一次性会话(quiet-frame)的注入必须立刻结算(cl-270 / tp-176 的执行所得) ──
+# 实测: inject_1323@09:05:11 / inject_1325@09:10:55 停在 cited=null, 而 09:13 有一次部署重启 ——
+# 重启打断了那两个旁路帧回合, 而旁路会话本就"没有下一轮", 于是只能等 24h TTL ⇒ 套件判据(>2h 仍 null ≤1)
+# 判红。cl-044 只解决了"等得到 24h"的情形。故: 一次性会话的注入**立刻**按未引用结算(没有下一轮文本
+# 能提及它, 是事实而非惩罚), 并走同一条分支把 jump/chain/strategy 反馈补上。
+echo "[T206] 一次性会话的注入立刻结算(重启打断后不再等 24h TTL)"
+t "一次性会话(quiet-frame)的注入立刻结算, 但当前会话的待结算项仍须由 turnText 结算" python3 -c '
+import os, re
+SRC = os.environ.get("DSH_SVC_SRC") or os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/src/service.ts")
+LIB = os.environ.get("DSH_SVC_LIB") or os.path.expanduser("~/dsh-fork/packages/cognition/cognitive-pipeline/lib/index.js")
+src = open(SRC, encoding="utf8").read()
+lib = open(LIB, encoding="utf8").read()
+assert "quiet-frame-" in src, "源码里没有一次性会话前缀规则(重启打断的注入又会滞留 24h)"
+blk = re.search(r"for \(const stale of this\.store\.injectionsSnapshot\(\)\) \{(.*?)\n    \}", src, re.S)
+assert blk, "找不到 stale 结算循环(结构变了)"
+body = blk.group(1)
+assert "stale.sessionId === sessionId" in body, "当前会话的跳过判断消失了 —— 会把本回合的待结算项也扫掉"
+assert "oneShotSession" in body, "stale 分支没有消费一次性会话规则(仍在等 24h TTL)"
+assert body.index("stale.sessionId === sessionId") < body.index("createdAt > cutoff"), (
+    "一次性规则跑到了当前会话判断之前 ⇒ 本回合的注入会被提前判成未引用")
+assert "oneShotCutoff" in src, ("一次性会话没有宽限就结算 ⇒ 可能把**正在跑的**旁路回合判成未引用, "
+                                "那是又制造一次静默少算")
+assert "quiet-frame-" in lib, "产物 lib 里没有这条规则(改了源码没构建: 宿主面两段式构建的坑)"
+print("一次性会话规则: 源码+产物均在, 且当前会话的待结算项仍先被跳过")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

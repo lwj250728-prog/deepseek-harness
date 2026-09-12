@@ -2510,9 +2510,21 @@ export class CognitivePipelineService extends Service {
     // cited=null——既不计入引用, 也永不折入 jump/chain/strategy 账本(75 条 >24h 未结算)。
     // 超过 TTL 的未结算注入按"未被引用"结算: 会话已结束, 这是事实而非惩罚。
     const cutoff = Date.now() - INJECTION_SETTLE_TTL_MS
+    // cl-270(2026-09-12 11:4x, tp-176 的执行所得): 上面那条 TTL 只覆盖"等得到 24h"的记录。而**重启会打断
+    // 旁路帧回合**(实测 inject_1323@09:05:11 / inject_1325@09:10:55: 09:13 有一次部署重启 ⇒ 该会话的
+    // turn/end 再也不会来), 一次性会话本就是"没有下一轮", 于是只能等 24h TTL —— 套件判据(>2h 仍
+    // cited=null 的记录 ≤1 条)当场判红, 引用率的分子被静默少算(cl-044 只解决了"等得到 24h"的情况)。
+    // 故: 一次性会话(quiet-frame-)的注入**立刻**按"未被引用"结算 —— 没有下一轮文本能提及它, 这是事实,
+    // 不是惩罚; 走同一条结算分支 ⇒ jump/chain/strategy 反馈也一并补上(这些记录原先从未折入)。
+    const oneShotSession = (sid: string): boolean => sid.startsWith('quiet-frame-')
+    // 但**不能**立刻结算: 某个旁路帧回合可能正跑着(它的 turnText 还没机会提及 expId), 若被别的会话
+    // 的回合末顺手判成未引用, 就又制造一次"静默少算"。故给一次性会话一个宽限(远小于判据的 2h), 只结算
+    // 已经**确定结束**的那些。
+    const ONE_SHOT_GRACE_MS = 10 * 60 * 1000
+    const oneShotCutoff = Date.now() - ONE_SHOT_GRACE_MS
     for (const stale of this.store.injectionsSnapshot()) {
       if (stale.cited !== null || stale.sessionId === sessionId) continue
-      if (stale.createdAt > cutoff) continue
+      if (stale.createdAt > cutoff && !(oneShotSession(String(stale.sessionId)) && stale.createdAt <= oneShotCutoff)) continue
       this.store.settleInjection(stale.injectionId, false)
       this.store.foldJumpCitation(stale.jumpWords, false)
       if (stale.chainId !== null) {
