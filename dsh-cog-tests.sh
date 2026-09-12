@@ -8277,6 +8277,37 @@ assert not badc, "言行账本里含不可解析时间戳(停滞判据会静默�
 assert not badt, "测试账本里含不可解析时间戳: %s" % badt[:5]
 print("两本账的时间戳字段全部可解析(含 tsApprox 近似值)")
 '
+# ── T209 开火声明不许是装饰: 要么有可执行命令, 要么写明 exempt(历史债冻结在本帧) ──
+# 自审(2026-09-12 12:5x): 96 个守卫组只有 29 组(30%)带**可执行**开火命令, 189 条 mustFire 只有 31 条(16%)
+# 真被现场跑过 —— 其余是纯文本声明。按我自己的 T202 口径("声明必须被行为消费"), 那些"能开火"的说法
+# 从来没被证明过; 更糟的是它们给了一种**已守住的错觉**。故: 新增守卫必须带命令, 或写明 exempt 理由;
+# 历史债冻结在 guard-fire.json 的 textOnlyBaseline 里, **不许再长**, 且清单本身须与现状一致(防基线腐烂)。
+echo "[T209] 开火声明要么可执行、要么显式豁免(纯文本声明冻结为历史债, 不许新增)"
+t "mustFire 声明必须有可执行命令或 exempt 理由; 历史债只许减不许增" python3 -c '
+import json, os
+p = os.environ.get("DSH_GUARD_FIRE") or os.path.expanduser("~/.dsh/cognitive-pipeline/guard-fire.json")
+reg = json.load(open(p, encoding="utf8"))
+base = reg.get("textOnlyBaseline") or {}
+frozen = {(e["guard"], e["assertion"]) for e in (base.get("entries") or [])}
+assert frozen, "没有冻结基线 —— 本断言前提不成立(不得空过)"
+new_decorative, exempted, still = [], 0, set()
+for g in reg["guards"]:
+    for f in (g.get("mustFire") or []):
+        if f.get("command"):
+            continue
+        key = (g["guard"], f.get("assertion"))
+        if str(f.get("exempt") or "").strip():
+            exempted += 1
+            continue
+        if key in frozen:
+            still.add(key)
+            continue
+        new_decorative.append("%s/%s" % key)
+assert not new_decorative, ("新增的纯文本开火声明(不可执行=没被证明过): %s" % new_decorative[:5])
+rotten = sorted(frozen - still)
+assert not rotten, "冻结清单里有条目已消失或已带上命令(基线腐烂, 应同步缩减清单): %s" % rotten[:5]
+print("纯文本声明 %d 条仍冻结(另有 %d 条写明 exempt); 本帧无新增装饰性声明" % (len(still), exempted))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
