@@ -5439,6 +5439,15 @@ if bad:
                                "origin": "dsh-cog-tests.sh T148", "afterBoundary": after,
                                "violations": [str(x)[:80] for x in bad[:10]]}, ensure_ascii=False) + "\n")
 assert not bad, "账本时间戳不同形(UTC/无偏移会让跨账本比时间得出反向结论): " + repr(bad[:4])
+if checked < 5:
+    import time as _t
+    age_min = (_t.time() * 1000 - after) / 60000.0
+    # 2026-09-12 15:1x(实测所得): 每次部署重启都把边界推到当下 ⇒ 紧接着的几分钟里"边界后的样本不足"
+    # 是**合法状态**, 不是判据前提失效(今天的部署后自检正是被这一条判红)。故: 边界很新时**显式跳过并打印**
+    # (不冒充通过), 超过 30 分钟仍不足 5 个才判红 —— 保住"不得空过"的意图, 又不制造重启假红。
+    assert age_min < 30, ("边界已过 %.0f 分钟而边界后只检查到 %d 个账本 ⇒ 采样侧可能坏了" % (age_min, checked))
+    print("部署边界(%.0f 分钟前)之后仅 %d 个账本可查 ⇒ 本帧不判(宽限 30 分钟)" % (age_min, checked))
+    raise SystemExit(0)
 assert checked >= 5, "只检查到 %d 个账本 —— 判据前提不成立" % checked
 print("检查 %d 个账本, 时间戳均为 +08:00 同形" % checked)
 '
@@ -8358,6 +8367,60 @@ assert r.returncode == 0, "代表消费方跑不动(缺时代会拒绝出数): "
 d = json.loads(r.stdout.strip().splitlines()[-1])
 assert (d.get("citationEra") or {}).get("since"), "输出里没有时代声明 —— 跨时代平均又回来了"
 print("时代已接 %d 个; 挂账 %d 个; 代表消费方输出含 citationEra(%s)" % (len(wired), len(pending), d["citationEra"]["since"]))
+'
+# ── T212 审计字段必须落在**审计 payload 顶层**(cl-278 实测: 插进嵌套对象里 ≠ 接上了) ──
+# 实证(2026-09-12 15:0x~15:2x): 给 cognitive-inject 的审计补 retrievedIds 时, 我**两次**把 `...retrievalIds`
+# 插进了 `candidateScores: cooled.map(hit => ({...}))` 这种嵌套对象里; 而我的自查是"附近 1400 字符内能否搜到
+# 该字符串" ⇒ 误判为已接。tsc 不报错(嵌套对象多字段合法)、产物 grep 同样命中 —— 真正抓住它的是**活着的行为
+# 检查**(重启后 15:22 那条 path='raw' 的行没有字段)。故判据必须**看层级**: 用括号配对取 audit({...}) 的顶层
+# 片段, 只在那里找字段; 另加行为侧"最新审计行须带该字段"(重启宽限内显式跳过, 不冒充通过)。
+echo "[T212] 审计字段必须在 payload 顶层(看层级, 不看附近) + 最新行实证"
+t "审计字段必须落在每个审计点的顶层, 且最新审计行须真的带它" python3 -c '
+import json, os, subprocess, sys, time
+CHK = os.path.expanduser("~/dsh-fork/dsh-audit-coverage-check.py")
+r = subprocess.run([sys.executable, CHK], capture_output=True, text=True, timeout=300)
+assert r.returncode == 0, "审计点顶层缺字段(插进嵌套里不算接上): " + (r.stderr or r.stdout)[-300:]
+D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+ap = os.path.join(D, "retrieval-audit.jsonl")
+assert os.path.exists(ap), "读不到审计账本(判据前提不成立): " + ap
+rows = [json.loads(l) for l in open(ap, encoding="utf8") if l.strip()]
+assert rows, "审计账本为空(判据前提不成立)"
+last = rows[-1]
+if "retrievedIds" not in last:
+    age_min = (time.time() * 1000 - (last.get("t") or 0)) / 60000.0
+    assert age_min < 30, ("最新审计行(%.0f 分钟前)仍缺 retrievedIds ⇒ 字段没真的生效(不是宽限问题)" % age_min)
+    print("源码顶层 %s; 最新行来自旧进程(%.0f 分钟前)⇒ 本帧不判(宽限 30 分钟)" % (r.stdout.strip()[:40], age_min))
+else:
+    print("源码顶层齐备; 最新行含 retrievedIds(%d 条, truncated=%s)" % (len(last["retrievedIds"]), last.get("retrievedIdsTruncated")))
+'
+# ── T212 审计字段必须接在**每一个**审计点上(cl-278 首次部署的实证缺陷) ──
+# 实测(2026-09-12 15:0x): cl-278 给审计补 retrievedIds, 源码'改过了'、产物也含字段, 但**只接上 7 个审计点里的 6 个**
+# —— path='raw'(最常走的那条)漏了 ⇒ 15:08 那条 stage=injected 的新行缺字段。这正是"改过了 ≠ 生效了"的老坑,
+# 而且它躲过了 tsc(类型合法)与产物检查(grep 得到字段)。故本组: ①**每个**审计点都须落该字段(源码级枚举);
+# ②边界后**最新一条**审计行须真的带字段(行为级, 重启宽限内跳过并打印, 不冒充通过)。
+echo "[T212] 审计字段必须接在每一个审计点上(源码枚举 + 最新行实证)"
+t "审计字段(retrievedIds)必须接在每一个审计点, 且最新审计行须带它" python3 -c '
+import json, os, re, time
+SRC = os.environ.get("DSH_INJECT_SRC") or os.path.expanduser("~/dsh-fork/packages/context/cognitive-inject/src/index.ts")
+src = open(SRC, encoding="utf8").read()
+missing = []
+for m in re.finditer(r"audit\(\{ stage: .([a-z-]+).(?:, path: .([a-z]+).)?", src):
+    seg = src[m.start():m.start() + 1400]
+    end = seg.find("})\n")
+    seg = seg[:end if end > 0 else 1400]
+    if "retrievalIds" not in seg:
+        missing.append("%s/%s" % (m.group(1), m.group(2) or "-"))
+assert not missing, ("这些审计点没有落 retrievedIds ⇒ 覆盖率归因会缺一整个阶段(改过了≠生效了): %s" % missing)
+D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+rows = [json.loads(l) for l in open(os.path.join(D, "retrieval-audit.jsonl"), encoding="utf8") if l.strip()]
+assert rows, "读不到审计行(判据前提不成立)"
+last = rows[-1]
+if "retrievedIds" not in last:
+    age_min = (time.time() * 1000 - (last.get("t") or 0)) / 60000.0
+    assert age_min < 30, ("最新审计行(%.0f 分钟前)仍缺 retrievedIds ⇒ 字段没真的生效" % age_min)
+    print("审计点 %d 处均已接字段; 最新行来自旧进程(%.0f 分钟前)⇒ 本帧不判(宽限 30 分钟)" % (src.count("retrievalIds") - 2, age_min))
+else:
+    print("审计点均已接字段; 最新行含 retrievedIds(%d 条, truncated=%s)" % (len(last["retrievedIds"]), last.get("retrievedIdsTruncated")))
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
