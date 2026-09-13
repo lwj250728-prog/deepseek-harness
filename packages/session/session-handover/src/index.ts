@@ -59,6 +59,19 @@ export interface SessionHandoverNotice {
  */
 console.log(`[session-handover] module loaded (pid ${process.pid})`)
 
+/**
+ * Lifecycle reporting.
+ *
+ * This plugin's own `ctx.logger` output does not reach the deployment's journal
+ * — verified in production: console lines from the same module appear while the
+ * logger line never does — so a handover that reported only through the logger
+ * would be invisible exactly when someone needs to audit it. Lifecycle lines go
+ * to the console sink the rest of the host plane uses.
+ */
+function report(line: string): void {
+  console.log(`[session-handover] ${line}`)
+}
+
 export const name = 'session-handover'
 
 /** Services this plugin relies on. */
@@ -251,7 +264,7 @@ export function buildSuccessorSeed(
 export function apply(ctx: Context, config: Config): () => void {
   console.log(`[session-handover] apply() reached: enabled=${String(config.enabled)} dryRun=${String(config.dryRun)}`)
   if (config.enabled !== true) {
-    ctx.logger.info('[session-handover] disabled (config.enabled is not true); no-op')
+    report('disabled (config.enabled is not true); no-op')
     return () => {}
   }
   const threshold = Math.max(1, Math.floor(config.compactionsPerSession ?? 1))
@@ -263,10 +276,9 @@ export function apply(ctx: Context, config: Config): () => void {
 
   // Startup self-report: a deployment needs to see that the switch is armed
   // (and how), not infer it from an absence of handovers.
-  ctx.logger.info(
-    `[session-handover] armed: threshold=${threshold} compaction(s), `
-    + `archivePredecessor=${String(archive)}, dryRun=${String(dryRun)}, `
-    + `targets=${targets === undefined ? 'all sessions' : String(targets.size)}`,
+  report(
+    `armed: threshold=${threshold} compaction(s), archivePredecessor=${String(archive)}, `
+    + `dryRun=${String(dryRun)}, targets=${targets === undefined ? 'all sessions' : String(targets.size)}`,
   )
 
   /** Sessions past the threshold, waiting for a turn boundary they can be moved at. */
@@ -309,8 +321,8 @@ export function apply(ctx: Context, config: Config): () => void {
       const resolved = await presets.resolve(resolveSessionPreset({ header: predecessor, events: session.events }))
       const successorId = `session-${randomUUID()}` as SessionId
       if (dryRun) {
-        ctx.logger.info(
-          `[session-handover] dry run: ${session.id} → ${successorId} `
+        report(
+          `dry run: ${session.id} → ${successorId} `
           + `(${built.seed.length} seed events, preset ${String(resolved.id)})`,
         )
         return
@@ -349,9 +361,9 @@ export function apply(ctx: Context, config: Config): () => void {
         successorId,
         seedLength: built.seed.length,
       })
-      ctx.logger.info(
-        `[session-handover] ${predecessor.id} → ${successorId}: ${built.seed.length} seed events `
-        + `inherited (preset ${String(resolved.id)}, checkpoint seq ${built.checkpointSeq})`,
+      report(
+        `${predecessor.id} → ${successorId}: ${built.seed.length} seed events inherited `
+        + `(preset ${String(resolved.id)}, checkpoint seq ${built.checkpointSeq})`,
       )
     } catch (error: unknown) {
       // Fail soft: a session that cannot hand over keeps running exactly as
@@ -371,8 +383,8 @@ export function apply(ctx: Context, config: Config): () => void {
       const count = compactionCount(session.events)
       if (count >= threshold) {
         armed.add(session.id)
-        ctx.logger.info(
-          `[session-handover] ${session.id} carries ${count} compaction(s) (threshold ${threshold}); `
+        report(
+          `${session.id} carries ${count} compaction(s) (threshold ${threshold}); `
           + 'handing over at the next turn boundary',
         )
       }
