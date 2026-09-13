@@ -10675,6 +10675,40 @@ assert base.get("ratchets"), "棘轮记录缺失"
 print("增长闸门: 引导建立 / 新红判红并指名 / 替换也判红 / 真子集棘轮写回 —— 四条全对")
 '
 
+# T258 (tp-214/cl-376): 实证 —— `dsh-edit-check.sh` 权限被写成 **600**(且**复发**过), 套件里只有第 1490 行 `test -x` 盯它;
+# 同一脚本被第 1499 行直接执行时报的是「No such file or directory」(误导性错误) ⇒ 其余几十个被直接调用的脚本**全靠运气**。
+echo "[T258] 被直接调用脚本的执行位"
+t "被套件按路径直接调用的脚本必须存在且可执行(不许只有一个文件靠运气被测)" python3 -c '
+import os, subprocess, sys, tempfile
+R = os.path.expanduser("~/dsh-fork")
+CHK = os.path.join(R, "dsh-script-exec-check.py")
+SUITE = os.path.join(R, "dsh-cog-tests.sh")
+assert os.path.exists(CHK), "检查器不在: %s" % CHK
+# ① 真实套件: 按路径直接调用的脚本必须全部可执行(违规会指名)
+r = subprocess.run([sys.executable, CHK, "--json"], capture_output=True, text=True, timeout=600)
+assert r.returncode == 0, "被直接调用的脚本里有不可执行的: %s" % ((r.stdout or "") + (r.stderr or ""))[-300:]
+import json as _json
+data = _json.loads(r.stdout.strip().splitlines()[-1])
+assert data["targets"] >= 5, "解析出的目标太少(%d 个) ⇒ 解析器可能又漏了调用形态" % data["targets"]
+# ② 合成世界: 600 权限的脚本必须被判红并指名(否则判据只在真世界上"恰好为绿")
+T = tempfile.mkdtemp(prefix="t258-")
+tgt = os.path.join(T, "target.sh")
+with open(tgt, "w", encoding="utf8") as fh: fh.write("#!/usr/bin/env bash\necho hi\n")
+os.chmod(tgt, 0o600)
+synthetic = os.path.join(T, "suite.sh")
+with open(synthetic, "w", encoding="utf8") as fh:
+    fh.write("t \"x\" bash -c \"'%s' \"\n" % tgt)
+env = dict(os.environ, DSH_EXECCHECK_SUITE=synthetic, DSH_EXECCHECK_REPO=T)
+r2 = subprocess.run([sys.executable, CHK, "--json"], capture_output=True, text=True, timeout=300, env=env)
+assert r2.returncode == 1, "合成世界(600 权限)没判红: rc=%d %s" % (r2.returncode, r2.stdout[-160:])
+assert "target.sh" in (r2.stderr or "") + (r2.stdout or ""), "违规没被指名: %s" % r2.stderr[-160:]
+os.chmod(tgt, 0o755)
+r3 = subprocess.run([sys.executable, CHK, "--json"], capture_output=True, text=True, timeout=300, env=env)
+assert r3.returncode == 0, "给执行位后仍判红: %s" % r3.stderr[-160:]
+print("执行位判据: 真实套件 %d 个被直接调用的脚本全部可执行 / 合成世界 600 必判红并指名 / 755 转绿" % data["targets"])
+'
+
+
 
 
 # cl-367: **把真实记录接进套件** —— cron 每 6h 跑套件即免费产生一行读数(这才是「看守留痕」, T255 是它的判据)。
