@@ -59,6 +59,14 @@ def main() -> int:
         return 3
 
     injected, cited_by_layer = set(), {'task': [0, 0], 'frame': [0, 0]}
+    # cl-183(2026-09-13 15:0x 落地): 引用率还有**第二个混淆轴 = 会话类型**。帧会话的提示词里有引用契约
+    # (强制写 expId, 模板还把 exp_107/exp_254 列为可引用样例) ⇒ 其注入"近乎必被引用"。实测(时代内):
+    # primary 74/381 = 19.4% vs quiet-frame 27/48 = **56.2%**(2.9 倍), 混算 23.5% ⇒ 现行读数被结构性抬高;
+    # 且被引榜第 2 的 exp_254 共 18 次引用里 **16 次(89%)** 出自帧会话。故本报告**同时**给出会话类型分层,
+    # 让读的人不会把"契约产物"读成"效用证据"。
+    def session_kind(r: dict) -> str:
+        return 'frame-session' if str(r.get('sessionId') or '').startswith('quiet-frame-') else 'primary'
+    cited_by_session = {'primary': [0, 0], 'frame-session': [0, 0]}
     for r in era:
         for e in (r.get('expIds') or []):
             injected.add(e)
@@ -67,6 +75,10 @@ def main() -> int:
             cited_by_layer[layer][1] += 1
             if r.get('cited') is True:
                 cited_by_layer[layer][0] += 1
+            k = session_kind(r)
+            cited_by_session[k][1] += 1
+            if r.get('cited') is True:
+                cited_by_session[k][0] += 1
     cov_num = len({e for e in injected if e in task})
     coverage = cov_num / len(task)
 
@@ -91,6 +103,11 @@ def main() -> int:
         'citationRateFrame': (round(cited_by_layer['frame'][0] / cited_by_layer['frame'][1], 4)
                               if cited_by_layer['frame'][1] else None),
         'citationSettledTask': cited_by_layer['task'][1], 'citationSettledFrame': cited_by_layer['frame'][1],
+        'citationBySession': {k: {'cited': v[0], 'settled': v[1],
+                                  'rate': (round(v[0] / v[1], 4) if v[1] else None)}
+                              for k, v in cited_by_session.items()},
+        'sessionSplitNote': ('cl-183: 帧会话带引用契约(强制写 expId + 模板给样例) ⇒ 其引用率结构性偏高'
+                             '(实测 56.2% vs 19.4%)。**判断效用时用 primary 口径**; 帧会话口径只作契约对照。'),
         'meanTextChars': round(statistics.mean(chars), 1) if chars else None,
         'meanExpIdsPerInjection': round(statistics.mean(counts), 3) if counts else None,
         'neverInjectedRankMedian': statistics.median(ranks) if ranks else None,
@@ -107,6 +124,10 @@ def main() -> int:
               % (payload['citationRateTask'], payload['citationSettledTask'],
                  payload['citationRateFrame'], payload['citationSettledFrame']))
         print('  成本: 每回合注入字符 %s | 每回合注入条目 %s' % (payload['meanTextChars'], payload['meanExpIdsPerInjection']))
+        _cs = payload['citationBySession']
+        print('  引用率(按会话类型, cl-183): primary %s(n=%d) | 帧会话 %s(n=%d)   ← 判断效用用 primary; 帧会话带引用契约'
+              % (_cs['primary']['rate'], _cs['primary']['settled'],
+                 _cs['frame-session']['rate'], _cs['frame-session']['settled']))
         print('  排名(从未注入者): 中位 %s, 前 10 占比 %s, 观测 %d'
               % (payload['neverInjectedRankMedian'], payload['neverInjectedTop10Share'], payload['neverInjectedObservations']))
     return 0

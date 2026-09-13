@@ -126,10 +126,27 @@ def main() -> int:
             r['candidateScores'] = cands
             records.append(r)
 
-    def mrr(arm: str, L: dict, label_kind: str) -> tuple[float | None, float | None]:
-        """候选集内 MRR / top-1 命中率。相关性来自 L(与排序特征分离的标签)。"""
+    # cl-183(2026-09-13 15:0x 落地): **引用标签被会话类型污染** —— 帧会话的提示词里有引用契约(强制写 expId,
+    # 且模板把 exp_107/exp_254 列为可引用样例) ⇒ 帧会话的注入"近乎必被引用"(实测 quiet-frame 8.6%(12/139)
+    # vs primary 5.6%(57/1017); 全局被引榜第 3 的 exp_254 共 13 次引用里 12 次出自帧会话)。
+    # 故 cited 标签的**主口径 = 剔掉帧会话**, 并保留全量口径作污染量对照(两个数都印出来)。
+    def is_frame_session(rec: dict) -> bool:
+        return str(rec.get('sessionId') or '').startswith('quiet-frame-')
+
+    cited_skipped = {'frame': 0}
+
+    def mrr(arm: str, L: dict, label_kind: str,
+            cited_scope: str = 'primary') -> tuple[float | None, float | None]:
+        """候选集内 MRR / top-1 命中率。相关性来自 L(与排序特征分离的标签)。
+
+        cited_scope: 'primary' = cited 标签只用**非帧会话**记录(主口径, cl-183);
+                     'all'     = 全量(含帧会话), 仅作污染量对照, 不得当证据。
+        """
         vals, hits, n = [], 0, 0
         for rec in records:
+            if label_kind == 'cited' and cited_scope == 'primary' and is_frame_session(rec):
+                cited_skipped['frame'] += 1
+                continue
             cands = [c for c in rec['candidateScores'] if c.get('expId') in util]  # 效用表决定候选可用性
             if arm == 'C':
                 cands = [c for c in cands if isinstance(c.get('channels'), dict)]
@@ -213,6 +230,10 @@ def main() -> int:
         'channelWeights': W,
         'lift': (round((b - a) / a, 4) if a and b is not None else None),
         'labelRobustness': label_reports,
+        'citedLabelCaliber': {'primary': '剔除帧会话(quiet-frame-*)', 'excludedFrameRecords': cited_skipped['frame'],
+                              'allScope': {'armA_mrr': mrr('A', LABELS['gain'], 'cited', 'all')[0],
+                                           'armB_mrr': mrr('B', LABELS['gain'], 'cited', 'all')[0]},
+                              'why': 'cl-183: 帧会话的引用契约使引用与其暴露近乎等价 ⇒ 引用标签在该子总体上是契约产物' },
         'conclusion': None,
     }
     # 判据必须挂在**可排序集**上: 记录数够但可排序集不够时, MRR 是 5 个集上的估计(实测 lift 的
@@ -237,6 +258,8 @@ def main() -> int:
         cv = payload.get('armC_verdict') or {}
         print('C 档预登记裁决: %s | %s' % (cv.get('verdict'), cv.get('note')))
         print('标签稳健性(关键: gain 标签对 B 档是**同义反复**, 只有非 gain 标签才算证据):')
+        print('  口径: cited 标签**已剔除帧会话**(cl-183: 帧会话有引用契约, 其注入近乎必被引用; '
+              '本次剔除 %d 条帧会话记录, 全量口径见 payload.citedLabelAllScope)' % cited_skipped['frame'])
         for lk, v in label_reports.items():
             print('  label=%-7s A %s/%s  B %s/%s  lift %s%s'
                   % (lk, v['armA_mrr'], v['armA_top1'], v['armB_mrr'], v['armB_top1'], v['lift'],

@@ -74,6 +74,19 @@ def process_start() -> datetime.datetime | None:
         return None
 
 
+def resolve_lib_key(path: str) -> str:
+    """把基线里的 lib 键解析成绝对路径 —— **相对键一律按 REPO 解析, 不按调用方 CWD**。
+
+    2026-09-13 15:0x **sibling 会话抓到的真 bug**: `write_rebaseline()` 用 `ls -d packages/*/*/lib/index.js`
+    且 cwd=REPO ⇒ 写出的键是**相对**的; 而 `changed_libs()` 里 `os.path.exists(相对键)` 按**调用方 CWD** 解析
+    ⇒ 在 /home/ubuntu/dsh-fork 跑=正常, 在 /tmp 或 $HOME 跑=**231 个键全判缺失** ⇒ 报"不可识别"。dsh-web 的
+    CWD 恰好是仓库所以今天蒙对了, 而 **cron 的默认 CWD 是 $HOME ⇒ 门会永久卡住**(冻结的重开条件(b)永不触发)。
+    修法: 相对键按 REPO 解析; 新写的基线一律用绝对键。
+    """
+    p = os.path.expanduser(str(path))
+    return p if os.path.isabs(p) else os.path.join(REPO, p)
+
+
 def changed_libs() -> tuple[list[str] | None, str]:
     """自 δ 基线以来**内容真变**的 lib 集 → (集合, 说明)。
 
@@ -95,13 +108,13 @@ def changed_libs() -> tuple[list[str] | None, str]:
     import hashlib
     changed = []
     for path, want in hashes.items():
-        fp = os.path.expanduser(path)
+        fp = resolve_lib_key(path)
         if not os.path.exists(fp):
-            changed.append(path + '(缺失)')
+            changed.append(str(path) + '(缺失)')
             continue
         cur = hashlib.sha256(open(fp, 'rb').read()).hexdigest()
         if cur != want:
-            changed.append(path)
+            changed.append(str(path))
     return changed, '基线记于 %s(%d 个 lib)' % (str(base.get('at'))[:19], len(hashes))
 
 
@@ -137,11 +150,11 @@ def write_rebaseline(intent: list[str]) -> int:
         return 3
     actual = []
     for path, want in old.items():
-        fp = os.path.expanduser(path)
+        fp = resolve_lib_key(path)
         if not os.path.exists(fp):
-            actual.append(path); continue
+            actual.append(str(path)); continue
         if hashlib.sha256(open(fp, 'rb').read()).hexdigest() != want:
-            actual.append(path)
+            actual.append(str(path))
     act_pkgs = sorted({pkg_of(p) for p in actual})
     want_pkgs = sorted(set(intent))
     if act_pkgs != want_pkgs:
@@ -150,7 +163,8 @@ def write_rebaseline(intent: list[str]) -> int:
               '  (相等要求是刻意的: 声明子集会把未声明的包悄悄带进窗口 ⇒ 之后门报"可识别"是假的)'
               % (act_pkgs, want_pkgs), file=sys.stderr)
         return 3
-    hashes = {p: hashlib.sha256(open(p, 'rb').read()).hexdigest() for p in out}
+    # 一律写**绝对**键(相对键会把判决绑到调用方 CWD 上 —— 见 resolve_lib_key 的注释)
+    hashes = {os.path.abspath(p): hashlib.sha256(open(p, 'rb').read()).hexdigest() for p in out}
     start = process_start()
     payload = {'at': datetime.datetime.now(TZ).isoformat(),
                'processStart': start.isoformat() if start else None,
