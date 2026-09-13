@@ -23,8 +23,8 @@ python3 - "$SRC" <<'MK' || exit 3
 import sys
 p = sys.argv[1]
 s = open(p, encoding="utf8").read()
-old = "                leaks.append({'file': p, 'why': '含 %s 标记但不在合法容器清单里 ⇒ 疑似变异体泄漏' % MARK})"
-new = "                pass  # MUTANT: 不记录泄漏(闸门变成睁眼瞎)"
+old = "            leaks.append({'file': p, 'why': '含 %s 标记但不在合法容器清单里 ⇒ 疑似变异体泄漏' % MARK})"
+new = "            pass  # MUTANT: 不记录泄漏(闸门变成睁眼瞎)"
 assert s.count(old) == 1, "结构变了, 探针自身失效"
 open(p, "w", encoding="utf8").write(s.replace(old, new))
 assert "MUTANT: 不记录泄漏" in open(p, encoding="utf8").read(), "变异没落盘"
