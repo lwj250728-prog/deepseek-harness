@@ -40,13 +40,13 @@ BEHAVIOUR = [
 OPEN_RE = re.compile(r'open\(\s*([^)]*?)\s*\)', re.S)
 
 
-def python_writers() -> list:
+def python_writers(repo: str = REPO) -> list:
     """返回 [(脚本, 证据行)]: 以写模式 open 池路径的脚本。"""
     out = []
-    for name in sorted(os.listdir(REPO)):
+    for name in sorted(os.listdir(repo)):
         if not name.endswith('.py') or not name.startswith('dsh-'):
             continue
-        path = os.path.join(REPO, name)
+        path = os.path.join(repo, name)
         try:
             src = open(path, encoding='utf8').read()
         except Exception:
@@ -64,18 +64,29 @@ def python_writers() -> list:
     return out
 
 
-def holds_lock(path: str) -> bool:
+def lock_mode(path: str) -> str:
+    """返回该文件请求的锁模式: ex / shared / none(或 flock-但模式不明)。
+
+    **互斥必须是 LOCK_EX**: 只"提到 flock"不算 —— `LOCK_SH` 允许两个写者同时进入, 那时静态绿而互斥早已失效。
+    (这正是 tp-202 的退化解 A: 把 LOCK_EX 改成 LOCK_SH。)
+    """
     try:
         src = open(path, encoding='utf8').read()
     except Exception:
-        return False
-    return LOCK_HINT in src and 'flock' in src
+        return 'none'
+    if 'flock' not in src:
+        return 'none'
+    if 'LOCK_EX' in src:
+        return 'ex'
+    if 'LOCK_SH' in src:
+        return 'shared'
+    return 'flock-unknown'
 
 
-def behaviour(entry: dict, lock_hold: float = 3.0, threshold: float = 1.5) -> dict:
+def behaviour(entry: dict, pool: str = POOL, repo: str = REPO,
+              lock_hold: float = 3.0, threshold: float = 1.5) -> dict:
     """持有 `<pool>.lock` 期间跑该脚本的安全模式 ⇒ 必须等锁。"""
-    import fcntl
-    path = os.path.join(REPO, entry['script'])
+    path = os.path.join(repo, entry['script'])
     holder = subprocess.Popen([sys.executable, '-c',
                                'import fcntl,time,sys\n'
                                'fh=open(sys.argv[1],"w")\n'
@@ -92,10 +103,12 @@ def behaviour(entry: dict, lock_hold: float = 3.0, threshold: float = 1.5) -> di
 
 
 def check(args) -> int:
-    if not os.path.exists(POOL):
-        print('%s 找不到目标池: %s ⇒ 前提不成立' % (TAG, POOL), file=sys.stderr)
+    pool = args.pool or POOL
+    repo = args.repo or REPO
+    if not os.path.exists(pool):
+        print('%s 找不到目标池: %s ⇒ 前提不成立' % (TAG, pool), file=sys.stderr)
         return 3
-    writers = python_writers()
+    writers = python_writers(repo)
     if not writers:
         print('%s 一个写者都没扫到 ⇒ 前提不成立(扫法坏了?)' % TAG, file=sys.stderr)
         return 3
@@ -106,9 +119,12 @@ def check(args) -> int:
         if key in seen:
             continue
         seen.add(key)
-        has = holds_lock(os.path.join(REPO, key))
-        (ok if has else reds).append({'script': key, 'line': w['line'], 'call': w['call'],
-                                      'why': None if has else '以写模式打开池, 但文件里没有持 <pool>.lock 的证据(flock)'})
+        mode = lock_mode(os.path.join(repo, key))
+        good = mode == 'ex'
+        (ok if good else reds).append({
+            'script': key, 'line': w['line'], 'call': w['call'], 'mode': mode,
+            'why': None if good else (
+                '以写模式打开池, 但没有持**独占**锁(模式=%s) ⇒ 互斥不成立(只提到 flock 不算)' % mode)})
     results = []
     if not args.skip_behaviour:
         for entry in BEHAVIOUR:
@@ -116,7 +132,7 @@ def check(args) -> int:
                 reds.append({'script': entry['script'], 'why': '行为登记指向的脚本已不是写者(登记腐烂)'})
                 continue
             try:
-                res = behaviour(entry)
+                res = behaviour(entry, pool=pool, repo=repo)
             except Exception as exc:
                 reds.append({'script': entry['script'], 'why': '行为验证跑不起来: %s' % exc})
                 continue
@@ -143,6 +159,8 @@ def main() -> int:
     ap.add_argument('--check', action='store_true')
     ap.add_argument('--json', action='store_true')
     ap.add_argument('--skip-behaviour', dest='skip_behaviour', action='store_true')
+    ap.add_argument('--pool', default=None)
+    ap.add_argument('--repo', default=None)
     args = ap.parse_args()
     if not args.check:
         ap.error('需要 --check')

@@ -9592,6 +9592,58 @@ assert len(after) == int(payload.get("rowsAfter")) + 1, ("终态行数 %d != 压
 print("竞态实验: 写者等锁 %.1fs / 压实 written=%s / 终态 %d 行(= 压实后 %s + 写者 1) ⇒ 两者都没丢"
       % (elapsed, payload.get("written"), len(after), payload.get("rowsAfter")))
 '
+# ── T234 池写者持锁检查器的可判别性(tp-202) ──
+# 由来: 这个检查器是我为 cl-321 新造的, 一度**被套件引用 0 次**(今晚四个新机制里唯一零覆盖的)。
+# 判据: ①合成世界里 漏锁写者 与 **只请求共享锁(LOCK_SH)** 的写者都必须被抓(后者=静态绿而互斥失效),
+# 持 LOCK_EX 的写者不得误判; ②真世界必须绿, 且**写者名单可数(>=3)**, 行为半必须真的等锁。
+echo "[T234] 池写者持锁检查器的可判别性"
+t "池写者检查器可判别: 漏锁与只请求共享锁必被抓 + 真世界写者名单可数且行为等锁" python3 -c '
+import json, os, subprocess, sys, tempfile
+CHK = os.path.expanduser("~/dsh-fork/dsh-pool-writer-lock-check.py")
+Q, D = chr(39), chr(34)
+T = tempfile.mkdtemp(prefix="t234-")
+R = os.path.join(T, "repo")
+os.makedirs(R)
+pool = os.path.join(T, "dormant-goals.jsonl")
+open(pool, "w", encoding="utf8").write("")
+
+def writer(name, mode):
+    lines = ["# 池: " + pool,
+             "import fcntl, sys",
+             "pool = sys.argv[1]",
+             "fh = open(pool + " + D + ".lock" + D + ", " + D + "w" + D + ")"]
+    if mode == "ex":
+        lines.append("fcntl.flock(fh, fcntl.LOCK_EX)")
+    elif mode == "shared":
+        lines.append("fcntl.flock(fh, fcntl.LOCK_SH)")
+    lines.append("with open(pool, " + D + "a" + D + ", encoding=" + D + "utf8" + D + ") as f:")
+    lines.append("    f.write(" + D + name + D + ")")
+    with open(os.path.join(R, name + ".py"), "w", encoding="utf8") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+writer("dsh-writer-good", "ex")
+writer("dsh-writer-shared", "shared")
+writer("dsh-writer-nolock", "none")
+r = subprocess.run([sys.executable, CHK, "--check", "--json", "--skip-behaviour", "--repo", R, "--pool", pool],
+                   capture_output=True, text=True, timeout=300)
+lines = [x for x in (r.stdout or "").strip().splitlines() if x.strip()]
+payload = json.loads(lines[-1]) if lines else {}
+assert r.returncode == 1, "合成世界必须判红(有漏锁与只请求共享锁的写者), 实得 exit=%d: %s" % (r.returncode, (r.stdout + r.stderr)[-300:])
+red = {x.get("script") for x in (payload.get("red") or [])}
+assert "dsh-writer-nolock.py" in red, "漏锁写者没被抓: %s" % sorted(red)
+assert "dsh-writer-shared.py" in red, "只请求共享锁(LOCK_SH)的写者没被抓 ⇒ 静态判据没要求 LOCK_EX(互斥不成立)"
+assert "dsh-writer-good.py" in (payload.get("locked") or []), "持 LOCK_EX 的写者被误判为漏锁"
+r2 = subprocess.run([sys.executable, CHK, "--check", "--json"], capture_output=True, text=True, timeout=900)
+lines2 = [x for x in (r2.stdout or "").strip().splitlines() if x.strip()]
+p2 = json.loads(lines2[-1]) if lines2 else {}
+assert r2.returncode == 0, "真世界应绿, 实得 exit=%d: %s" % (r2.returncode, (r2.stdout + r2.stderr)[-300:])
+writers = p2.get("writers") or []
+beh = p2.get("behaviour") or []
+assert len(writers) >= 3, "写者名单只有 %d 个 ⇒ 有「扫不到写者就空过」的风险" % len(writers)
+assert beh and all(x.get("waited_enough") for x in beh), "行为半没跑或没等锁: %s" % beh
+print("池写者锁: 合成世界抓住漏锁+只请求共享锁 / 真世界 %d 个写者全持 EX / 行为等锁 %.2fs"
+      % (len(writers), beh[0].get("waited")))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
