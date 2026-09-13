@@ -9839,6 +9839,45 @@ finally:
     h3.wait(timeout=60)
 print("T236: 无锁⇒泄漏 / 持锁⇒在飞(exit 0) / 锁被持⇒带外码 7 且 arms 裁 infra / 见证锁有界(%.1fs 放弃)" % took)
 '
+# ── T237 改动覆盖的**行为版**(T28 的正解: 改动之后**跑过**) ──
+# T28 只查"改动文件是否被文本引用", 而它的注释早写明正解是"改动之后跑过的覆盖见证" —— 今晚实测两者的差:
+# 跑 24h 内改动过的 12 个包的 spec ⇒ **6 个失败**(llm-deepseek 模型目录条数 3→4, 另一个会话 20:27 引入),
+# 而套件里没有任何判据会跑它们(唯一跑 spec 的是覆盖见证, 只盯登记的 12 个文件) ⇒ 几小时无人看见。
+# 本判据: 跑改动过的包的 spec, 但**分类**: 已知失败冻结(只报新增) / 无可跑 spec 的包数只许减不许增。
+echo "[T237] 改动覆盖(行为版: 改动过的包必须跑过 spec)"
+t "改动覆盖(行为): 改动过的包必须跑过 spec——新破损才红, 存量债与零 spec 包冻结" python3 -c '
+import glob, json, os, re, subprocess, sys
+ROOT = os.path.expanduser("~/dsh-fork")
+BASE = os.path.expanduser("~/.dsh/cognitive-pipeline/change-coverage-baseline.json")
+out = subprocess.run(["git", "-C", ROOT, "log", "--since=24 hours ago", "--name-only",
+                      "--pretty=format:", "--", "packages"], capture_output=True, text=True).stdout
+changed = [f for f in sorted(set(out.split())) if f.endswith(".ts") and "/src/" in f]
+assert changed, "24h 内没有 src 改动 ⇒ 前提不成立(不得空过)"
+pkgs = sorted({"/".join(f.split("/")[:3]) for f in changed})
+specs, no_spec = [], []
+for p in pkgs:
+    found = sorted(glob.glob(os.path.join(ROOT, p, "tests", "*.spec.ts")))
+    if found:
+        specs.extend(found[:3])
+    else:
+        no_spec.append(p)
+r = subprocess.run(["npx", "vitest", "run"] + specs, cwd=ROOT, capture_output=True, text=True, timeout=1800)
+tail = (r.stdout or "") + (r.stderr or "")
+assert ("Test Files" in tail or "Tests " in tail), "vitest 没产出口径(基础设施问题, 不是测试失败): %s" % tail[-300:]
+failing = sorted(set(re.findall(r"FAIL\s+\|thread-safe\|\s+(\S+\.spec\.ts)", tail)))
+base = json.load(open(BASE, encoding="utf8"))
+known_f = set(base.get("failingSpecs") or [])
+known_n = int(base.get("noSpecCount") or 0)
+fresh = [f for f in failing if f not in known_f]
+assert not fresh, ("**新出现的破损 spec**(不在冻结基线里): %s ⇒ 改动过的包有新的测试失败, 必须处置或登记基线"
+                   % fresh[:4])
+assert len(no_spec) <= known_n, ("**改动过但没有可跑 spec 的包** 从 %d 涨到 %d: %s ⇒ 覆盖空洞变多(现有债: cognitive-inject/session-title 的 spec 全 .disabled)"
+                                 % (known_n, len(no_spec), no_spec))
+print("改动覆盖(行为): %d 包改动 / 跑了 %d 个 spec / 失败 %d 个(冻结 %d, 无新增) / 无可跑 spec 的包 %d 个(冻结 %d)"
+      % (len(pkgs), len(specs), len(failing), len(known_f), len(no_spec), known_n))
+if failing:
+    print("  已知失败(冻结, 留给归属方): %s" % ", ".join(os.path.basename(x) for x in failing))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
