@@ -57,6 +57,49 @@ def load(path: str):
         return None
 
 
+LOCKDIR_HINT = '.mutation-locks'
+
+
+def _file_lock(path: str, timeout: float):
+    """按**文件**取 EX 锁(cl-322): 与 `dsh-mutation-lock.py` 同一套命名(sha256(abspath)[:16])。
+
+    为什么不用一把全局锁: arms 检查持锁跑 T231 的探针, 而 T231 的判据体(本文件)**也**要拿那把锁 ⇒ 死结
+    (T231 干净臂 3 ⇒ T222 红)。两个机制改的是**不同文件**, 按文件上锁后它们不再互斥。
+    返回 None = 取不到(调用方须**不施加变异**); 返回 'unlocked' = 平台不支持锁(可继续但不持锁)。
+    """
+    if not path:
+        return None
+    try:
+        import fcntl, hashlib
+        d = os.path.join(cog_dir(), LOCKDIR_HINT)
+        os.makedirs(d, exist_ok=True)
+        fh = open(os.path.join(d, hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:16] + '.lock'), 'w')
+        import signal as _sig
+
+        def _on_alarm(_s, _f):
+            raise TimeoutError('等文件锁超时')
+
+        _sig.signal(_sig.SIGALRM, _on_alarm)
+        _sig.alarm(int(timeout))
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        finally:
+            _sig.alarm(0)
+        return fh
+    except (TimeoutError, OSError):
+        return None
+    except Exception:
+        return 'unlocked'
+
+
+def _release(lock) -> None:
+    try:
+        if lock not in (None, 'unlocked'):
+            lock.close()
+    except Exception:
+        pass
+
+
 def fsha(path: str) -> str:
     try:
         return hashlib.sha256(open(path, 'rb').read()).hexdigest()
@@ -94,29 +137,9 @@ def run_judgement(name: str, timeout: float) -> tuple[int, str]:
 
 
 def check(args) -> int:
-    # 互斥: 本检查会**暂时改写**被判工具源码(与双臂探针同一手法) ⇒ 两个检查并发会交错变异 ⇒ 用文件锁串行化。
-    lock = None
-    if fcntl is not None:
-        try:
-            # **共享**变异锁: 与 arms 检查用同一把(cl-316 ②) —— 变异是按**文件**冲突的, 不是按机制。
-            lock = open(os.path.join(cog_dir(), '.mutation.lock'), 'w')
-            import signal as _sig
-
-            def _on_alarm(_s, _f):
-                raise TimeoutError('等锁超时')
-
-            _sig.signal(_sig.SIGALRM, _on_alarm)
-            _sig.alarm(int(getattr(args, 'lock_wait', 180)))   # 等锁而不是立刻放弃:
-            # 立刻 exit 3 会让 T231 在 arms 检查跑的时候变红 —— 判据的裁决取决于另一个检查在不在跑。
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-            finally:
-                _sig.alarm(0)
-        except (OSError, TimeoutError):
-            print('%s 等共享变异锁超时(另一个变异机制在跑) ⇒ 本次不施加变异(exit 3, 不等于判据通过)' % TAG, file=sys.stderr)
-            return 3
-        except Exception:
-            lock = None
+    # 互斥(cl-322 按文件): 本检查只改**登记里那一个文件** ⇒ 只锁那一个。原先用一把全局锁, 结果是
+    # "arms 检查持锁跑 T231 探针 + T231 判据体拿同一把锁" 的死结(T231 干净臂变 3 ⇒ T222 红)。
+    suite = args.suite or os.path.join(args.repo, 'dsh-cog-tests.sh')
     suite = args.suite or os.path.join(args.repo, 'dsh-cog-tests.sh')
     reg_path = args.registry or os.path.join(cog_dir(), 'synthetic-world-mutants.json')
     reg = load(reg_path)
@@ -172,6 +195,10 @@ def check(args) -> int:
             # 判据本身现在就红 ⇒ 无法判定"退化变异有没有被抓住"(先修判据)
             reds.append({'id': eid, 'why': ['判据 %s 在未变异时就判红 ⇒ 本次无法判定(先修判据)' % name]})
             continue
+        _lock = _file_lock(e.get('file') or '', args.lock_wait)
+        if _lock is None:
+            reds.append({'id': eid, 'why': ['取不到该文件的变异锁(别的机制正在改同一个文件) ⇒ 本次不施加变异']})
+            continue
         try:
             mutated = src.replace(e['old'], e['new'])
             with open(path, 'w', encoding='utf8') as fh:
@@ -187,6 +214,7 @@ def check(args) -> int:
                 fh.write(src)
                 fh.flush()
                 os.fsync(fh.fileno())
+            _release(_lock)
             if fsha(path) != base_sha:
                 reds.append({'id': eid, 'why': ['复原失败(哈希不一致) —— 目标文件可能已损坏!']})
                 continue

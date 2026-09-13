@@ -21,6 +21,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -108,33 +109,21 @@ def main() -> int:
     # **共享变异锁**(cl-316 ②): 探针会把**变异标记**写进受版本控制的源码; 退化检查(T231)也会改同一批文件
     # (`dsh-probe-binding.py`/`dsh-stage-summary.py` 两边都动) ⇒ 并发会互相踩出**假红**(像"变异锚点失效")。
     # 锁按"变异"这件事本身共享, 而不是每个机制一把。取不到就等(阻塞), 因为 arms 是排程作业, 等一会儿比报错好。
-    import contextlib
+    WRAP = os.path.join(os.path.expanduser('~/dsh-fork'), 'dsh-mutation-lock.py')
 
-    @contextlib.contextmanager
-    def _mutex():
-        # 每条探针**单独**持锁: 整轮持有(2-4 分钟)会把同锁的 T231 挤成红 —— 那是 2026-09-13 实测到的
-        # "锁把两个机制耦合起来, 判据的裁决取决于另一个检查有没有在跑"。按条持锁把争用窗口压到秒级。
-        fh = None
-        try:
-            import fcntl as _fcntl
-            fh = open(os.path.join(os.path.expanduser('~/.dsh/cognitive-pipeline'), '.mutation.lock'), 'w')
-            _fcntl.flock(fh, _fcntl.LOCK_EX)
-        except Exception:
-            fh = None
-        try:
-            yield
-        finally:
-            if fh is not None:
-                try:
-                    fh.close()
-                except Exception:
-                    pass
+    def _wrapped(cmd: str) -> str:
+        # cl-322: 变异锁按**文件**上 —— 探针改哪个文件就锁哪个(由 dsh-mutation-lock.py --probe 解析)。
+        # 原先的一把全局锁会与"判据体自己要拿锁"的探针互掐(T231 ⇒ 干净臂 3 ⇒ T222 红)。
+        m = re.search(r'(/\S+?\.sh)', cmd)
+        if not os.path.exists(WRAP) or not m:
+            return cmd
+        return 'python3 %s --probe %s -- %s' % (WRAP, m.group(1), cmd)
 
     results = {}
     for key, gid, mf in entries:
         expected = int(mf.get('expectedExit', 1))
         with _mutex():
-            m, c, note = measure(str(mf['command']), args.timeout)
+            m, c, note = measure(_wrapped(str(mf['command'])), args.timeout)
         v = verdict(m, c, expected)
         results[key] = {'guard': gid, 'mutant': m, 'clean': c, 'expected': expected, 'verdict': v, 'note': note}
         if args.write_arms:
