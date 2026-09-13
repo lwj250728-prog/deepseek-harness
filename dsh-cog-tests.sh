@@ -10633,6 +10633,47 @@ assert rec2.get("repo") is None, "deploy-lag 不可用时 repo 必须是 null(�
 print("就绪读数新字段: repo 与 deploy-lag 三项逐项一致 / resolved 仅含关心包且 mtime 属实 / 上游不可用时为 null 不编造")
 '
 
+# T257 (tp-213/cl-374): 本期实证 03:48=633/12 → 06:08=636/22 —— 我加判据把失败数推高 10 条而无人拦。
+# 判据三条(与实现无关): ①新红必判红并指名; ②真子集必棘轮(修好之后又坏回去才抓得住); ③**比成员不比数量**(替换=数量相同成员不同, 只比数量会漏)。
+echo "[T257] 增长闸门(新增判据不得抬高红数)"
+t "新增判据不得抬高套件红数: 新红必判红 + 缩小必棘轮 + 比成员不比数量" python3 -c '
+import json, os, subprocess, sys, tempfile
+R = os.path.expanduser("~/dsh-fork")
+TOOL = os.path.join(R, "dsh-suite-baseline.py")
+assert os.path.exists(TOOL), "闸门不在: %s" % TOOL
+T = tempfile.mkdtemp(prefix="t257-")
+B = os.path.join(T, "baseline.json")
+env = dict(os.environ, DSH_SUITE_BASELINE=B)
+def cur(name, assertions, failing):
+    p = os.path.join(T, name)
+    with open(p, "w", encoding="utf8") as fh:
+        json.dump({"assertions": assertions, "failing": failing}, fh)
+    return p
+def run(path):
+    return subprocess.run([sys.executable, TOOL, "--compare", path], capture_output=True, text=True, timeout=300, env=env)
+# ① 引导: 基线不存在 ⇒ 首次建立(而不是把所有红都当新红, 否则永远建不起来)
+r0 = run(cur("a.json", 100, ["A", "B"]))
+assert r0.returncode == 0 and os.path.exists(B), "首次建立基线失败: rc=%d %s" % (r0.returncode, r0.stdout[-120:])
+# ② 新红 + 断言数增加 ⇒ 必判红并指名
+r1 = run(cur("b.json", 110, ["A", "B", "C"]))
+assert r1.returncode == 1, "新红没判红: rc=%d" % r1.returncode
+assert "C" in r1.stderr and "新红" in r1.stderr, "没指名新红: %s" % r1.stderr[-160:]
+# ③ 替换(数量相同 2 条, 成员不同) ⇒ 也必须判红(只比数量会漏掉这种)
+r2 = run(cur("c.json", 110, ["A", "D"]))
+assert r2.returncode == 1, "替换没被抓住(只比数量了?): rc=%d" % r2.returncode
+# ④ 真子集 ⇒ rc=0 且棘轮写回
+r3 = run(cur("d.json", 110, ["A", "B", "C"]))
+assert r3.returncode == 1, "把 C 重新加回来应判红(基线已是 A,B,C): rc=%d" % r3.returncode
+run(cur("e.json", 110, ["A", "B", "C"]))
+r4 = run(cur("f.json", 110, ["A"]))
+assert r4.returncode == 0, "真子集应通过: rc=%d %s" % (r4.returncode, r4.stderr[-120:])
+base = json.load(open(B, encoding="utf8"))
+assert base["failing"] == ["A"], "棘轮没写回: %s" % base["failing"]
+assert base.get("ratchets"), "棘轮记录缺失"
+print("增长闸门: 引导建立 / 新红判红并指名 / 替换也判红 / 真子集棘轮写回 —— 四条全对")
+'
+
+
 
 # cl-367: **把真实记录接进套件** —— cron 每 6h 跑套件即免费产生一行读数(这才是「看守留痕」, T255 是它的判据)。
 echo "[T255] 记录真实读数(cron 每 6h 免费执行)"
@@ -10653,6 +10694,21 @@ echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
 sleep 0.5
 printf '═══ 累计裁决: %s 通过 / %s 失败 (origin=%s %s) ═══\n' "$PASS" "$FAIL" "${DSH_COG_ORIGIN:-manual}" "$(date '+%F %T')" >> "$COG_LOG"
+
+# cl-374: **增长闸门** —— 把本次裁决交给 dsh-suite-baseline.py 对基线: 新红必判红(指名), 缩小则棘轮。
+# 本期实证: 我加判据把失败数从 12 推到 22 而无人拦 ⇒ 这条就是那个"拦我"的东西(判据本体是 T257, 这里只做真实应用)。
+python3 - "$PASS" "$FAIL" "${FAILED_TESTS[@]}" <<'PYGATE' > /tmp/suite-current-$$.json
+import json, sys
+pass_n, fail_n = int(sys.argv[1]), int(sys.argv[2])
+failing = sorted({x for x in sys.argv[3:] if x.strip()})
+print(json.dumps({"assertions": pass_n + fail_n, "failing": failing}, ensure_ascii=False))
+PYGATE
+if [ -f /tmp/suite-current-$$.json ]; then
+  python3 "$HOME/dsh-fork/dsh-suite-baseline.py" --compare /tmp/suite-current-$$.json || \
+    echo "[gate] **增长闸门判红**: 出现基线里没有的新红(见上)—— 新增判据不得抬高红数(cl-371/cl-374)"
+  rm -f /tmp/suite-current-$$.json
+fi
+
 
 # ── P0 失败自动汇报(2026-09-08 19:4x, design-spec-wire-up-verification) ──
 # 根因: cron 输出重定向到日志 → 失败静默无人看(18:17 有2项失败未被发现)。
