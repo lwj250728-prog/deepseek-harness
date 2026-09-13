@@ -9850,6 +9850,7 @@ import glob, json, os, re, subprocess, sys
 ROOT = os.environ.get("DSH_CHANGE_COVERAGE_ROOT") or os.path.expanduser("~/dsh-fork")
 BASE = os.environ.get("DSH_CHANGE_COVERAGE_BASE") or os.path.expanduser("~/.dsh/cognitive-pipeline/change-coverage-baseline.json")
 # 三个注入点(供 T239 的合成世界用): ROOT / PKGS(绕开 git) / NO_RUN(只判分类不跑 spec)
+import datetime
 _pkgs_env = os.environ.get("DSH_CHANGE_COVERAGE_PKGS")
 if _pkgs_env:
     pkgs = [x for x in _pkgs_env.split(",") if x]
@@ -9889,6 +9890,29 @@ else:
 base = json.load(open(BASE, encoding="utf8"))
 known_f = set(base.get("failingSpecs") or [])
 known_n = int(base.get("noSpecCount") or 0)
+# **棘轮**(tp-207/T241): failingSpecs 的现实对账需要跑 vitest, 所以由本判据在**跑动时**写回更紧的值 ——
+# 否则"修好之后又坏回去"仍会判绿(基线还记着旧的那几条)。只在**严格变好**时写, 且原子写 + 留 note。
+# **只在真的测过时才允许棘轮**(否则 NO_RUN 模式会把"没测"当成"没有失败", 把真实基线棘轮到空 —— 我自己差点踩这个坑)
+_injected = os.environ.get("DSH_CHANGE_COVERAGE_FAILING")
+if _injected is not None:
+    failing = [x for x in _injected.split(",") if x]
+_measured = (not os.environ.get("DSH_CHANGE_COVERAGE_NO_RUN")) or (_injected is not None)
+if _measured and set(failing) < set(known_f):
+    try:
+        _b = json.load(open(BASE, encoding="utf8"))
+        _b["failingSpecs"] = list(failing)
+        _b["ratchetedAt"] = datetime.datetime.now().astimezone().isoformat()
+        _b["ratchetNote"] = "棘轮(T237): failingSpecs 由 %d 条收紧为 %d 条" % (len(known_f), len(failing))
+        _tmp = BASE + ".tmp"
+        with open(_tmp, "w", encoding="utf8") as _fh:
+            json.dump(_b, _fh, ensure_ascii=False, indent=1)
+            _fh.flush()
+            os.fsync(_fh.fileno())
+        os.replace(_tmp, BASE)
+        known_f = set(failing)
+        print("棘轮: failingSpecs %d → %d(已写回基线)" % (len(_b.get("failingSpecs") or []) or 0, len(failing)))
+    except Exception as _exc:
+        print("棘轮的写回失败(不影响判定, 但改善没被锁住): %s" % _exc)
 fresh = [f for f in failing if f not in known_f]
 assert not fresh, ("**新出现的破损 spec**(不在冻结基线里): %s ⇒ 改动过的包有新的测试失败, 必须处置或登记基线"
                    % fresh[:4])
