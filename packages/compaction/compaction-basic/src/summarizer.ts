@@ -187,11 +187,54 @@ export async function summarizeWithLlm(
  * @returns content for the synthesized replacement user message.
  */
 export function frameSummary(summary: readonly ContentBlock[]): ContentBlock[] {
+  // 2026-09-13 14:1x **实测缺陷(用户报"触发上下文压缩 bug"那一刀)**: 落盘的 checkpoint 长成
+  // `<compacted-summary><compacted-summary>…</compacted-summary></compacted-summary>` —— **包装被写了两遍**。
+  // 根因不是模型乱输出, 而是**指令自己教它包了一层**: 第 65 行为了让总结器识别"上一份 checkpoint" 而把
+  // SUMMARY_OPEN_TAG 作为概念写进了指令, 于是模型把标签一并吐出来; 这里再无条件包一次 ⇒ 双写。
+  // 修法: 包装做成**幂等** —— 先剥掉模型自己在首尾写的包装标签(反复剥, 兼容它自己包了两层), 再包一次。
+  const body: ContentBlock[] = summary.map(block => ({ ...block }))
+  const firstText = body.findIndex(block => block.type === 'text')
+  const lastText = body.length - 1 - [...body].reverse().findIndex(block => block.type === 'text')
+  const editText = (index: number, strip: (text: string) => string): void => {
+    const block = index < 0 ? undefined : body[index]
+    if (block?.type !== 'text') return
+    body[index] = { ...block, text: strip(block.text) }
+  }
+  editText(firstText, stripLeadingSummaryOpen)
+  editText(lastText, stripTrailingSummaryClose)
   return [
     { type: 'text', text: `${CHECKPOINT_PREAMBLE}\n\n${SUMMARY_OPEN_TAG}` },
-    ...summary,
+    ...body,
     { type: 'text', text: SUMMARY_CLOSE_TAG },
   ]
+}
+
+/** Escape a literal tag for use inside a RegExp. */
+function escapeRe(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+}
+
+const LEADING_OPEN_RE = new RegExp(`^\\s*${escapeRe(SUMMARY_OPEN_TAG)}\\s*`, 'u')
+const TRAILING_CLOSE_RE = new RegExp(`\\s*${escapeRe(SUMMARY_CLOSE_TAG)}\\s*$`, 'u')
+
+/** Remove open tags the summary text may carry at its very start (repeat: the model may nest them). */
+function stripLeadingSummaryOpen(text: string): string {
+  let out = text
+  for (;;) {
+    const match = LEADING_OPEN_RE.exec(out)
+    if (match === null) return out
+    out = out.slice(match[0].length)
+  }
+}
+
+/** Remove close tags the summary text may carry at its very end (repeat: the model may nest them). */
+function stripTrailingSummaryClose(text: string): string {
+  let out = text
+  for (;;) {
+    const match = TRAILING_CLOSE_RE.exec(out)
+    if (match === null) return out
+    out = out.slice(0, out.length - match[0].length)
+  }
 }
 
 /** Map a terminal summarization finish to its fail-closed error. */

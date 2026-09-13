@@ -945,6 +945,12 @@ async function triggerNorthStarReflect(ctx: Context, reason: string): Promise<vo
 let lastReflectAfterExecAt = 0
 /** #006b 测试审视节流: 空队列时1h内不重复发审视帧(防每帧轰炸). */
 let lastTestReviewAt = 0
+// 2026-09-13 14:1x **实测缺陷(用户报"上下文压缩 bug"时查出)**: test-plan 分支**没有节流** —— 只要测试账本里有
+// pending 项, 且主会话恰好 idle, 每个 tick(5 分钟)都会把**同一条**测试计划帧再推一遍。实测同一条帧被投递两次:
+// 11:37:26 / 12:37:27 与 **14:02:26 / 14:07:26**(5 分钟间隔 = tick 周期); 它只被 60 分钟节流的 test-review 分支
+// 挡着 —— 而那条分支只在**队列为空**时才走。修法: 同一条 pending 测试在窗口内不重复投递(换测试则立刻放行)。
+let lastTestPlanAt = 0
+let lastTestPlanId = ''
 async function triggerReflectAfterExec(ctx: Context, reason: string, outputText: string): Promise<void> {
   if (!outputText || outputText.trim().length < 20) return  // 空产出不提炼
   const now = Date.now()
@@ -1807,7 +1813,14 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
             // 非 cron 定时——LLM 的测试是认知活动, 时间驱动会脱节, 推进驱动才对。
             if (config.testPendingPath !== undefined && config.testPendingPath !== '') {
               const pendingTest = await pickPendingTestPlan(config.testPendingPath)
-              if (pendingTest !== null) {
+              // 同一条测试在节流窗口内已投递过 ⇒ 让给别的帧(不再重复轰炸同一条)。
+              const sameTest = pendingTest !== null && pendingTest.id === lastTestPlanId
+              if (sameTest && Date.now() - lastTestPlanAt < 60 * 60 * 1000) {
+                ctx.logger.info('[quiet-driver] test-plan-frame #%d: 同一条待办测试(%s)已在 %.0f 分钟前投递过 ⇒ 本轮跳过',
+                  frames, pendingTest.id, (Date.now() - lastTestPlanAt) / 60000)
+              } else if (pendingTest !== null) {
+                lastTestPlanId = pendingTest.id
+                lastTestPlanAt = Date.now()
                 const message = createUserMessage({
                   content: [{ type: 'text', text: buildTestPlanFrameText(carrier, pendingTest) }],
                   source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `测试计划 #${frames}: ${pendingTest.title.slice(0, 40)}` },
