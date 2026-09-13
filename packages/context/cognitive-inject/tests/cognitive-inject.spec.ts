@@ -417,6 +417,27 @@ describe('cognitive-inject priming', () => {
     }
   })
 
+  it('does NOT serve a chain whose GOAL only shares generic wording (薄边不算命中, cl-356)', async () => {
+    const { ctx, teardown } = await mount()
+    try {
+      // 链的目标与情境**只**共享通用词(这里整句都带"机制/系统"这类词), 成员文本无关 ⇒ 不应被服务。
+      // 离线对照(1498 对)显示: 目标/原则键的新增命中几乎都是这种"撞通用词"(0.41~0.44), 而真正
+      // "换个说法问同一件事"时分数会接近 1 —— 所以给链自身语义键加余量, 用薄边换不来服务。
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '旧事一', '执行甲', '结果甲', undefined, undefined, 'chain-generic')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_2', '旧事二', '执行乙', '结果乙', undefined, undefined, 'chain-generic')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_3', '旧事三', '执行丙', '结果丙', undefined, undefined, 'chain-generic')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_9', '服务重启后需要验证恢复', '重启服务并验证', '恢复成功')
+      // 目标与情境共享"机制/系统/验证"等通用词, 但语义不同。
+      await ctx.cognitivePipeline.consolidateChain('chain-generic', '机制与系统的验证流程')
+      const { agent, session } = stubAgent('chain-generic-key')
+      session.append('turn/start', { turn: 1 })
+      const injected = await fire(ctx, agent, 1, 1, '服务重启后需要验证恢复')
+      expect(injected.some(text => text.includes('【经验链参考】'))).toBe(false)
+    } finally {
+      await teardown()
+    }
+  })
+
   it('does NOT serve a chain whose members are unrelated to the situation', async () => {
     const { ctx, teardown } = await mount()
     try {

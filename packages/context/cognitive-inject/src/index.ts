@@ -144,6 +144,11 @@ export interface ChainInjectionConfig {
   depth?: number
   /** Hard character cap on the rendered subtree (default 900). */
   maxChars?: number
+  /** cl-356: 链**自己的语义**(goal/distilledPrinciple)过阈要比成员键**更严**的余量(默认 0.05)。
+   *  离线对照(1498 对): 目标/原则键新增 12 对过阈、只改变 2/214 个情境的赢家, 两例都由 <=0.03 的薄边决定,
+   *  抽样显示它们靠**通用词重合**(如"检索/机制")过阈 —— 短文本的偶然重合比成员文本更容易"撞"。
+   *  故: 成员键达阈值即可, 链自身的语义要达阈值+本余量(真正"换个说法问同一件事"时该分数接近 1, 不受影响)。 */
+  goalMargin?: number
 }
 
 /** Pre-input review sub-configuration. */
@@ -187,7 +192,8 @@ export const Config: z<Config> = z.object({
     minSimilarity: z.number().min(0).max(1).default(0.4),
     depth: z.number().step(1).min(0).max(5).default(1),
     maxChars: z.number().step(1).min(200).max(4000).default(900),
-  }).default({ enabled: true, minSimilarity: 0.4, depth: 1, maxChars: 900 }),
+    goalMargin: z.number().min(0).max(0.5).default(0.05),
+  }).default({ enabled: true, minSimilarity: 0.4, depth: 1, maxChars: 900, goalMargin: 0.05 }),
   failureThresholdFactor: z.number().min(0).max(1).default(0.6),
   failureTopK: z.number().step(1).min(1).max(10).default(3),
   contextDepth: z.number().step(1).min(1).max(20).default(4),
@@ -243,7 +249,7 @@ export interface ResolvedConfig {
   readonly triggerBoost: number
   readonly review: ResolvedReviewConfig
   /** cl-351: 链检索/服务(默认开启, 见 Config.chain)。 */
-  readonly chain: { readonly enabled: boolean, readonly minSimilarity: number, readonly depth: number, readonly maxChars: number }
+  readonly chain: { readonly enabled: boolean, readonly minSimilarity: number, readonly depth: number, readonly maxChars: number, readonly goalMargin: number }
 }
 
 /** Resolved pre-input review configuration. */
@@ -293,6 +299,7 @@ export function resolveConfig(config: Config): ResolvedConfig {
       minSimilarity: config.chain?.minSimilarity ?? 0.4,
       depth: config.chain?.depth ?? 1,
       maxChars: config.chain?.maxChars ?? 900,
+      goalMargin: config.chain?.goalMargin ?? 0.05,
     }),
     review: Object.freeze({
       enabled: review.enabled ?? false,
@@ -785,7 +792,7 @@ function retrieveChain(
   service: CognitivePipelineService,
   situation: string,
   sessionId: string,
-  config: { minSimilarity: number, depth: number, maxChars: number },
+  config: { minSimilarity: number, depth: number, maxChars: number, goalMargin: number },
 ): { chainId: string, similarity: number, text: string } | null {
   const chains = service.store.chainsSnapshot()
   if (chains.length === 0) return null
@@ -804,12 +811,13 @@ function retrieveChain(
     // cl-355: 链**自己的语义**也是检索键 —— 只看成员文本时, "换个说法问同一件事"会让这条链彻底找不到
     // (实测用例: 成员文本与情境无关、而链的目标表述与情境一致 ⇒ 修复前判红)。目标与蒸馏原则都是链自己
     // 沉淀下来的说法, 与成员文本互补; 三者取最大(命中任一个即算找到), 仍是同一个阈值口径。
-    let score = Math.max(
+    const keyScore = Math.max(
       cosine(situationQuery, situationVector(chain.goal)),
       ...(chain.distilledPrinciple === undefined
         ? []
         : [cosine(situationQuery, situationVector(chain.distilledPrinciple))]),
     )
+    let memberScore = 0
     for (const memberId of chain.memberExpIds) {
       const exp = byId.get(memberId)
       if (exp === undefined) continue
@@ -817,9 +825,13 @@ function retrieveChain(
         cosine(actionQuery, exp.actionVector),
         cosine(situationQuery, situationVector(exp.sar.situation)),
       )
-      if (member > score) score = member
+      if (member > memberScore) memberScore = member
     }
-    if (score < config.minSimilarity) continue
+    // cl-356: 两条路各自的门槛 —— 成员文本命中按 minSimilarity; 链自身语义(短文本, 易撞通用词)要按 minSimilarity+goalMargin。
+    const memberOk = memberScore >= config.minSimilarity
+    const keyOk = keyScore >= config.minSimilarity + config.goalMargin
+    if (!memberOk && !keyOk) continue
+    const score = Math.max(memberScore, keyScore)
     if (best === null || score > best.similarity) best = { chainId: chain.chainId, similarity: score }
   }
   if (best === null) return null
