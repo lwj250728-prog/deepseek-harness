@@ -10217,6 +10217,65 @@ assert "3 passed" in out, "spec 没跑满 3 条(可能被 skip): %s" % out[-400:
 print("目标树编码端 3/3: 工具写入回执 ⇒ childChainIds 长出子链 + 无 @ 不算委派 + 门仍然有效")
 '
 
+# T246 (tp-209): 拒收路径只验过"已写下的记录有没有理由"(T244), 没验过**拒收时会不会悄悄写进去**;
+# 并且把"共现必须归一"从注释变成断言(第一版数原始次数 ⇒ 250 行审计里人人互相共现, assoc 冲到 352)。
+# 隔离手法: DSH_COG_DIR 指向临时库 + 真 experiences + 空 chains + 合成的 10 行同现审计。
+echo "[T246] 复习通道拒收路径与共现归一"
+t "复习通道的拒收路径: 无理由不许写账本 + 共现必须 Jaccard 归一" python3 -c '
+import hashlib, json, os, shutil, subprocess, sys, tempfile
+R = os.path.expanduser("~/dsh-fork")
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+AM = os.path.join(R, "dsh-activity-model.py")
+T = tempfile.mkdtemp(prefix="t246-")
+shutil.copy2(os.path.join(D, "experiences.jsonl"), os.path.join(T, "experiences.jsonl"))
+open(os.path.join(T, "chains.json"), "w", encoding="utf8").write("[]")
+lib = [json.loads(x) for x in open(os.path.join(T, "experiences.jsonl"), encoding="utf8") if x.strip()]
+a, b = str(lib[0]["expId"]), str(lib[1]["expId"])
+with open(os.path.join(T, "retrieval-audit.jsonl"), "w", encoding="utf8") as fh:
+    for _ in range(10):
+        fh.write(json.dumps({"retrievedIds": [a, b]}) + "\n")
+def digest(p):
+    return hashlib.sha256(open(p, "rb").read()).hexdigest() if os.path.exists(p) else "MISSING"
+env = dict(os.environ, DSH_COG_DIR=T)
+reh = os.path.join(T, "rehearsals.jsonl")
+# ① 拒收: 无 --why ⇒ 非零退出, 且账本必须**连文件都不建**(逐字节: MISSING 仍是 MISSING)
+r1 = subprocess.run([sys.executable, AM, "--rehearse", a], capture_output=True, text=True, timeout=300, env=env)
+assert r1.returncode != 0, "无 --why 的复习退出 0 ⇒ 防自我刷活跃度的闸门没了"
+assert digest(reh) == "MISSING", "无 --why 的复习**建了账本**(拒收却在写): %s" % digest(reh)
+# ② 接受: 带 --why ⇒ 恰好 1 行且 why 非空(证明拒收不是"通道整体坏了")
+r2 = subprocess.run([sys.executable, AM, "--rehearse", a, "--why", "T246 自检: 判据需要一次合法写入, 否则拒收无法与整条通道坏死区分"], capture_output=True, text=True, timeout=300, env=env)
+assert r2.returncode == 0, "带 --why 的复习被判红: %s" % ((r2.stdout or "") + (r2.stderr or ""))[-200:]
+lines = [x for x in open(reh, encoding="utf8").read().splitlines() if x.strip()]
+assert len(lines) == 1, "带 --why 应恰好写 1 行, 实得 %d" % len(lines)
+assert str(json.loads(lines[0]).get("why") or "").strip(), "写下的复习行没有 why"
+# ③ 共现必须 Jaccard 归一: 10 行同现 = 1 个强邻居(原始次数会算成 10)
+rep = subprocess.run([sys.executable, AM, "--report", "--json"], capture_output=True, text=True, timeout=300, env=env)
+assert rep.returncode == 0, "报告跑不通: %s" % ((rep.stdout or "") + (rep.stderr or ""))[-200:]
+rows = json.loads(rep.stdout.strip().splitlines()[-1])["rows"]
+row = [x for x in rows if str(x["expId"]) == a][0]
+assert row["chainMates"] == 0, "隔离失败: 临时库竟然有链同伴 %s" % row["chainMates"]
+assert row["coOccurStrong"] == 1, "共现没归一: 同现 10 行应算 1 个强邻居, 实得 %s(原始次数⇒退化常数)" % row["coOccurStrong"]
+assert row["assoc"] == 1, "assoc 应为 0 链同伴 + 1 强邻居 = 1, 实得 %s" % row["assoc"]
+# ④ **同一指标不许两套口径**(cl-350 执行本测试时实跑发现的缺陷): 报告/孤立判定用 len(cc)(J>=0.3),
+# 而分数用的 _raw 曾经只算 Jaccard **恰好 1.0** 的邻居(COOCC_MIN=1) ⇒ J=0.5 的真邻居在报告里算 1 个、
+# 在分数里算 0 个。断言与实现无关: 给 a 造一个 J=0.5 的邻居, b 保持孤立, 其余条件相同 ⇒ a 的分数必须严格更高。
+T2 = tempfile.mkdtemp(prefix="t246b-")
+shutil.copy2(os.path.join(D, "experiences.jsonl"), os.path.join(T2, "experiences.jsonl"))
+open(os.path.join(T2, "chains.json"), "w", encoding="utf8").write("[]")
+with open(os.path.join(T2, "retrieval-audit.jsonl"), "w", encoding="utf8") as fh:
+    for ids in ([a, b], [a, b], [a, b], [a], [a], [a]):
+        fh.write(json.dumps({"retrievedIds": ids}) + chr(10))
+env2 = dict(os.environ, DSH_COG_DIR=T2)
+rep2 = subprocess.run([sys.executable, AM, "--report", "--json"], capture_output=True, text=True, timeout=300, env=env2)
+assert rep2.returncode == 0, "第二份隔离报告跑不通: %s" % ((rep2.stdout or "") + (rep2.stderr or ""))[-200:]
+c = str(lib[2]["expId"])   # 对照: 完全不出现在审计里 ⇒ 孤立(共现是对称的, 不能拿 b 当对照)
+rows2 = {str(x["expId"]): x for x in json.loads(rep2.stdout.strip().splitlines()[-1])["rows"]}
+assert rows2[a]["assoc"] == 1 and rows2[c]["assoc"] == 0, "预置不成立: a(assoc=%s) 应有 1 个 J=0.5 邻居, c(assoc=%s) 应孤立" % (rows2[a]["assoc"], rows2[c]["assoc"])
+assert rows2[a]["activity"] > rows2[c]["activity"], "同一指标两套口径: a 有一条 J=0.5 的邻居, 分数却与孤立的 c 相同(%.6f vs %.6f) ⇒ 打分时这条联系没参与" % (rows2[a]["activity"], rows2[c]["activity"])
+print("拒收 rc=%d 且不建账本; --why 恰好 1 行; 共现 Jaccard 归一; 分数与报告同口径(J=0.5 的邻居被算进打分)" % r1.returncode)
+'
+
+
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。

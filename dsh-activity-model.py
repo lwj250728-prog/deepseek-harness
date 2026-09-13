@@ -164,7 +164,10 @@ _KNEE_CACHE = {}
 def _raw(exp_id: str, mates: dict, cooc: dict, seen: dict, reh: dict) -> float:
     m = mates.get(exp_id, set())
     cc = cooc.get(exp_id, {})
-    cc_strong = sum(1 for k, v in cc.items() if v >= COOCC_MIN)
+    # cl-350: 曾经写成 `sum(1 for v >= COOCC_MIN)`, 而 COOCC_MIN=1 ⇒ 只有 Jaccard **恰好 1.0** 的邻居才算数,
+    # 而 activity()/孤立判定用 `len(cc)`(J>=0.3) ⇒ **同一指标两套口径**: J=0.5 的真邻居在报告里算 1 个、
+    # 在分数里算 0 个("报告说有联系, 打分时这条联系没参与")。coincidence() 已按 COOCC_JACCARD 过滤, 统一用 len。
+    cc_strong = len(cc)
     assoc = len(m) + cc_strong
     t = now().timestamp()
     last = seen.get(exp_id, 0)
