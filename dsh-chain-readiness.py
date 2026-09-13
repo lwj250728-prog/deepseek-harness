@@ -88,11 +88,33 @@ def record_reading(data: dict) -> str | None:
     except Exception:
         repo = None      # 附属信息, 拿不到就留空(不许影响主判定)
 
+    # cl-369: 记下**载体将会加载的那个文件**(按 profiles 的 node_modules 符号链接解析), 让"交付对象"可判读 ——
+    # 上一帧靠人工 readlink 才确认"重启吃的是我重建的包"; 这条事实应该自己留在读数里。
+    resolved = []
+    try:
+        prof = os.path.expanduser('~/.dsh/profiles/node_modules/@deepseek-ai')
+        for name in sorted(os.listdir(prof)) if os.path.isdir(prof) else []:
+            link = os.path.join(prof, name)
+            if not os.path.islink(link):
+                continue
+            target = os.path.realpath(link)
+            # **只记本读数关心的包**(默认链机制那两个): 202 个插件全记会让每行膨胀到几十 KB,
+            # 滚动 2000 行就太重了 —— 全仓口径已由上面的 repo 段承担。
+            if not any(target.endswith('/' + v) for v in (data.get('vendors') or [])):
+                continue
+            entry = os.path.join(target, 'lib', 'index.js')
+            if os.path.exists(entry):
+                resolved.append({'plugin': name, 'target': target.replace(os.path.expanduser('~'), '~'),
+                                 'artifactMtime': datetime.datetime.fromtimestamp(os.path.getmtime(entry), TZ).strftime('%m-%d %H:%M')})
+    except Exception:
+        resolved = []
+
     try:
         line = json.dumps({
             'ts': datetime.datetime.now(TZ).isoformat(),
             'state': data.get('state'),
             'repo': repo,
+            'resolved': resolved,
             'next': data.get('next'),
             'vendorVerdicts': data.get('vendorVerdicts'),
             # "待加载/待构建"的包名清单: 这是"还差什么"的可判读部分
