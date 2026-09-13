@@ -8973,6 +8973,68 @@ print("探针 %d 条: 双臂 %d(实测填入 %s)、单臂债 %d(冻结 %d)、抽
       % (len(entries), len(two_arm), ",".join(k.split("|")[0] for k in two_arm), len(single), len(frozen),
          ",".join(k.split("|")[0] for k in sample)))
 '
+
+# ── T223 引用时代**边界**必须可被行为验证(tp-190) ──
+# 起因: cl-274 给读数接了时代过滤, 但 `since` 本身只是**一行声明**(由"首条被引用注入的时刻"反推) —— 声明错了,
+# 所有按时代过滤的读数都会静默带上污染样本或丢掉有效样本, 而输出照样漂亮。手工验证过一次(2026-09-13 20:4x),
+# 手工不是机制。故把边界做成可判据: 在 since 前后各取 24h 窗口比引用率, 并要求"since 之前最后一条被引用注入
+# 必须早于 since-6h"(这一条不依赖样本量)。
+# 样本不足(前窗 <30 条)时**显式跳过且明说不得当作通过**(不是静默绿)。
+echo "[T223] 引用时代边界可被行为验证(前后窗对照 + since 前无近邻引用)"
+t "引用时代边界须可被行为验证(since 前窗引用率≤后窗1/5, 且近期无被引用注入)" python3 -c '
+import json, os, datetime
+D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+TZ = datetime.timezone(datetime.timedelta(hours=8))
+MIN_N = 30
+era_p = os.path.join(D, "citation-era.json")
+assert os.path.exists(era_p), "缺时代声明(判据前提不成立): " + era_p
+era = json.load(open(era_p, encoding="utf8"))
+raw = str(era.get("since") or "")
+assert raw, "citation-era.json 没有 since"
+s0 = datetime.datetime.fromisoformat(raw)
+S = s0 if s0.tzinfo else s0.replace(tzinfo=TZ)
+inj_p = os.path.join(D, "injections.jsonl")
+assert os.path.exists(inj_p), "读不到注入账本: " + inj_p
+rows = []
+for line in open(inj_p, encoding="utf8"):
+    if not line.strip():
+        continue
+    r = json.loads(line)
+    if r.get("cited") is not None and isinstance(r.get("createdAt"), (int, float)):
+        rows.append(r)
+assert rows, "注入账本里没有已结算行(判据前提不成立)"
+def ts(r):
+    return datetime.datetime.fromtimestamp(r["createdAt"] / 1000, TZ)
+DAY = datetime.timedelta(hours=24)
+pre = [r for r in rows if S - DAY <= ts(r) < S]
+post = [r for r in rows if S <= ts(r) < S + DAY]
+skipped = False
+if len(pre) < MIN_N:
+    skipped = True
+    print("样本不足: since 前窗只有 %d 条已结算(< %d) ⇒ **本判据不裁决**(显式跳过, 不得当作通过); 后窗 %d 条"
+          % (len(pre), MIN_N, len(post)))
+else:
+    pc = sum(1 for r in pre if r["cited"])
+    qc = sum(1 for r in post if r["cited"])
+    pr, qr = pc / len(pre), qc / max(len(post), 1)
+    assert pc == 0 or pr <= qr / 5.0, (
+        "时代起点看起来**不是**分界线: 前窗 %d/%d=%.1f%% 既不满足「被引用数==0」, 也不满足「≤ 后窗的 1/5」(后窗 %d/%d=%.1f%%) "
+        "⇒ 要么 since 写错了, 要么采集方式又变了却没更新 era" % (pc, len(pre), 100 * pr, qc, len(post), 100 * qr))
+    msg = "前窗 %d/%d=%.1f%% vs 后窗 %d/%d=%.1f%%" % (
+        pc, len(pre), 100 * pr, qc, len(post), 100 * qr)
+before = [ts(r) for r in rows if r["cited"] and ts(r) < S]
+if before:
+    gap_h = (S - max(before)).total_seconds() / 3600.0
+    assert gap_h > 6.0, ("since 之前 %.1fh 处**还有被引用的注入** ⇒ 边界画得太靠后(那段本该不可观测), "
+                         "要么 since 错, 要么采集方式的变更早于 since" % gap_h)
+    tail = "since 前最后一条被引用注入在 %.1fh 之前(>6h)" % gap_h
+else:
+    tail = "since 之前**没有任何**被引用注入(判据2 平凡成立, 已显式标注)"
+if skipped:
+    print("跳过原因已记录; " + tail)
+else:
+    print("边界校验: " + msg + "; " + tail)
+'
 # ── T220 "停驱"必须是被行为消费的状态, 而不是一句口头停止 ──
 # 起因(2026-09-13 11:2x, 用户指令"停止这个会话的驱动"): 驱动器(quiet-driver)一次只驱动**一个**目标会话
 # (`targetSessionId` + 运行时绑定文件), 所以"停驱"在实现上=**目标不是它** + **此后没有帧派给它**。
