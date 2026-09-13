@@ -120,6 +120,61 @@ def live_topk():
     return topk, minsim, src
 
 
+def idf_shape(lib, batch_rank_cut, injected_win, excluded_ids):
+    """**生产里"陈旧"的真实形态**(2026-09-13 13:5x, cl-053 nextAction ① 的兑现)。
+
+    计划的问法是"从查询池较旧的那部分重建陈旧元素的 IDF 分布" —— 但**生产里没有查询池**:
+    cognitive-inject 的 BM25 查询是**当轮**的 `queryText`(情境文本), 没有任何跨轮元素累积
+    (grep elementPool/accumulate 无命中; trigger_jumps.json 是**学到的触发词↔跳词词典**, 不是池)。
+    ⇒ 旧 §3b 的"淘汰/衰减"在**当前实现下没有作用面**。
+
+    我们真实存在的"陈旧"是**库侧长尾**: 很早入库、却从未被注入过的条目。它到底更像哪一类?
+      · 若它们的元素 IDF 分布 ≈ 旧构造(中位 1.39) ⇒ 内容是**常见词**那一类(和别的条目长得一样);
+      · 若 ≈ 最坏构造(4.91) ⇒ 是**罕见/独特**内容, 却被排序饿着 ⇒ 提权有依据。
+    本函数给两类条目(窗口内注入过 / 排名出局的长尾)算**条目内元素 IDF 的中位与最大**, 让这个判断有数。
+    """
+    import math, re
+    from collections import Counter
+    def elems(t):
+        out = []
+        for m in re.finditer(r'[\u4e00-\u9fff]+|[a-zA-Z0-9_]+', t):
+            seg = m.group(0)
+            if re.match(r'[a-zA-Z0-9_]', seg):
+                out.append(seg.lower())
+            else:
+                out.extend(seg)
+        return out
+    def full(r):
+        s = r.get('sar') or {}
+        return f"{s.get('situation','')} {s.get('action','')} {s.get('outcome','')}"
+    docs = {e['expId']: elems(full(e)) for e in lib if e.get('expId')}
+    N = len(docs) or 1
+    df = Counter()
+    for d in docs.values():
+        for w in set(d):
+            df[w] += 1
+    def idf(w):
+        return math.log(1 + (N - df[w] + 0.5) / (df[w] + 0.5))
+    def shape(ids):
+        med, mx = [], []
+        for i in ids:
+            d = docs.get(i) or []
+            if not d:
+                continue
+            vals = [idf(w) for w in set(d)]
+            med.append(statistics.median(vals))
+            mx.append(max(vals))
+        if not med:
+            return None
+        return {'n': len(med), 'medianIdf': round(statistics.median(med), 2),
+                'maxIdfP50': round(statistics.median(mx), 2),
+                'maxIdfP90': round(sorted(mx)[int(0.9 * (len(mx) - 1))], 2)}
+    return {'injectedInWindow': shape(injected_win),
+            'rankCutLongTail': shape(batch_rank_cut),
+            'reference': {'cl053LegacySampledElements': 1.39, 'adversarialIdfTop400': 4.91},
+            'caliber': '条目内**元素**的 IDF(单字/英文词, 与 dsh-admission-scan 同一套切词); 库 %d 条' % len(docs)}
+
+
 def main() -> int:
     era = era_since_ms()
     if era is None:
@@ -258,6 +313,26 @@ def main() -> int:
               % (lp, _row['excludedByFilter'], _row['notRetrieved']))
     else:
         print('\n(--dry-run: 未落常驻计数; 本行内容 %s)' % json.dumps(_row, ensure_ascii=False))
+    # 生产里"陈旧"的真实形态(cl-053 nextAction ①): 长尾 vs 已注入的 IDF 分布对照
+    try:
+        shape = idf_shape(lib, [e['expId'] for e in batch if e['expId'] in set(b_rank)], set(win_used),
+                          {eid for eid, _ in b_excl})
+        print('\n=== 长尾 vs 已注入: 元素 IDF 分布(cl-053 ① 的兑现) ===')
+        for k in ('injectedInWindow', 'rankCutLongTail'):
+            v = shape.get(k)
+            if v:
+                print('  %-18s n=%-4d 条目内元素 IDF 中位 %.2f | 条目最大 IDF 中位 %.2f / p90 %.2f'
+                      % (k, v['n'], v['medianIdf'], v['maxIdfP50'], v['maxIdfP90']))
+        it, lt = shape.get('injectedInWindow'), shape.get('rankCutLongTail')
+        if it and lt:
+            d = lt['medianIdf'] - it['medianIdf']
+            print('  判读: 长尾 − 已注入 的中位 IDF 差 %+.2f ⇒ %s' % (
+                d, '长尾**更独特**(罕见元素更多) ⇒ 提权有依据' if d > 0.5 else
+                   ('长尾更"普通"(常见词更多) ⇒ 提权多半只会换来冗余' if d < -0.5 else
+                    '两类**几乎没有区别** ⇒ 长尾不是"独特内容被饿着", 而是排序/窗口问题(与 cl-278 同向)')))
+            print('  参照: 旧构造抽到的元素中位 IDF 1.39(常见词) / 最坏构造(IDF 前400) 4.91')
+    except Exception as exc:  # noqa: BLE001
+        print('  (IDF 形态测量失败: %s)' % exc)
     if '--json' in sys.argv:
         print(json.dumps({'library': len(lib), 'window': [w0, w1], 'topK': topk, 'minSimilarity': minsim,
                           'injectedInWindow': len(win_used), 'injectedPreEra': len(pre_used),
