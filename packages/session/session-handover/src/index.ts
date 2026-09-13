@@ -75,7 +75,7 @@ function report(line: string): void {
 export const name = 'session-handover'
 
 /** Services this plugin relies on. */
-export const inject = ['agents', 'agentPresets', 'workspaceRegistry']
+export const inject = ['agents', 'agentPresets', 'workspaceRegistry', 'sessions']  // Hermes 修复(2026-09-13): 原缺 'sessions' → 启动崩溃 "cannot get property sessions without inject"
 
 /**
  * Plugin config schema.
