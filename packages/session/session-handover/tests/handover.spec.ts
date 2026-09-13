@@ -12,7 +12,7 @@ import { MessageId, createUserMessage, freezeMessage } from '@deepseek-ai/dsh-ll
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import { buildSuccessorSeed, compactionCount, isCompactionRecord, replaceRange, apply } from '../src/index.ts'
+import { Config, buildSuccessorSeed, compactionCount, isCompactionRecord, replaceRange, apply } from '../src/index.ts'
 
 const sid = (value: string): SessionId => value as SessionId
 
@@ -249,5 +249,22 @@ describe('the inherited seed is a loadable session log', () => {
       await ctx.fiber.dispose()
       await rm(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('config schema', () => {
+  it('normalizes a profile entry so the loader can actually deliver it', () => {
+    // A missing runtime schema is how a configured plugin ends up silently
+    // no-op: the loader has nothing to validate the entry's config through.
+    const fromProfile = Config({ enabled: true, compactionsPerSession: 1, archivePredecessor: true })
+    expect(fromProfile).toMatchObject({
+      enabled: true,
+      compactionsPerSession: 1,
+      archivePredecessor: true,
+      dryRun: false,
+    })
+
+    // Defaults keep a bare entry safe: off unless asked, and conservative when on.
+    expect(Config({})).toMatchObject({ enabled: false, compactionsPerSession: 1, archivePredecessor: true })
   })
 })

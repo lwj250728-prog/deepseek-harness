@@ -1208,3 +1208,44 @@ describe('background-job mirror', () => {
     expect(seen).toHaveBeenCalled()
   })
 })
+
+describe('handover frames', () => {
+  it('follows the conversation into its successor when the user is looking at the predecessor', async () => {
+    const api = new FakeApiClient()
+    api.onList = () => Promise.resolve(ok({
+      items: [summary(S1, { running: true }), summary(S2)] as never[],
+    }))
+    const manager = new SessionManager(api, fakeRemote())
+    await manager.refreshList()
+    manager.select(S1)
+
+    manager.handleHostEnvelope({
+      rpcId: 'h' as never,
+      payload: { type: 'host/session-handover', predecessorId: S1, successorId: S2 },
+    })
+
+    expect(manager.selected).toBe(S2)
+    // The successor is now a listed row in its own right, so the move is legal.
+    expect(manager.getListSnapshot().items.some(item => item.sessionId === S2)).toBe(true)
+  })
+
+  it('leaves the user alone when they are looking at something else', async () => {
+    const api = new FakeApiClient()
+    api.onList = () => Promise.resolve(ok({
+      items: [summary(S1, { running: true }), summary(S2)] as never[],
+    }))
+    const manager = new SessionManager(api, fakeRemote())
+    await manager.refreshList()
+    // The user moved on to a third session before the handover landed.
+    const S3 = 'fk-m3' as SessionId
+    manager.handleHostEnvelope({ rpcId: 'h0' as never, payload: { type: 'host/session-added', sessionId: S3, blank: true } })
+    manager.select(S3)
+
+    manager.handleHostEnvelope({
+      rpcId: 'h' as never,
+      payload: { type: 'host/session-handover', predecessorId: S1, successorId: S2 },
+    })
+
+    expect(manager.selected).toBe(S3)
+  })
+})

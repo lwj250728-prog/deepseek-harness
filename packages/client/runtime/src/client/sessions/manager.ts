@@ -813,6 +813,24 @@ export class SessionManager {
         }
         return
       }
+      case 'host/session-handover': {
+        // The conversation continued elsewhere. Give the successor a list row
+        // first (selection requires one), inheriting the predecessor's grouping
+        // fields, then follow it silently when it is what the user is looking at.
+        const predecessor = this.summaries.find(candidate => candidate.sessionId === frame.predecessorId)
+        this.mergeSummary({
+          sessionId: frame.successorId,
+          updatedAt: Date.now(),
+          running: predecessor?.running ?? true,
+          blank: false,
+          ...predecessor?.cwd === undefined ? {} : { cwd: predecessor.cwd },
+          ...predecessor?.agentPreset === undefined ? {} : { agentPreset: predecessor.agentPreset },
+        })
+        if (this.selected === frame.predecessorId) {
+          this.select(frame.successorId)
+        }
+        return
+      }
       case 'host/session-removed': {
         const summary = this.summaries.find(candidate => candidate.sessionId === frame.sessionId)
         const durableSubagent = summary?.origin === 'subagent' || this.addresses.has(frame.sessionId)

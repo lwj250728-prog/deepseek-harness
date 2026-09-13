@@ -25,6 +25,7 @@ import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
+import z from '@deepseek-ai/schemastery'
 // Ambient Context augmentation: `ctx.workspaceRegistry`.
 import type {} from '@deepseek-ai/dsh-workspace'
 
@@ -50,10 +51,34 @@ export interface SessionHandoverNotice {
   readonly seedLength: number
 }
 
+/**
+ * Load-time diagnostic: proves the module was imported at all, which is a
+ * different question from whether `apply` ran (a plugin held back for a missing
+ * injected service never reaches apply, and a loader that never imports the
+ * package prints nothing anywhere).
+ */
+console.log(`[session-handover] module loaded (pid ${process.pid})`)
+
 export const name = 'session-handover'
 
 /** Services this plugin relies on. */
 export const inject = ['agents', 'agentPresets', 'workspaceRegistry']
+
+/**
+ * Plugin config schema.
+ *
+ * The loader validates a profile entry's `config` through this runtime schema —
+ * a plugin that declares only a TypeScript interface receives nothing usable,
+ * which silently disables it. Declaring the schema is therefore not just
+ * validation: it is what makes the entry's configuration reach `apply` at all.
+ */
+export const Config: z<Config> = z.object({
+  enabled: z.boolean().default(false),
+  compactionsPerSession: z.number().step(1).min(1).default(1),
+  archivePredecessor: z.boolean().default(true),
+  targetSessionIds: z.array(z.string()).default([]),
+  dryRun: z.boolean().default(false),
+})
 
 /** Plugin config. */
 export interface Config {
@@ -224,13 +249,25 @@ export function buildSuccessorSeed(
  * @returns a disposer removing every hook this plugin installed.
  */
 export function apply(ctx: Context, config: Config): () => void {
-  if (config.enabled !== true) return () => {}
+  console.log(`[session-handover] apply() reached: enabled=${String(config.enabled)} dryRun=${String(config.dryRun)}`)
+  if (config.enabled !== true) {
+    ctx.logger.info('[session-handover] disabled (config.enabled is not true); no-op')
+    return () => {}
+  }
   const threshold = Math.max(1, Math.floor(config.compactionsPerSession ?? 1))
   const archive = config.archivePredecessor ?? true
   const dryRun = config.dryRun ?? false
   const targets = config.targetSessionIds === undefined || config.targetSessionIds.length === 0
     ? undefined
     : new Set(config.targetSessionIds)
+
+  // Startup self-report: a deployment needs to see that the switch is armed
+  // (and how), not infer it from an absence of handovers.
+  ctx.logger.info(
+    `[session-handover] armed: threshold=${threshold} compaction(s), `
+    + `archivePredecessor=${String(archive)}, dryRun=${String(dryRun)}, `
+    + `targets=${targets === undefined ? 'all sessions' : String(targets.size)}`,
+  )
 
   /** Sessions past the threshold, waiting for a turn boundary they can be moved at. */
   const armed = new Set<SessionId>()

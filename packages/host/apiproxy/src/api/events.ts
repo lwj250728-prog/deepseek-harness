@@ -142,6 +142,13 @@ export type HostFrame =
   | { type: 'host/workspace-order-changed'; workspaceIds: WorkspaceView['workspaceId'][] }
   | { type: 'host/archived-sessions-changed'; archivedSessionIds: SessionId[] }
   /**
+   * One session continued its conversation in a fresh successor. The client
+   * moves the user silently when the predecessor is what it is currently
+   * showing; every other consumer can re-bind whatever it attached to the
+   * predecessor id.
+   */
+  | { type: 'host/session-handover'; predecessorId: SessionId; successorId: SessionId }
+  /**
    * One allowlisted host cordis event forwarded verbatim. The allowlist is
    * owned by `@deepseek-ai/dsh-api-remotes` (`API_REMOTE_FORWARDED_EVENTS`),
    * which is also the only control point over what a consumer can receive.

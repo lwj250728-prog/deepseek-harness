@@ -112,6 +112,21 @@ import {
 import type { SessionTailReadOptions } from '@deepseek-ai/dsh-session-persistence'
 import { canOpenNativePath, openNativePath, openNativeTextFile } from './native-path-opener.ts'
 
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /**
+     * One session handed its conversation to a fresh successor. Declared here
+     * as well as in the emitting plugin so the carrier can mint a client frame
+     * without depending on that plugin: the two declarations share one shape.
+     */
+    'session/handover'(payload: {
+      readonly predecessorId: SessionId
+      readonly successorId: SessionId
+      readonly seedLength: number
+    }): void
+  }
+}
+
 /** Page size when history is called without maxMessages. */
 const DEFAULT_MAX_MESSAGES = 50
 
@@ -3685,6 +3700,16 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           }),
           ctx.on('agent/error', ({ agent, error }: { agent: Agent; error: unknown }) => {
             queue.push(frame({ type: 'host/agent-error', sessionId: agent.id, message: errorChain(error) }))
+          }),
+          // A handover is a client-visible move: the frame lets the UI follow the
+          // conversation into its successor instead of leaving the user typing
+          // into a session nothing else is bound to any more.
+          ctx.on('session/handover', (notice) => {
+            queue.push(frame({
+              type: 'host/session-handover',
+              predecessorId: notice.predecessorId,
+              successorId: notice.successorId,
+            }))
           }),
           ctx.on('domain/changed', (change) => {
             if (change.domain !== 'workspace') return
