@@ -268,3 +268,42 @@ describe('config schema', () => {
     expect(Config({})).toMatchObject({ enabled: false, compactionsPerSession: 1, archivePredecessor: true })
   })
 })
+
+describe('arming survives a restart', () => {
+  it('hands over a session whose log was ALREADY due when the process started', async () => {
+    // The regression this covers: the arming decision used to live only in the
+    // plugin process, so a restart between the compaction and the turn boundary
+    // dropped the pending handover forever — the log said "compacted" while
+    // nothing was waiting to move the session.
+    const ctx = new Context()
+    const created: { sessionId: SessionId }[] = []
+    ctx.provide('agents', {
+      get: () => undefined,
+      create: vi.fn(async (input: { sessionId: SessionId }) => { created.push({ sessionId: input.sessionId }); return {} }),
+    } as never)
+    ctx.provide('agentPresets', {
+      resolve: async (id: string | undefined) => ({ id: id ?? 'standard' }),
+      mount: async () => {},
+    } as never)
+    ctx.provide('workspaceRegistry', {
+      resolveByPath: async () => undefined,
+      archiveSession: async () => {},
+    } as never)
+    // A live session that already carries a compaction record, exactly as a
+    // restarted process would find it.
+    const session = {
+      id: sid('session-due-at-boot'),
+      header: { version: 0, id: sid('session-due-at-boot'), createdAt: 1, cwd: '/work', agentPreset: 'standard' },
+      events: compactedLog(),
+    } as unknown as Session
+    ctx.provide('sessions', { list: () => [session], get: () => session } as never)
+
+    const notices: unknown[] = []
+    ctx.on('session/handover', payload => { notices.push(payload) })
+    const dispose = apply(ctx, { enabled: true, compactionsPerSession: 1 })
+
+    await vi.waitFor(() => { expect(notices).toHaveLength(1) })
+    expect(created).toHaveLength(1)
+    dispose()
+  })
+})

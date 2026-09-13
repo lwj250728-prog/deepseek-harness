@@ -377,29 +377,58 @@ export function apply(ctx: Context, config: Config): () => void {
 
   const eligible = (session: Session): boolean => targets === undefined || targets.has(session.id)
 
+  /**
+   * Whether this session is due to hand over, derived from its DURABLE log.
+   *
+   * The arming decision must never live only in this process: the compaction
+   * that qualifies a session is durable, but a restart in between (a deploy, a
+   * crash) would otherwise drop the session's pending handover forever — the
+   * log still says "compacted" while nothing is waiting to move it. Counting the
+   * records on the way in makes a restart a non-event.
+   * @param session - the live session to evaluate.
+   * @returns whether the session now qualifies.
+   */
+  const armIfDue = (session: Session): boolean => {
+    if (!eligible(session)) return false
+    const count = compactionCount(session.events)
+    if (count < threshold) return false
+    if (!armed.has(session.id)) {
+      armed.add(session.id)
+      report(`${session.id} carries ${count} compaction(s) (threshold ${threshold}); handing over at the next turn boundary`)
+    }
+    return true
+  }
+
+  // Sessions that were already qualified before this process started: a restart
+  // (or a compaction that landed while the plugin was disabled) must not strand
+  // a conversation the log already marked as due.
+  // The session store is optional here on purpose: a composition without it
+  // still hands over at the ordinary turn boundary, and a harness that omits it
+  // must not turn this plugin into a startup failure.
+  for (const session of ctx.sessions?.list?.() ?? []) {
+    if (armIfDue(session)) {
+      report(`${session.id} was already due at startup; handing over now`)
+      void handover(session)
+    }
+  }
+
   const disposeEvent = ctx.on('session/event', (session: Session, event: SessionEvent) => {
     if (!eligible(session)) return
     if (isCompactionRecord(event)) {
-      const count = compactionCount(session.events)
-      if (count >= threshold) {
-        armed.add(session.id)
-        report(
-          `${session.id} carries ${count} compaction(s) (threshold ${threshold}); `
-          + 'handing over at the next turn boundary',
-        )
-      }
+      armIfDue(session)
       return
     }
     if (event.type !== 'turn/end') return
-    if (!armed.has(session.id)) return
+    if (!armIfDue(session)) return
     void handover(session)
   })
 
   // A session armed by a compaction that happened while it was already idle
-  // (for example a model-free prune) still needs its move.
+  // (a model-free prune, or a handover stranded by a restart) still needs its
+  // move, and only the idle transition can supply it.
   const disposeStatus = ctx.on('agent/status', ({ agent, status }: { agent: Agent; status: string }) => {
     if (status !== 'idle') return
-    if (!armed.has(agent.session.id)) return
+    if (!armIfDue(agent.session)) return
     void handover(agent.session)
   })
 
