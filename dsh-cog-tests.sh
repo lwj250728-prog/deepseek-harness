@@ -8799,6 +8799,66 @@ r4 = run(build(True, True))
 assert r4.returncode == 2, "只登记了 restore 而池子没恢复, 判据没红(登记被当成了恢复)"
 print("恢复腿判据: 池仍干预⇒红 / 已恢复⇒绿 / 无记录⇒红 / 只登记未恢复⇒红")
 '
+# ── T220 "停驱"必须是被行为消费的状态, 而不是一句口头停止 ──
+# 起因(2026-09-13 11:2x, 用户指令"停止这个会话的驱动"): 驱动器(quiet-driver)一次只驱动**一个**目标会话
+# (`targetSessionId` + 运行时绑定文件), 所以"停驱"在实现上=**目标不是它** + **此后没有帧派给它**。
+# 但这两个条件目前只写在配置注释里, 没有任何判据守着 —— 一旦有人(或交接重绑)把它改回去, 我会在毫不知情的
+# 情况下重新被驱动(而"又被驱动了"这件事本身没有报警通道)。故: 停驱写成**声明 + 两条行为核验**:
+# ①驱动器当前生效目标不得是被停驱的会话; ②帧账本里该会话在停驱时刻之后不得再有帧。
+echo "[T220] 停驱须被行为消费(目标不是它 + 此后无帧)"
+t "被显式停驱的会话不得再成为驱动目标, 且此后不得再收到帧" python3 -c '
+import json, os, datetime
+D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+EXC = os.environ.get("DSH_QD_EXCLUSIONS") or os.path.join(D, "quiet-driver-exclusions.json")
+FRAMES = os.environ.get("DSH_QD_FRAMES") or os.path.join(D, "quiet-driver-frames.jsonl")
+TARGET = os.environ.get("DSH_QD_TARGET") or os.path.join(D, "quiet-driver-target.txt")
+CFG = os.environ.get("DSH_WEB_CONFIG") or os.path.expanduser("~/.dsh/profiles/web/cordis.patch.yml")
+TZ = datetime.timezone(datetime.timedelta(hours=8))
+def parse(ts):
+    if isinstance(ts, (int, float)) and ts > 1e12:
+        return datetime.datetime.fromtimestamp(ts / 1000, TZ)
+    if isinstance(ts, str) and ts[:2] == "20":
+        try: return datetime.datetime.fromisoformat(ts[:19]).replace(tzinfo=TZ)
+        except Exception: return None
+    return None
+assert os.path.exists(EXC), ("缺停驱声明 %s ⇒ \"停驱\"只剩口头状态(谁改回去都没人知道)" % EXC)
+decl = json.load(open(EXC, encoding="utf8"))
+excs = decl.get("exclusions") or []
+assert excs, "停驱声明是空的(声明存在但没有任何被停驱的会话)"
+# 驱动器**当前生效**的目标: 运行时绑定文件优先(与驱动器的读法一致), 其次配置里的起步值
+eff, src = None, "none"
+if os.path.exists(TARGET):
+    txt = (open(TARGET, encoding="utf8").read() or "").strip()
+    if txt: eff, src = txt, "target-file"
+if eff is None and os.path.exists(CFG):
+    import re
+    m = re.search(r"^\s*targetSessionId:\s*(\S+)\s*$", open(CFG, encoding="utf8").read(), re.M)
+    if m: eff, src = m.group(1).strip(), "profile-config"
+rows = []
+if os.path.exists(FRAMES):
+    for line in open(FRAMES, encoding="utf8"):
+        if line.strip():
+            try: rows.append(json.loads(line))
+            except Exception: pass
+bad = []
+for e in excs:
+    sid = str(e.get("sessionId") or "")
+    assert sid, "停驱条目缺 sessionId"
+    if eff == sid:
+        bad.append("%s 又被驱动器当成目标了(来源 %s) —— 停驱没有生效" % (sid, src))
+    since = parse(e.get("assertNoFramesAfter"))
+    if since is None:
+        bad.append("%s 的停驱条目缺 assertNoFramesAfter(没有停驱时刻就无法核验\"此后无帧\")" % sid)
+        continue
+    after = [(parse(r.get("ts")), r.get("kind")) for r in rows if str(r.get("session") or "") == sid]
+    after = [(t, k) for t, k in after if t and t > since]
+    if after:
+        bad.append("%s 停驱后仍收到 %d 帧(最后一帧 %s, kind=%s)"
+                   % (sid, len(after), max(t for t, _ in after).strftime("%m-%d %H:%M"), after[-1][1]))
+assert not bad, "停驱未被行为消费: " + "; ".join(bad)
+print("停驱核验: %d 条声明; 驱动器当前目标 %s(来源 %s) ≠ 被停驱会话; 帧账本(共 %d 行)中停驱后 0 帧"
+      % (len(excs), eff, src, len(rows)))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
