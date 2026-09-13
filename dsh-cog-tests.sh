@@ -9644,6 +9644,69 @@ assert beh and all(x.get("waited_enough") for x in beh), "行为半没跑或没�
 print("池写者锁: 合成世界抓住漏锁+只请求共享锁 / 真世界 %d 个写者全持 EX / 行为等锁 %.2fs"
       % (len(writers), beh[0].get("waited")))
 '
+# ── T235 编辑→锚点检查的接线(tp-203) ──
+# 由来: 2026-09-14 00:2x 我给 dsh-mutant-gate.py 加 in_flight() 时把 leaks.append 的缩进从 16 空格降到 12 空格,
+# T232 探针与 deg-t232-gateblind 的锚点同时失效; 而**为此造的判据当时就正红着**, 只是没人跑它 —— 判据不缺, 缺接线。
+# 判据: ①目标集合取自登记簿(新登记自动纳入, 不得硬编码); ②编辑**非**目标文件不得触发(噪音会让接线被绕过);
+# ③编辑目标文件必须触发; ④制造锚点漂移后必须判红(今天它一声不响)。
+echo "[T235] 编辑→锚点检查的接线"
+t "编辑被变异的目标文件后必须自动跑锚点检查: 集合取自登记簿 + 漂移必红 + 非目标不触发" python3 -c '
+import json, os, subprocess, sys, tempfile
+R = os.path.expanduser("~/dsh-fork")
+ECK = os.path.join(R, "dsh-edit-check.sh")
+PB = os.path.join(R, "dsh-probe-binding.py")
+Q, D1, D3 = chr(39), chr(34), chr(34) * 3
+T = tempfile.mkdtemp(prefix="t235-")
+COG = os.path.join(T, "cog")
+os.makedirs(COG)
+TGT = os.path.join(T, "tgt.py")
+PROBE = os.path.join(T, "probe.sh")
+SUITE = os.path.join(T, "suite.sh")
+GF = os.path.join(T, "gf.json")
+BN = os.path.join(COG, "probe-bindings.json")
+FRAG = "def only_once():\n    return 7\n"
+NAME = "合成判据"
+
+
+def w(p, t):
+    with open(p, "w", encoding="utf8") as fh:
+        fh.write(t)
+
+
+def world():
+    w(TGT, "import sys\n" + FRAG + "\n")
+    w(PROBE, "#! /usr/bin/env bash\nNAME=" + D1 + NAME + D1 + "\nSRC=" + D1 + TGT + D1
+      + "\npython3 - " + D1 + "$SRC" + D1 + " <<" + Q + "MK" + Q + "\nold = " + D3 + FRAG + D3 + "\nMK\n")
+    w(SUITE, "t " + D1 + NAME + D1 + " python3 -c " + Q + "\nimport os\nprint(os.environ.get(" + D1
+      + "DSH_X" + D1 + "))\n" + Q + "\n")
+    w(GF, json.dumps({"guards": [{"guard": "TX", "mustFire": [{"assertion": NAME, "command": "bash " + PROBE,
+        "expectedExit": 1, "arms": {"mutant": 1, "clean": 0}}]}]}, ensure_ascii=False))
+    w(os.path.join(COG, "synthetic-world-mutants.json"), json.dumps({"entries": []}, ensure_ascii=False))
+    subprocess.run([sys.executable, PB, "--record", "--guard-fire", GF, "--bindings", BN, "--suite", SUITE],
+                   capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=COG), timeout=300)
+
+
+def eck(*args):
+    r = subprocess.run(["bash", ECK] + list(args), capture_output=True, text=True,
+                       env=dict(os.environ, DSH_COG_DIR=COG), timeout=1800)
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+world()
+rc, out = eck("--show-targets")
+assert rc == 0 and os.path.abspath(TGT) in out, "登记簿里的锚点目标没被自动纳入集合(硬编码?): %s" % out[-300:]
+other = os.path.join(T, "other.py")
+w(other, "x = 1\n")
+rc, out = eck(other)
+assert rc == 0 and "锚点目标" not in out, "编辑非目标文件竟然触发了锚点检查(噪音会让接线被绕过): %s" % out[-300:]
+rc, out = eck(TGT)
+assert rc == 0 and "锚点目标" in out, "编辑锚点目标时没触发检查: %s" % out[-300:]
+w(TGT, "import sys\n")
+rc, out = eck(TGT)
+assert rc != 0 and "锚点绑定检查判红" in out, ("锚点漂移后 edit-check 仍不红 ⇒ 接线没落地(exit=%d): %s"
+                                            % (rc, out[-300:]))
+print("tp-203 接线: 集合取自登记簿(自动纳入) / 非目标不触发 / 目标触发且未漂移通过 / 漂移必红")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
