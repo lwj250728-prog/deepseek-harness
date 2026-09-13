@@ -386,6 +386,25 @@ def main() -> int:
         % len(cl_closed),
         '', '## F 本期**未证**项(不得被上面的计数盖掉)', '']
     md += ['- %s' % u for u in unproven]
+
+    # ── G 外部分(帧要求: 外部分与反假设必须进常驻段; 由 stage-summary-review.py 记录, 这里只渲染) ──
+    # 2026-09-14 补: 此前 stage-summary.md 的 A~F 段**不含外部分**, 于是"外部观察打分"这件事
+    # 在常驻段里不可见 —— 读者只看得到自己算的底座。
+    ext_rows = load('stage-summary-external.jsonl') or []   # 它不在 REQUIRED 里, 必须单独载入
+    ext = ext_rows[-1] if ext_rows else None
+    md += ['', '## G 外部分(独立上下文评审, 记录于 stage-summary-external.jsonl; 本条由脚本渲染)', '']
+    if ext:
+        dims = ext.get('scores') or ext.get('dimensions') or {}
+        md += ['- 均分 **%s** (评审者: %s; 记录于 %s)' % (ext.get('meanScore') if ext.get('meanScore') is not None else ext.get('score'), ext.get('reviewer') or '?',
+                                                         str(ext.get('at') or ext.get('ts') or '?')[:19]),
+               '- 维度: %s' % (' / '.join('%s %s' % (k, dims.get(k)) for k in
+                                          ('artifactTruth', 'caliberHonesty', 'goalSubstance',
+                                           'selfCorrection', 'anchorConsistency')) if dims else '(缺维度分)'),
+               '- **最强反假设**: %s' % (ext.get('counterHypothesis') or '(缺)'),
+               '- **下期证伪信号**: %s' % (ext.get('falsifierNextPeriod') or '(缺)'),
+               '- 无法核实项: %s' % ('; '.join(ext.get('unverifiable') or []) or '(缺)')]
+    else:
+        md += ['- (本期无外部分记录 —— 按帧要求应做一次独立评审)']
     text = '\n'.join(md) + '\n'
     if not args.dry_run:
         with open(os.path.join(D, 'stage-summary.md.tmp'), 'w', encoding='utf8') as fh:

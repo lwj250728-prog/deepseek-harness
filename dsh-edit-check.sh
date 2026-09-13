@@ -38,6 +38,9 @@ try:
         out.add(os.path.abspath(os.path.join(os.path.expanduser('~/dsh-fork'), mf)))
 except Exception:
     pass
+# 排除**非变异目标**的文件: 锚点提取会把"片段碰巧在某个文件里只出现一次"的也算进来(已记的假阳性模式) ——
+# 实测后果: dsh-cog-tests.sh 被算成锚点目标 ⇒ 编辑套件时触发锚点检查 ⇒ T-edit 组的「helper放行好文件」判红。
+out = {p for p in out if os.path.basename(p) not in {'dsh-cog-tests.sh', 'dsh-edit-check.sh'}}
 print('\n'.join(sorted(out)))
 PY
 )
