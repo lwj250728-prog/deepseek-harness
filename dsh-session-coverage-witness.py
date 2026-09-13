@@ -48,9 +48,12 @@ SPECS = (
     'packages/session/session-handover/tests/handover.spec.ts',
     'packages/client/runtime/tests/manager.client.spec.ts',
     'packages/session/session-handover/tests/invariant.spec.ts',
+    # tp-195(2026-09-13 15:2x): 无界回退分支的判据 —— 缺它有界读能力的 provider 时, readTail 必须整份返回且
+    # truncated=false; 实测把 truncated 谎报成 true ⇒ 本 spec 2 failed(这一刀此前穿过全部既有测试)。
+    'packages/session/session-persistence-jsonl/tests/tail-fallback.spec.ts',
 )
 WATCHED = SRC + SPECS
-MIN_PASSED = 94
+MIN_PASSED = 97
 MUTANT_FILE = 'packages/api/remotes/src/agent-lookup.ts'
 MUTANT_OLD = """    throw new ApiRemoteSessionNotFound(`session "${sessionId}" not found`)
   }
