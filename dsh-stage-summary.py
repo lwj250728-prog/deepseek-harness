@@ -79,6 +79,11 @@ def main() -> int:
     ap.add_argument('--hours', type=float, default=12.0)
     ap.add_argument('--since', default=None)
     ap.add_argument('--json', action='store_true')
+    # 2026-09-13 12:1x(外部评审逼出的设计缺陷): 本脚本原来**只有"算完就落盘"一条路** —— 落一行账、
+    # 重写一次 md。于是任何外部评审者想"重跑一遍核对数字"就必须**改动被评审对象的状态**(那位评审者
+    # 因此刻意不跑, 改用独立复算, 并把这一点写进了它的报告)。这就把最强的验证形式(自己重跑对账)关掉了。
+    # 故加 --dry-run: 只算、只打印, 不写账本、不重写 md。
+    ap.add_argument('--dry-run', action='store_true', help='只算并打印, 不落账、不重写 md(供外部核对)')
     args = ap.parse_args()
 
     data = {}
@@ -240,8 +245,11 @@ def main() -> int:
         'unproven': unproven,
         'caliber': PARKED_NOTE,
     }
-    with open(os.path.join(D, 'stage-summary.jsonl'), 'a', encoding='utf8') as fh:
-        fh.write(json.dumps(row, ensure_ascii=False) + '\n')
+    if not args.dry_run:
+        with open(os.path.join(D, 'stage-summary.jsonl'), 'a', encoding='utf8') as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + '\n')
+    else:
+        print('[stage-summary] --dry-run: 未落账、未重写 md(供外部核对; 本期底座如下)')
 
     md = ['# 阶段总结 %s → %s (%.1fh)' % (start.strftime('%m-%d %H:%M'), now.strftime('%m-%d %H:%M'), row['hours']), '',
           '## A 帧活动(三分口径)', '',
@@ -276,11 +284,13 @@ def main() -> int:
         '', '## F 本期**未证**项(不得被上面的计数盖掉)', '']
     md += ['- %s' % u for u in unproven]
     text = '\n'.join(md) + '\n'
-    with open(os.path.join(D, 'stage-summary.md.tmp'), 'w', encoding='utf8') as fh:
-        fh.write(text)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(os.path.join(D, 'stage-summary.md.tmp'), os.path.join(D, 'stage-summary.md'))
+    if not args.dry_run:
+        with open(os.path.join(D, 'stage-summary.md.tmp'), 'w', encoding='utf8') as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(os.path.join(D, 'stage-summary.md.tmp'), os.path.join(D, 'stage-summary.md'))
+    print('(md 渲染稿见上; --dry-run 不写盘)')
     print(text)
     if args.json:
         print(json.dumps(row, ensure_ascii=False))
