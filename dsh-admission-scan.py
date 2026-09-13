@@ -129,6 +129,82 @@ class BM25:
         return {'targets': len(targets), 'hit': hit, 'rate': hit / len(targets)}
 
 
+def stale_tests(rows, ns=(0, 50, 100, 200, 400), cap=150):
+    """cl-053 §3b/3c **陈旧元素污染**复算(2026-09-13 12:4x, 由 cl-296.nextAction ① 驱动)。
+
+    原实验(09-09, 130 条库)的两张表:
+      (b) 池 = 本情境 150 个 IDF 元素 + N 个来自**其他情境**的陈旧元素 → 76/78/73/76/**69**(N=400 才掉);
+      (c) 容量**固定 150**、陈旧元素只能挤入剩余空间 → 50/100/200 个陈旧元素时命中恒为 76%。
+    结论曾是"陈旧污染自限 ⇒ 退出策略不需要时间衰减机制"。本函数把它放到**当前库**上复算, 判据先写死:
+      · (b) 若 N=400 相对 N=0 的降幅 >5pp ⇒ 污染**不自限**(旧结论作废, 需要衰减或更强的挤出规则);
+      · (c) 若各 N 相对 N=0 的偏差 >±2pp ⇒ "只剩剩余空间时自限"不成立。
+
+    口径与前面的表一致(单字 BM25 · 全文查询 · 留一法 top-1 同链), 陈旧元素取自**异链**行的全文;
+    为保持确定性, 陈旧元素按 IDF 降序取(不随机抽样)。
+    → ({'b': [(N, rate, targets)], 'c': [...], 'room': 有剩余空间的目标数/目标总数}, 说明)
+    """
+    docs = [full_text(r) for r in rows]
+    bm = BM25(docs, chars)
+    elems = [chars(d) for d in docs]
+    chains = [r.get('chainId') for r in rows]
+
+    def foreign_pool(i):
+        acc = set()
+        for j, e in enumerate(elems):
+            if j != i and chains[j] != chains[i]:
+                acc.update(e)
+        return sorted(acc, key=lambda w: (-bm.idf(w), w))
+
+    out_b, out_c = [], []
+    room_ok = 0
+    targets = 0
+    for n in ns:
+        hitb = totb = 0
+        hitc = totc = 0
+        room_ok = 0
+        targets = 0
+        for i in range(len(rows)):
+            if not chains[i] or not any(j != i and chains[j] == chains[i] for j in range(len(rows))):
+                continue
+            targets += 1
+            own = list(dict.fromkeys(elems[i]))
+            own_top = sorted(own, key=lambda w: (-bm.idf(w), w))[:cap]
+            stale = foreign_pool(i)[:n] if n else []
+            # (b) 本情境 IDF 前150 + N 个陈旧元素(总量可超过 cap)
+            b = _top1_is_same_chain(bm, rows, i, set(own_top) | set(stale))
+            if b is not None:
+                totb += 1
+                hitb += 1 if b else 0
+            # (c) 容量固定 cap: 陈旧元素只能填**剩余空间**
+            room = cap - len(own_top)
+            if room > 0:
+                room_ok += 1
+                c = _top1_is_same_chain(bm, rows, i, set(own_top) | set(stale[:room]))
+                if c is not None:
+                    totc += 1
+                    hitc += 1 if c else 0
+        out_b.append((n, hitb / totb if totb else float('nan'), totb))
+        out_c.append((n, hitc / totc if totc else float('nan'), totc))
+    return {'b': out_b, 'c': out_c, 'room': room_ok, 'targets': targets}, \
+        '库 %d 条, 目标 %d; 有剩余空间(own<%d)的目标 %d' % (len(rows), targets, cap, room_ok)
+
+
+def _top1_is_same_chain(bm, rows, i, pool):
+    """给第 i 行一个查询池, 看留一法 top-1 是否落在同链 → True/False/None(池空)。"""
+    if not pool:
+        return None
+    best_j, best_s = None, float('-inf')
+    for j in range(len(rows)):
+        if j == i:
+            continue
+        sc = bm.score(pool, j)
+        if sc > best_s:
+            best_s, best_j = sc, j
+    if best_j is None:
+        return None
+    return rows[best_j].get('chainId') == rows[i].get('chainId')
+
+
 def bootstrap(rows, seeds=(1, 2, 3, 4, 5), frac=0.8):
     """稳定性检查(2026-09-13 12:2x, 由 cl-296.nextAction ① 驱动): 本脚本是**确定性**的, 所以"再跑一遍"
     只会得到同一串数字 —— 那不叫稳定性。真正要回答的是"截断劣势是不是单次抽样的偶然": 故对库做
@@ -247,6 +323,35 @@ def main() -> int:
         print('  判读: cl-053 在该档是「保留最近 73%% > 内容词 69%%」; 是否仍成立以上面的数说话。')
 
     print('\n未复算(明确标注, 不假装覆盖): 陈旧元素污染测试(cl-053 §3b/3c) —— 需跨情境注入陈旧元素, 本脚本不做。')
+    if '--stale' in sys.argv:
+        st, note = stale_tests(rows)
+        print('\n=== cl-053 §3b/3c 陈旧元素污染复算(%s) ===' % note)
+        print('(b) 本情境 IDF 前150 + N 个异链陈旧元素:')
+        base_b = None
+        for n, rate, tot in st['b']:
+            if n == 0:
+                base_b = rate
+            print('   N=%-4d 命中率 %5.1f%%  (目标 %d)%s'
+                  % (n, rate * 100, tot, '' if n == 0 else '  相对 N=0: %+.1fpp' % (100 * (rate - (base_b or rate)))))
+        worst = min(rate for n, rate, _ in st['b'] if n == 400) if any(n == 400 for n, _, _ in st['b']) else None
+        if worst is not None and base_b is not None:
+            drop = 100 * (base_b - worst)
+            print('   判读: N=400 相对 N=0 降 %.1fpp ⇒ %s(cl-053: 76%%→69%%, 掉 7pp 但仍"可用")'
+                  % (drop, '**>5pp: 污染不自限, 旧结论作废, 需要衰减/更强挤出**' if drop > 5
+                     else '≤5pp: 与 cl-053 同向(自限)'))
+        print('(c) 容量固定 150, 陈旧元素只填剩余空间:')
+        base_c = None
+        for n, rate, tot in st['c']:
+            if n == 0:
+                base_c = rate
+            print('   N=%-4d 命中率 %5.1f%%  (有空间的目标 %d)%s'
+                  % (n, rate * 100, tot, '' if n == 0 else '  相对 N=0: %+.1fpp' % (100 * (rate - (base_c or rate)))))
+        devs = [abs(100 * (rate - (base_c or rate))) for n, rate, _ in st['c'] if n != 0]
+        if devs:
+            print('   判读: 各 N 相对 N=0 的最大偏差 %.1fpp ⇒ %s(cl-053: 恒 76%%, 即偏差≈0)'
+                  % (max(devs), '"仅剩剩余空间"时自限 **不成立**' if max(devs) > 2 else '与 cl-053 同向(自限)'))
+        print('   覆盖说明: 本库查询元素去重数中位已 >150, 只有 %d/%d 个目标真有"剩余空间" ⇒ (c) 的样本比原实验薄, 读数要按这个分母读。'
+              % (st['room'], st['targets']))
     if '--bootstrap' in sys.argv:
         gaps, note = bootstrap(rows)
         print('\n=== 稳定性(截断劣势是不是单次抽样偶然): %s ===' % note)
