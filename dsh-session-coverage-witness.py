@@ -5,10 +5,11 @@
 T28 的原判据只认**文本引用**(套件里出现该文件路径或 basename) —— 那正好奖励假覆盖: 加一句注释就能变绿。
 本工具把它换成**执行型见证**, 并在见证里同时记下**可证伪性**:
 
-  · `--write`: ①在 `systemd-run --scope -p MemoryMax=…`(纪律: 所有复刻/测试跑一律带硬限)里跑三个文件对应的
-    四个 spec, 要求**全绿**; ②**注入一个真变异**(把 agent-lookup 的 `ApiRemoteSessionNotFound` 换成普通 `Error`,
-    带备份与恢复), 再跑一次, 要求**必须转红** —— 只有"能红"的测试才算覆盖; ③把 7 个文件(3 个 src + 4 个 spec)
-    的 sha256、通过数、以及 `falsifiable: true` 写进世界目录的见证文件。
+  · `--write`: ①在 `systemd-run --scope -p MemoryMax=…`(纪律: 所有复刻/测试跑一律带硬限)里跑**六个** src 文件
+    对应的五个 spec, 要求**全绿**(tp-194 后为 94 例); ②**注入一个真变异**(把 agent-lookup 的
+    `ApiRemoteSessionNotFound` 换成普通 `Error`, 带备份与恢复), 再跑一次, 要求**必须转红** —— 只有"能红"的测试
+    才算覆盖; ③把 10 个文件(6 个 src + 4 个 spec... 实为 6 src + 5 spec = 11)的 sha256、通过数、以及
+    `falsifiable: true` 写进世界目录的见证文件。
   · `--check`(套件里跑这条, 便宜): 见证必须存在、`falsifiable` 为真、通过数达标、**且 7 个文件的 sha256 与
     见证一致** —— 任何 src/spec 在见证之后改过 ⇒ 判红("改了但没有在改动之后重新核验")。
 
@@ -33,15 +34,23 @@ SRC = (
     'packages/api/remotes/src/agent-lookup.ts',
     'packages/client/runtime/src/client/sessions/manager.ts',
     'packages/host/apiproxy/src/api-proxy.ts',
+    # tp-194 追加(2026-09-13 13:4x): 三个 session/* 文件, 逐个用**变异法**证明覆盖后才纳入 ——
+    # format.ts(encodeSegment 去掉空串拒绝 ⇒ 2 failed)与 coordinator.ts(主路径谎报 truncated ⇒ 2 failed)
+    # 原本就有覆盖; invariant.ts **原本没有覆盖**(把 apply 改成不注册, 整个测试车道全绿) ⇒ 补了
+    # tests/invariant.spec.ts, 并验过它对"注册错包名/不注册"两种变异都会转红。
+    'packages/session/session-persistence-jsonl/src/format.ts',
+    'packages/session/session-persistence/src/coordinator.ts',
+    'packages/session/session-handover/src/invariant.ts',
 )
 SPECS = (
     'packages/api/remotes/tests/agent-lookup.spec.ts',
     'packages/host/apiproxy/tests/api-proxy-cold.spec.ts',
     'packages/session/session-handover/tests/handover.spec.ts',
     'packages/client/runtime/tests/manager.client.spec.ts',
+    'packages/session/session-handover/tests/invariant.spec.ts',
 )
 WATCHED = SRC + SPECS
-MIN_PASSED = 93
+MIN_PASSED = 94
 MUTANT_FILE = 'packages/api/remotes/src/agent-lookup.ts'
 MUTANT_OLD = """    throw new ApiRemoteSessionNotFound(`session "${sessionId}" not found`)
   }
@@ -125,7 +134,8 @@ def write_witness() -> int:
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, p)
-    print('[witness] 已记录: %d passed, 变异后 %d failed(可证伪), 7 个文件哈希已入册 → %s' % (passed, mfailed, p))
+    print('[witness] 已记录: %d passed, 变异后 %d failed(可证伪), %d 个文件哈希已入册 → %s'
+          % (passed, mfailed, len(WATCHED), p))
     return 0
 
 
@@ -148,8 +158,8 @@ def check() -> int:
         for x in problems:
             print('[witness] **判红**: %s' % x, file=sys.stderr)
         return 1
-    print('[witness] 覆盖见证有效: %d passed, 可证伪=true, 7 个文件哈希一致(记于 %s)'
-          % (w.get('passed'), str(w.get('at'))[:19]))
+    print('[witness] 覆盖见证有效: %d passed, 可证伪=true, %d 个文件哈希一致(记于 %s)'
+          % (w.get('passed'), len(WATCHED), str(w.get('at'))[:19]))
     return 0
 
 
