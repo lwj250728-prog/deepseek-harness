@@ -9878,6 +9878,65 @@ print("改动覆盖(行为): %d 包改动 / 跑了 %d 个 spec / 失败 %d 个(�
 if failing:
     print("  已知失败(冻结, 留给归属方): %s" % ", ".join(os.path.basename(x) for x in failing))
 '
+# ── T238 变异复原必须保持**元数据**(tp-205) ──
+# 今晚 T159「src 不得比 lib 新」假红 3 小时的根因: 探针变异后复原把目标文件 mtime 推新, 而内容 git diff 为空。
+# 判据: 抽样跑探针(声明式样本, 最便宜的 5 条) ⇒ 目标文件跑前跑后的 **sha256 必须复原一致, 且 mtime_ns 必须不变**。
+# 修法在**介入层**(dsh-mutation-lock.py 跑完把 mtime 还回去), 而不是逐条改探针 —— 实测 cp -p 那轮只盖了 bash 风格,
+# T229/T230/T232/T233 用 python 重写复原 ⇒ 照样推新(本判据一上线就抓到了这 4 条)。
+echo "[T238] 变异复原的元数据保持"
+t "变异复原必须保持元数据: 跑探针前后 sha256 复原一致且 mtime_ns 不变" python3 -c '
+import hashlib, importlib.util, json, os, re, subprocess
+ROOT = os.path.expanduser("~/dsh-fork")
+WRAP = os.path.join(ROOT, "dsh-mutation-lock.py")
+GF = os.path.expanduser("~/.dsh/cognitive-pipeline/guard-fire.json")
+# 声明式样本: 按**实测耗时**取最便宜的几条(1s~11s), 全量 64 条太贵 —— 样本本身是声明, 理由写在注释里
+SAMPLE = ["T232", "T235", "T233", "T230", "T229"]
+
+
+def meta(p):
+    st = os.stat(p)
+    with open(p, "rb") as fh:
+        h = hashlib.sha256(fh.read()).hexdigest()
+    return (st.st_mtime_ns, st.st_size, h)
+
+
+gf = json.load(open(GF, encoding="utf8"))
+cmds = {}
+for g in gf.get("guards") or []:
+    if g.get("guard") not in SAMPLE:
+        continue
+    for mf in (g.get("mustFire") or []):
+        if mf.get("command"):
+            cmds.setdefault(g["guard"], mf["command"])
+assert len(cmds) >= 5, "样本探针不足 5 条(实际 %d 条: %s)" % (len(cmds), sorted(cmds))
+spec = importlib.util.spec_from_file_location("ml", WRAP)
+ml = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ml)
+viol, checked, targets_n = [], 0, 0
+for gid, cmd in sorted(cmds.items()):
+    m = re.search(r"(/\S+?\.sh)", cmd)
+    probe = m.group(1) if m else ""
+    tgs = [t for t in ml.probe_targets(probe)] if probe else []
+    if not tgs:
+        continue
+    checked += 1
+    targets_n += len(tgs)
+    before = {t: meta(t) for t in tgs}
+    subprocess.run(["python3", WRAP, "--probe", probe, "--shell", cmd],
+                   capture_output=True, text=True, timeout=1800)
+    after = {t: meta(t) for t in tgs}
+    for t in tgs:
+        b, a = before[t], after[t]
+        if b[2] != a[2]:
+            viol.append("%s: %s 的内容没复原(sha256 变了)" % (gid, os.path.basename(t)))
+        elif b[0] != a[0]:
+            viol.append("%s: %s 的 mtime 被推新(%s → %s)" % (gid, os.path.basename(t), b[0], a[0]))
+assert checked >= 4, "真正比对到的探针只有 %d 条(解析不出目标的不算)" % checked
+assert not viol, ("变异复原没有保持元数据/内容: %s —— 正解是复原用 cp -p(或不碰 mtime); 否则一切基于 mtime 的判据"
+                  "(如 T159 src 比 lib 新)会被自己的变异机制污染成假红" % "; ".join(viol[:4]))
+print("变异复原的元数据保持: 样本 %d 条探针 / 比对 %d 条 / 目标文件 %d 个 —— sha256 与 mtime_ns 全部不变"
+      % (len(cmds), checked, targets_n))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

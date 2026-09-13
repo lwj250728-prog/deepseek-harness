@@ -153,9 +153,39 @@ def main() -> int:
         print('%s 已按文件加锁 %d 个: %s' % (TAG, len(targets), ', '.join(os.path.basename(t) for t in targets)),
               file=sys.stderr)
 
+    # **元数据保管**(tp-205/T238): 介入层拥有整个变异窗口, 所以由它负责"跑完之后把 mtime 还回去"。
+    # 为什么必须在这里做: 探针的复原手法五花八门(`cp` / python 重写 / `mv` 回来), 逐个改既漏又脆
+    # (实测: `cp -p` 那轮只盖了 bash 风格的探针, T229/T230/T232/T233 用 python 重写复原 ⇒ mtime 被推新)。
+    # 而**一切基于 mtime 的判据**(如 T159「src 不得比 lib 新」)会被这种"改过又还原"污染成假红 —— 今晚实测红了 3 小时。
+    snaps = {}
+    for t in targets:
+        try:
+            st = os.stat(t)
+            with open(t, 'rb') as fh:
+                snaps[t] = (st.st_atime_ns, st.st_mtime_ns, fh.read())
+        except Exception:
+            pass
+
+    def _restore_meta():
+        for t, (at, mt, data) in snaps.items():
+            try:
+                with open(t, 'rb') as fh:
+                    same = fh.read() == data
+                if not same:
+                    print('%s 警告: %s 的内容在跑完后**与跑前不一致**(探针没复原?) —— 元数据不还, 免得掩盖真改动'
+                          % (TAG, os.path.basename(t)), file=sys.stderr)
+                    continue
+                st = os.stat(t)
+                if st.st_mtime_ns != mt or st.st_atime_ns != at:
+                    os.utime(t, ns=(at, mt))
+            except Exception:
+                pass
+
     if args.shell is not None:
         try:
-            return subprocess.run(['bash', '-lc', args.shell]).returncode
+            rc = subprocess.run(['bash', '-lc', args.shell]).returncode
+            _restore_meta()
+            return rc
         except Exception as exc:
             print('%s --shell 执行失败: %s' % (TAG, exc), file=sys.stderr)
             return OOB_EXIT
@@ -163,7 +193,9 @@ def main() -> int:
     if not cmd:
         return 0
     try:
-        return subprocess.run(cmd).returncode
+        rc = subprocess.run(cmd).returncode
+        _restore_meta()
+        return rc
     except FileNotFoundError as exc:
         print('%s 命令不存在: %s' % (TAG, exc), file=sys.stderr)
         return OOB_EXIT

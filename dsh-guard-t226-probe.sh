@@ -19,7 +19,7 @@ if [ "${DSH_PROBE_CLEAN:-}" = "1" ]; then
 fi
 
 BAK=$(mktemp); cp "$TARGET" "$BAK" || exit 3
-trap 'cp "$BAK" "$TARGET"; rm -f "$BAK"' EXIT
+trap 'cp -p "$BAK" "$TARGET"; rm -f "$BAK"' EXIT   # -p 保留 mtime: 复原推新时间戳会污染一切基于 mtime 的判据(tp-205)
 printf '\n// MUTANT: 改动后未重跑见证\n' >> "$TARGET"
 if python3 "$RUNNER" --name "$NAME" >/dev/null 2>&1; then
   echo "改了被监视文件却没重跑见证, 判据仍判绿 —— '改动之后跑过'这条并没有被核对" >&2
