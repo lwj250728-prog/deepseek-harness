@@ -121,6 +121,29 @@ export interface Config {
    * blocks. When the review is skipped or fails, the raw blocks inject as
    * today. See {@link ReviewConfig}. */
   review?: ReviewConfig
+  /** cl-351: **经验链的检索与服务**(树的入口)。此前链只有"给定 chainId 才渲染"
+   * 的 API(`chainTreeExpose`), 没有任何"从情境里找到它"的路, 也没有调用者 ⇒
+   * 7 条链的 citedCount/hitCount 恒为 0(不是"没人要", 是"从未被看见")。开启后:
+   * 按**成员相似度**给链打分(与经验检索同口径, 不额外调用 embedding), 过阈则把该链的
+   * 子树文本作为一段注入, 并把 chainId 写进注入记录 —— 结算侧早已会
+   * `foldChainCitation`, 于是链的实测效用账本第一次开始累积。同一会话内同一条链
+   * 不再重复注入, 文本有字符上限。 */
+  chain?: ChainInjectionConfig
+}
+
+/** Chain retrieval/serving sub-configuration (cl-351). */
+export interface ChainInjectionConfig {
+  /** Master switch (default true — a declared mechanism nobody turns on is the
+   * exact anti-pattern this subsystem fights; the live profile states it too). */
+  enabled?: boolean
+  /** Minimum member similarity for a chain to be served (default 0.4, i.e. the
+   * same bar as experiences). */
+  minSimilarity?: number
+  /** Subtree depth handed to `chainTreeExpose` (default 1 = the chain plus its
+   * direct sub-goal chains). */
+  depth?: number
+  /** Hard character cap on the rendered subtree (default 900). */
+  maxChars?: number
 }
 
 /** Pre-input review sub-configuration. */
@@ -157,6 +180,14 @@ export const Config: z<Config> = z.object({
     ledgerPath: z.string().default('~/.dsh/cognitive-pipeline/injections.jsonl'),
   }).default({ enabled: false, delta: 0.075, ledgerPath: '~/.dsh/cognitive-pipeline/injections.jsonl' }),
   minSimilarity: z.number().min(0).max(1).default(0.4),
+  /** cl-351: 经验链的检索/服务(树的入口)。默认**开启** —— 声明了却没人打开的机制,
+   *  正是这块子系统一直在对抗的那个反模式; 活配置里也显式写一遍。 */
+  chain: z.object({
+    enabled: z.boolean().default(true),
+    minSimilarity: z.number().min(0).max(1).default(0.4),
+    depth: z.number().step(1).min(0).max(5).default(1),
+    maxChars: z.number().step(1).min(200).max(4000).default(900),
+  }).default({ enabled: true, minSimilarity: 0.4, depth: 1, maxChars: 900 }),
   failureThresholdFactor: z.number().min(0).max(1).default(0.6),
   failureTopK: z.number().step(1).min(1).max(10).default(3),
   contextDepth: z.number().step(1).min(1).max(20).default(4),
@@ -211,6 +242,8 @@ export interface ResolvedConfig {
   readonly actionFrameMarginBoost: number
   readonly triggerBoost: number
   readonly review: ResolvedReviewConfig
+  /** cl-351: 链检索/服务(默认开启, 见 Config.chain)。 */
+  readonly chain: { readonly enabled: boolean, readonly minSimilarity: number, readonly depth: number, readonly maxChars: number }
 }
 
 /** Resolved pre-input review configuration. */
@@ -255,6 +288,12 @@ export function resolveConfig(config: Config): ResolvedConfig {
     establishedSessionTurns: config.establishedSessionTurns ?? 20,
     actionFrameMarginBoost: config.actionFrameMarginBoost ?? 0.08,
     triggerBoost: config.triggerBoost ?? 0.15,
+    chain: Object.freeze({
+      enabled: config.chain?.enabled ?? true,
+      minSimilarity: config.chain?.minSimilarity ?? 0.4,
+      depth: config.chain?.depth ?? 1,
+      maxChars: config.chain?.maxChars ?? 900,
+    }),
     review: Object.freeze({
       enabled: review.enabled ?? false,
       provider: review.provider ?? 'spawn',
@@ -724,6 +763,81 @@ function referenceBlock(
   })
 }
 
+/**
+ * cl-351: find the chain whose MEMBERS best match the situation — the retrieval
+ * key chains never had. Before this, `chainTreeExpose` required the caller to
+ * already know a chainId, so no code path could ever discover a chain and the
+ * whole table (7 chains, all consolidated, all with a distilled principle) sat
+ * unreachable: citedCount/hitCount stayed 0 for every chain.
+ *
+ * Scoring mirrors the experience path exactly (same vectors, same cosine, no
+ * extra embedding call): a chain's score is its BEST member's similarity,
+ * because "this chain contains a step like the current situation" is the honest
+ * reading — a mean would dilute exactly the 20-member chains whose single
+ * matching step is the point.
+ * @param service - the pipeline service (chains + experiences + injection ledger).
+ * @param situation - the pre-step situation text.
+ * @param sessionId - current session, used to skip chains already served to it.
+ * @param config - resolved chain sub-configuration.
+ * @returns the best chain over the bar with its rendered subtree, or null.
+ */
+function retrieveChain(
+  service: CognitivePipelineService,
+  situation: string,
+  sessionId: string,
+  config: { minSimilarity: number, depth: number, maxChars: number },
+): { chainId: string, similarity: number, text: string } | null {
+  const chains = service.store.chainsSnapshot()
+  if (chains.length === 0) return null
+  const actionQuery = actionVector(situation, [])
+  const situationQuery = situationVector(situation)
+  const byId = new Map(service.store.experiencesSnapshot().map(exp => [exp.expId, exp]))
+  // 同一会话内已经服务过的链不再重复: 链文本比单条经验长, 反复注入会挤掉预算。
+  const served = new Set<string>()
+  for (const record of service.store.injectionsSnapshot()) {
+    if (record.sessionId !== sessionId || record.chainId === null) continue
+    served.add(String(record.chainId))
+  }
+  let best: { chainId: string, similarity: number } | null = null
+  for (const chain of chains) {
+    if (served.has(chain.chainId)) continue
+    let score = 0
+    for (const memberId of chain.memberExpIds) {
+      const exp = byId.get(memberId)
+      if (exp === undefined) continue
+      const member = Math.max(
+        cosine(actionQuery, exp.actionVector),
+        cosine(situationQuery, situationVector(exp.sar.situation)),
+      )
+      if (member > score) score = member
+    }
+    if (score < config.minSimilarity) continue
+    if (best === null || score > best.similarity) best = { chainId: chain.chainId, similarity: score }
+  }
+  if (best === null) return null
+  const rendered = service.chainTreeExpose(best.chainId, config.depth)
+  if (rendered === null || rendered.length === 0) return null
+  const text = rendered.length > config.maxChars
+    ? rendered.slice(0, config.maxChars) + String.fromCharCode(10) + '…(链树已截断)'
+    : rendered
+  return { chainId: best.chainId, similarity: best.similarity, text }
+}
+
+/** Render the served chain as its own user message. The citation contract names
+ * the CHAIN ID: settlement only counts a literal id in the reply (cl-044), so a
+ * block that never asks for it would be injected-and-never-cited by design. */
+function chainBlock(chain: { chainId: string, similarity: number, text: string }): UserMessage {
+  const text = `【经验链参考】以下是同一目标执行形状的历史链（含因果骨架与失败步；父链下缩进的是子目标链），`
+    + `供参考借鉴（不要虚构为当前事实）：`
+    + String.fromCharCode(10) + chain.text
+    + String.fromCharCode(10) + `（引用契约：若本轮确实采用了这条链，请在回复里写出它的 chainId ${chain.chainId}`
+    + `——这是引用结算的唯一依据；没采用就不必写。）`
+  return createUserMessage({
+    content: [{ type: 'text', text }],
+    source: { kind: 'plugin', plugin: name, form: 'snapshot', sections: [{ name, text }] },
+  })
+}
+
 /** Whether the retrieved hits link to a solidified strategy for their goal
  * domain. A hit's experience carries a chainId; if that chain seeded a
  * solidified strategy, the strategy is the converged rule for this situation.
@@ -1139,14 +1253,24 @@ export function apply(ctx: Context, config: Config = {}): void {
       // Review skipped/failed/empty → fall through to the raw blocks below.
     }
     const block = referenceBlock(vetoed.accepted, afterFailure, vetoed.rejectedNotes)
+    // cl-351: 链的检索与服务。在此之前链**从未进入过任何上下文**(chainTreeExpose
+    // 全库零调用者), 于是 hitCount/citedCount 恒 0 —— "从未被看见"被读成"没人要"。
+    // 只在这条主注入路径上附加(策略路径不动), 且同会话同链只服务一次。
+    const chainHit = resolved.chain.enabled
+      ? retrieveChain(ctx.cognitivePipeline, situation, agent.session.id, resolved.chain)
+      : null
+    const chainMessage = chainHit === null ? null : chainBlock(chainHit)
     // Record the injection for citation-rate measurement: which expIds reached
     // the model, which trigger opened the gate, and which jump words (if any)
     // contributed — the durable trace behind the reinforcement loop.
+    // cl-351: chainId 一并落账 ⇒ 结算侧(cl-044 起就会 foldChainCitation)第一次
+    // 有东西可折, 链的实测效用账本才开始累积。
     ctx.cognitivePipeline.recordInjection({
       expIds: vetoed.accepted.map(hit => hit.expId),
       triggerSource: verdict.triggerSource,
       sessionId: agent.session.id,
       jumpWords: verdict.jumpWords,
+      ...chainHit === null ? {} : { chainId: chainHit.chainId },
     })
     markHitsReviewed(ctx.cognitivePipeline, vetoed.accepted)
     audit({ stage: 'injected', path: 'raw', backoffDropped, backoffDetails, backoffAdmitted, rotated, rawHits, topHits, textChars,
@@ -1162,10 +1286,13 @@ export function apply(ctx: Context, config: Config = {}): void {
       preTop,
       // cl-263: 被 minSimilarity 丢掉的候选(阈下), 让门限扫描可判
       belowGate,
-      triggerScore: verdict.score, matched: verdict.matched })
+      triggerScore: verdict.score, matched: verdict.matched,
+      // cl-351: 链注入的**可判据面** —— 服务了哪条链、多少分、花了多少字符(成本判据要看真进上下文的量)
+      chainId: chainHit?.chainId ?? null, chainSimilarity: chainHit?.similarity ?? null,
+      chainChars: chainMessage === null ? 0 : (chainMessage.content.find(b => b.type === 'text')?.text.length ?? 0) })
     return {
       kind: 'enter',
-      messages: [...decision.messages, block],
+      messages: chainMessage === null ? [...decision.messages, block] : [...decision.messages, block, chainMessage],
     }
   })
 }

@@ -367,6 +367,93 @@ describe('cognitive-inject priming', () => {
     }
   })
 
+  it('serves the matching CHAIN tree and records its chainId (cl-351: 链的检索入口)', async () => {
+    const { ctx, teardown } = await mount()
+    try {
+      // 三条同链成员: 链要过 chainMinMembers(3) 门槛才会被 consolidate。
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '服务重启后需要验证恢复', '重启服务并验证', '恢复成功', undefined, undefined, 'chain-restart')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_2', '服务重启后需要验证恢复', '查看日志确认', '确认无异常', undefined, undefined, 'chain-restart')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_3', '服务重启后需要验证恢复', '跑一次冒烟', '通过', undefined, undefined, 'chain-restart')
+      await ctx.cognitivePipeline.consolidateChain('chain-restart', '服务重启后验证恢复')
+      expect(ctx.cognitivePipeline.store.chainsSnapshot().length).toBe(1)
+
+      const { agent, session } = stubAgent('chain-serve')
+      session.append('turn/start', { turn: 1 })
+      const injected = await fire(ctx, agent, 1, 1, '服务重启后需要验证恢复')
+
+      const chainText = injected.find(text => text.includes('【经验链参考】'))
+      expect(chainText).toBeDefined()
+      // 链树渲染 + 引用契约必须点名 chainId(结算只认字面 id, cl-044)。
+      expect(chainText).toContain('chain-restart')
+      expect(chainText).toContain('目标：服务重启后验证恢复')
+      // **账本第一次有链可折**: 注入记录必须带上 chainId, 否则结算侧永远折不到它。
+      const records = ctx.cognitivePipeline.store.injectionsSnapshot()
+      expect(records.some(record => record.chainId === 'chain-restart')).toBe(true)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('does NOT serve a chain whose members are unrelated to the situation', async () => {
+    const { ctx, teardown } = await mount()
+    try {
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '菜谱里的糖和盐比例如何调整', '调整配方', '味道变好', undefined, undefined, 'chain-cook')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_2', '菜谱里的糖和盐比例如何调整', '少放糖', '更好吃', undefined, undefined, 'chain-cook')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_3', '菜谱里的糖和盐比例如何调整', '多加盐', '偏咸', undefined, undefined, 'chain-cook')
+      // 当前情境与这条链无关(靠静态触发词打开闸门, 好让"链没被服务"不是"整条注入没发生")。
+      seedExperience(ctx.cognitivePipeline.store, 'exp_9', '服务重启后需要验证恢复', '重启服务并验证', '恢复成功')
+      await ctx.cognitivePipeline.consolidateChain('chain-cook', '菜谱调味')
+      const { agent, session } = stubAgent('chain-nomatch')
+      session.append('turn/start', { turn: 1 })
+      const injected = await fire(ctx, agent, 1, 1, '服务重启后需要验证恢复')
+      expect(injected.some(text => text.includes('【经验链参考】'))).toBe(false)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('serves the same chain only once per session (链不重复挤占预算)', async () => {
+    const { ctx, teardown } = await mount()
+    try {
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '服务重启后需要验证恢复', '重启服务并验证', '恢复成功', undefined, undefined, 'chain-restart')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_2', '服务重启后需要验证恢复', '查看日志确认', '确认无异常', undefined, undefined, 'chain-restart')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_3', '服务重启后需要验证恢复', '跑一次冒烟', '通过', undefined, undefined, 'chain-restart')
+      await ctx.cognitivePipeline.consolidateChain('chain-restart', '服务重启后验证恢复')
+      const { agent, session } = stubAgent('chain-once')
+      session.append('turn/start', { turn: 1 })
+      const first = await fire(ctx, agent, 1, 1, '服务重启后需要验证恢复')
+      expect(first.some(text => text.includes('【经验链参考】'))).toBe(true)
+      const second = await fire(ctx, agent, 1, 2, '服务重启后需要验证恢复')
+      expect(second.some(text => text.includes('【经验链参考】'))).toBe(false)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('settles a cited chain into its measured-utility ledger (hitCount/citedCount 不再恒 0)', async () => {
+    const { ctx, teardown } = await mount()
+    try {
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '服务重启后需要验证恢复', '重启服务并验证', '恢复成功', undefined, undefined, 'chain-restart')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_2', '服务重启后需要验证恢复', '查看日志确认', '确认无异常', undefined, undefined, 'chain-restart')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_3', '服务重启后需要验证恢复', '跑一次冒烟', '通过', undefined, undefined, 'chain-restart')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_4', '服务重启后需要验证恢复', '记录耗时', '记录完成', undefined, undefined, 'chain-restart')
+      await ctx.cognitivePipeline.consolidateChain('chain-restart', '服务重启后验证恢复')
+      const before = ctx.cognitivePipeline.store.getChain('chain-restart')
+      expect(before?.hitCount).toBe(0)
+      const { agent, session } = stubAgent('chain-cite')
+      session.append('turn/start', { turn: 1 })
+      await fire(ctx, agent, 1, 1, '服务重启后需要验证恢复')
+      // 引用: 回复里字面写出 chainId(cl-044 的口径) ⇒ 折进链的效用账本。
+      const settled = await ctx.cognitivePipeline.settleInjectionCitations(String(session.id), '按 chain-restart 这条链的骨架来做')
+      expect(settled.cited).toBeGreaterThanOrEqual(1)
+      const after = ctx.cognitivePipeline.store.getChain('chain-restart')
+      expect(after?.hitCount).toBe(1)
+      expect(after?.citedCount).toBe(1)
+    } finally {
+      await teardown()
+    }
+  })
+
   it('soft trigger boost lifts a mid-similarity hit across the gate (求助信号加权)', async () => {
     const { ctx, teardown } = await mount()
     try {
@@ -914,7 +1001,8 @@ describe('cognitive-inject pre-input review (M3)', () => {
       const session = Session.create(
         childId,
         undefined,
-        { ...root.header, id: childId, parentSession: SessionId('review-root-session') } as never,
+        { ...root.header, id: childId, parentSession: SessionId('review-root-session'),
+          origin: 'subagent' } as never,   // cl-327: 根会话判据已改为 origin !== 'subagent', 只设 parentSession 不再能表达「子代理」
       )
       const agent = {
         id: session.id,

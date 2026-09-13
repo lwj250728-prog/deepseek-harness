@@ -10275,6 +10275,23 @@ assert rows2[a]["activity"] > rows2[c]["activity"], "同一指标两套口径: a
 print("拒收 rc=%d 且不建账本; --why 恰好 1 行; 共现 Jaccard 归一; 分数与报告同口径(J=0.5 的邻居被算进打分)" % r1.returncode)
 '
 
+# T248 (cl-351): 链此前**从未进入过任何上下文**(chainTreeExpose 全库零调用者, citedCount/hitCount 恒 0):
+# "从未被看见"被读成"没人要"。这条判据跑真 spec —— 命中即服务链树 / 不相关不服务 / 同会话只服务一次 / 引用回填到链账本。
+# 旧口径只有对 src/lib 的文本 grep(声明在不在), 测不到"链真的进了上下文、引用真的折回来了"。
+echo "[T248] 经验链进入注入(检索 + 服务 + 引用回填)"
+t "经验链进入注入: 能被找到 + 被渲染 + 引用回填到链账本" python3 -c '
+import os, subprocess
+R = os.path.expanduser("~/dsh-fork")
+SPEC = os.path.join(R, "packages/context/cognitive-inject/tests/cognitive-inject.spec.ts")
+assert os.path.exists(SPEC), "spec 不在: %s" % SPEC
+r = subprocess.run(["npx", "vitest", "run", SPEC], cwd=R, capture_output=True, text=True, timeout=900)
+out = (r.stdout or "") + (r.stderr or "")
+assert r.returncode == 0, "注入 spec 判红: %s" % out[-400:]
+assert "34 passed" in out, "spec 没跑满 34 条(加了用例就同步这个数, 但不许删断言): %s" % out[-400:]
+print("经验链 4/4: 命中即服务链树 + 不相关不服务 + 同会话只服务一次 + 引用回填 hitCount/citedCount")
+'
+
+
 
 
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
