@@ -153,6 +153,13 @@ export interface ChainInjectionConfig {
    *  链是"大块头"; 同会话内每链只服务一次(已有)仍允许一个长会话把 7 条链各注入一次 ⇒ 预算被慢慢吃掉。
    *  先卡在 1, 等 cl-354 仪表量出链的引用率与成本后再谈放宽(放宽是配置, 不需要改代码)。 */
   maxPerSession?: number
+  /** cl-361: **语义空间**的成员门槛相对词面门槛的**增量**(默认 0 ⇒ 与 minSimilarity 相同, 即不改行为)。
+   *  真 embedding 实测(bge-m3, 7 链 × 30 情境 = 210 对): 域外(不相关)对的成员分 p50=0.571 / p90=0.641 / **p99=0.697**,
+   *  而 minSimilarity=0.4 让 **210/210 全过** ⇒ 4 在语义空间里**不是门槛**; 且"最佳-次佳"差 p50 仅 0.021(一半情境选哪条链近乎随便)。
+   *  数据只能证明"同一情境(域内, 实测 1.0)与不相关(<=0.70)的分界在 ~0.7", **不能**证明"相关但新的情境"落在哪里(没有标签)
+   *  ⇒ 所以我**不改默认值**(semanticMargin=0), 只把这个门槛做成可配置: 若要把语义空间的门槛抬到实测分界(0.7),
+   *  在 minSimilarity=0.4 的前提下设 semanticMargin=0.3。测量结果写在这里供裁决。 */
+  semanticMargin?: number
 }
 
 /** Pre-input review sub-configuration. */
@@ -198,7 +205,8 @@ export const Config: z<Config> = z.object({
     maxChars: z.number().step(1).min(200).max(4000).default(900),
     goalMargin: z.number().min(0).max(0.5).default(0.05),
     maxPerSession: z.number().step(1).min(0).max(20).default(1),
-  }).default({ enabled: true, minSimilarity: 0.4, depth: 1, maxChars: 900, goalMargin: 0.05, maxPerSession: 1 }),
+    semanticMargin: z.number().min(0).max(0.6).default(0),
+  }).default({ enabled: true, minSimilarity: 0.4, depth: 1, maxChars: 900, goalMargin: 0.05, maxPerSession: 1, semanticMargin: 0 }),
   failureThresholdFactor: z.number().min(0).max(1).default(0.6),
   failureTopK: z.number().step(1).min(1).max(10).default(3),
   contextDepth: z.number().step(1).min(1).max(20).default(4),
@@ -254,7 +262,7 @@ export interface ResolvedConfig {
   readonly triggerBoost: number
   readonly review: ResolvedReviewConfig
   /** cl-351: 链检索/服务(默认开启, 见 Config.chain)。 */
-  readonly chain: { readonly enabled: boolean, readonly minSimilarity: number, readonly depth: number, readonly maxChars: number, readonly goalMargin: number, readonly maxPerSession: number }
+  readonly chain: { readonly enabled: boolean, readonly minSimilarity: number, readonly depth: number, readonly maxChars: number, readonly goalMargin: number, readonly maxPerSession: number, readonly semanticMargin: number }
 }
 
 /** Resolved pre-input review configuration. */
@@ -306,6 +314,7 @@ export function resolveConfig(config: Config): ResolvedConfig {
       maxChars: config.chain?.maxChars ?? 900,
       goalMargin: config.chain?.goalMargin ?? 0.05,
       maxPerSession: config.chain?.maxPerSession ?? 1,
+      semanticMargin: config.chain?.semanticMargin ?? 0,
     }),
     review: Object.freeze({
       enabled: review.enabled ?? false,
@@ -801,7 +810,7 @@ async function retrieveChain(
   service: CognitivePipelineService,
   situation: string,
   sessionId: string,
-  config: { minSimilarity: number, depth: number, maxChars: number, goalMargin: number, maxPerSession: number },
+  config: { minSimilarity: number, depth: number, maxChars: number, goalMargin: number, maxPerSession: number, semanticMargin: number },
   queryEmbedding: readonly number[] | null,
 ): Promise<{ chainId: string, similarity: number, text: string } | null> {
   const chains = service.store.chainsSnapshot()
@@ -838,24 +847,28 @@ async function retrieveChain(
         if (vector !== null) keyScore = Math.max(keyScore, cosine(queryEmbedding, vector))
       }
     }
-    let memberScore = 0
+    let lexicalScore = 0
+    let semanticScore = 0
     for (const memberId of chain.memberExpIds) {
       const exp = byId.get(memberId)
       if (exp === undefined) continue
-      let member = Math.max(
+      lexicalScore = Math.max(
+        lexicalScore,
         cosine(actionQuery, exp.actionVector),
         cosine(situationQuery, situationVector(exp.sar.situation)),
       )
       if (queryEmbedding !== null && exp.embedding !== undefined) {
-        member = Math.max(member, cosine(queryEmbedding, exp.embedding))
+        semanticScore = Math.max(semanticScore, cosine(queryEmbedding, exp.embedding))
       }
-      if (member > memberScore) memberScore = member
     }
-    // cl-356: 两条路各自的门槛 —— 成员文本命中按 minSimilarity; 链自身语义(短文本, 易撞通用词)要按 minSimilarity+goalMargin。
-    const memberOk = memberScore >= config.minSimilarity
-    const keyOk = keyScore >= config.minSimilarity + config.goalMargin
+    // cl-361: 语义分与词面分**各自过各自的门槛** —— 语义空间的分布整体更高(域外 p99=0.697), 用 0.4 当门槛等于不设门槛。
+    const semanticFloor = config.minSimilarity + config.semanticMargin
+    const memberOk = lexicalScore >= config.minSimilarity || semanticScore >= semanticFloor
+    // cl-356: 链自身语义(短文本, 易撞通用词)在词面路上要多一个余量; 语义路上由 semanticFloor 承担严格性。
+    const keyFloor = queryEmbedding !== null ? semanticFloor : config.minSimilarity + config.goalMargin
+    const keyOk = keyScore >= keyFloor
     if (!memberOk && !keyOk) continue
-    const score = Math.max(memberScore, keyScore)
+    const score = Math.max(lexicalScore, semanticScore, keyScore)
     if (best === null || score > best.similarity) best = { chainId: chain.chainId, similarity: score }
   }
   if (best === null) return null

@@ -490,6 +490,45 @@ describe('cognitive-inject priming', () => {
     }
   })
 
+  it('honours the semantic-space floor when configured (语义空间的门槛单独可调; cl-361)', async () => {
+    // 真 embedding 实测: 域外(不相关)对的成员分 p99=0.697, 所以 0.4 在语义空间里**不是门槛**(210/210 全过)。
+    // 这条用例钉"语义门槛确实被用上" —— 用假 embedder 造一个语义 0.6 的链: 门槛 0.5 时服务, 门槛 0.7 时拒绝。
+    const SIT = '服务重启后需要验证恢复'
+    const GOAL = '与情境词面无关的目标表述'
+    const seed = async (ctx: Awaited<ReturnType<typeof mount>>['ctx']): Promise<void> => {
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '旧事一', '执行甲', '结果甲', undefined, undefined, 'chain-floor')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_2', '旧事二', '执行乙', '结果乙', undefined, undefined, 'chain-floor')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_3', '旧事三', '执行丙', '结果丙', undefined, undefined, 'chain-floor')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_9', SIT, '重启服务并验证', '恢复成功')
+      await ctx.cognitivePipeline.consolidateChain('chain-floor', GOAL)
+    }
+    // 语义相似度 = 0.6(cos([1,0],[0.6,0.8]))
+    const fake = { embed: async (text: string) => (text === SIT ? [1, 0] : text === GOAL ? [0.6, 0.8] : null) }
+    const low = await mount({ injectCooldownMs: 0, chain: { semanticMargin: 0.1 } })   // 门槛 0.4+0.1=0.5 ⇒ 0.6 过
+    try {
+      await seed(low.ctx)
+      Object.defineProperty(low.ctx.cognitivePipeline, 'embedder', { value: fake, configurable: true })
+      const { agent, session } = stubAgent('chain-floor-low')
+      session.append('turn/start', { turn: 1 })
+      const injected = await fire(low.ctx, agent, 1, 1, SIT)
+      expect(injected.some(text => text.includes('【经验链参考】'))).toBe(true)
+    } finally {
+      await low.teardown()
+    }
+    const high = await mount({ injectCooldownMs: 0, chain: { semanticMargin: 0.3 } })   // 门槛 0.7 ⇒ 0.6 被拒
+    try {
+      await seed(high.ctx)
+      Object.defineProperty(high.ctx.cognitivePipeline, 'embedder', { value: fake, configurable: true })
+      const { agent, session } = stubAgent('chain-floor-high')
+      session.append('turn/start', { turn: 1 })
+      const injected = await fire(high.ctx, agent, 1, 1, SIT)
+      expect(injected.some(text => text.includes('【认知经验参考】'))).toBe(true)   // 前提: 注入确实发生了
+      expect(injected.some(text => text.includes('【经验链参考】'))).toBe(false)   // 但链被语义门槛挡住
+    } finally {
+      await high.teardown()
+    }
+  })
+
   it('keeps the lexical fallback when the embedder cannot embed (退化不许变成不服务; cl-360)', async () => {
     const { ctx, teardown } = await mount()
     try {
