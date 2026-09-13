@@ -45,6 +45,29 @@ interface Violation {
   kind: 'message' | 'end'
 }
 
+
+/**
+ * Queue an adoption request for the running host.
+ *
+ * A successor written by this tool is only a log file: the host has no way to
+ * learn that a conversation moved, so mechanisms keyed by the predecessor id
+ * would keep pointing at it. Appending to the durable queue makes the host adopt
+ * the successor on its next sweep — no API call, no live host required here.
+ * @param predecessorId - the session whose conversation this file continues.
+ * @param successorId - the session this tool just wrote.
+ */
+function queueAdoption(predecessorId: string, successorId: string): void {
+  const home = process.env['DSH_HOME']
+  if (home === undefined || home.length === 0) return
+  const path = `${home}/session-handover-adoptions.jsonl`
+  try {
+    appendFileSync(path, `${JSON.stringify({ predecessorId, successorId, at: new Date().toISOString() })}\n`, 'utf8')
+    console.log(`adoption  : queued ${successorId} for ${predecessorId}`)
+  } catch (error: unknown) {
+    console.log(`adoption  : could not queue (run the host adoption by hand): ${String(error)}`)
+  }
+}
+
 const options = parseArgs(process.argv.slice(2))
 const buffer = await readFile(options.source)
 const { frames } = scanZstdFrames(buffer)
@@ -245,3 +268,4 @@ await handle.sync()
 await handle.close()
 console.log(`successor   : ${successorId}`)
 console.log(`artifact    : ${((await stat(target)).size / 1048576).toFixed(2)} MB`)
+queueAdoption(String(sourceMeta.id), String(successorId))

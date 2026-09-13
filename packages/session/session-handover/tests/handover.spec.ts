@@ -5,7 +5,8 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MessageId, createUserMessage, freezeMessage } from '@deepseek-ai/dsh-llm'
@@ -305,5 +306,37 @@ describe('arming survives a restart', () => {
     await vi.waitFor(() => { expect(notices).toHaveLength(1) })
     expect(created).toHaveLength(1)
     dispose()
+  })
+})
+
+describe('adoption queue', () => {
+  it('adopts a tool-made successor and clears the queue', async () => {
+    // The gap this closes: a migration tool writes a log file and nothing tells
+    // the host the conversation moved, so every mechanism keyed by the
+    // predecessor id keeps pointing at a session nobody is in.
+    const root = await mkdtemp(join(tmpdir(), 'dsh-handover-spool-'))
+    const spool = join(root, 'session-handover-adoptions.jsonl')
+    await writeFile(spool, `${JSON.stringify({ predecessorId: 'session-old', successorId: 'session-new' })}\n`, 'utf8')
+
+    const ctx = new Context()
+    const archived: string[] = []
+    ctx.provide('agents', { get: () => undefined, create: vi.fn(async () => ({})) } as never)
+    ctx.provide('agentPresets', { resolve: async () => ({ id: 'standard' }), mount: async () => {} } as never)
+    ctx.provide('workspaceRegistry', {
+      resolveByPath: async () => undefined,
+      archiveSession: async (id: SessionId) => { archived.push(id) },
+    } as never)
+
+    const notices: { predecessorId: string; successorId: string }[] = []
+    ctx.on('session/handover', payload => { notices.push(payload as never) })
+    const dispose = apply(ctx, { enabled: true, compactionsPerSession: 1, adoptionSpoolPath: spool })
+
+    await vi.waitFor(() => { expect(notices).toHaveLength(1) })
+    expect(notices[0]).toMatchObject({ predecessorId: 'session-old', successorId: 'session-new' })
+    expect(archived).toEqual(['session-old'])
+    // The queue is drained, so the host does not adopt the same pair again.
+    expect(readFileSync(spool, 'utf8').trim()).toBe('')
+    dispose()
+    await rm(root, { recursive: true, force: true })
   })
 })

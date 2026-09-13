@@ -37,6 +37,13 @@ interface Options {
   destRoot: string
   cwd: string | undefined
   dryRun: boolean
+  /**
+   * Keep only the last N turns. A conversation whose prompt already exceeds the
+   * model's window cannot be rescued by compaction — the summarizer's own request
+   * carries the same oversized history — so the only exit is a successor small
+   * enough to fit. Structural frames are re-synthesized by the repair pass.
+   */
+  keepLastTurns: number | undefined
 }
 
 function parseArgs(argv: readonly string[]): Options {
@@ -46,13 +53,18 @@ function parseArgs(argv: readonly string[]): Options {
   }
   let cwd: string | undefined
   let dryRun = false
+  let keepLastTurns: number | undefined
   for (let index = 2; index < argv.length; index++) {
     const flag = argv[index]
     if (flag === '--cwd') cwd = argv[++index]
     else if (flag === '--dry-run') dryRun = true
+    else if (flag === '--keep-last') keepLastTurns = Number(argv[++index])
     else throw new Error(`unknown argument ${String(flag)}`)
   }
-  return { source, destRoot, cwd, dryRun }
+  if (keepLastTurns !== undefined && (!Number.isSafeInteger(keepLastTurns) || keepLastTurns < 1)) {
+    throw new Error('--keep-last takes a positive turn count')
+  }
+  return { source, destRoot, cwd, dryRun, keepLastTurns }
 }
 
 /** Read just the header record of a zstd JSONL artifact. */
@@ -100,6 +112,29 @@ async function foldCheck(path: string): Promise<void> {
     + `token surface delta ${tokens}`)
 }
 
+
+/**
+ * Queue an adoption request for the running host.
+ *
+ * A successor written by this tool is only a log file: the host has no way to
+ * learn that a conversation moved, so mechanisms keyed by the predecessor id
+ * would keep pointing at it. Appending to the durable queue makes the host adopt
+ * the successor on its next sweep — no API call, no live host required here.
+ * @param predecessorId - the session whose conversation this file continues.
+ * @param successorId - the session this tool just wrote.
+ */
+function queueAdoption(predecessorId: string, successorId: string): void {
+  const home = process.env['DSH_HOME']
+  if (home === undefined || home.length === 0) return
+  const path = `${home}/session-handover-adoptions.jsonl`
+  try {
+    appendFileSync(path, `${JSON.stringify({ predecessorId, successorId, at: new Date().toISOString() })}\n`, 'utf8')
+    console.log(`adoption  : queued ${successorId} for ${predecessorId}`)
+  } catch (error: unknown) {
+    console.log(`adoption  : could not queue (run the host adoption by hand): ${String(error)}`)
+  }
+}
+
 const options = parseArgs(process.argv.slice(2))
 const sourceMeta = await readHeader(options.source)
 const sourceBytes = (await stat(options.source)).size
@@ -121,6 +156,7 @@ const target = options.dryRun ? undefined : logPath(options.destRoot, cwd, succe
 
 let kept = 0
 let dropped = 0
+let droppedSplices = 0
 let orphanChunks = 0
 let seq = 0
 let batch: SessionEvent[] = []
@@ -334,11 +370,41 @@ const decoded = decoder.decode(buffer, frames)
 const headerFrame = decoded.next()
 if (headerFrame.done) throw new Error('empty or header-less Zstandard session log')
 
+/**
+ * Where the retained window starts: the seq of the (N)th-from-last turn/start,
+ * so the copy opens on a complete turn. `undefined` keeps everything.
+ */
+const keepFromSeq = (() => {
+  if (options.keepLastTurns === undefined) return undefined
+  const starts: number[] = []
+  const decoderForCut = createZstdFrameDecoder()
+  const decodedForCut = decoderForCut.decode(buffer, frames)
+  const headForCut = decodedForCut.next()
+  if (headForCut.done) throw new Error('no header frame')
+  const cutScanner = new SessionLogScanner(headForCut.value, {
+    retainMessages: 1,
+    observe: (event) => { if (event.type === 'turn/start') starts.push(event.seq) },
+  })
+  for (const plaintext of decodedForCut) cutScanner.write(plaintext)
+  cutScanner.finish()
+  const index = Math.max(0, starts.length - (options.keepLastTurns ?? 0))
+  return starts[index]
+})()
+
 /** Chunk events seen since the last non-chunk event: dropped only if referenced. */
 let pendingChunks: SessionEvent[] = []
 const scanner = new SessionLogScanner(headerFrame.value, {
   retainMessages: 1,
   observe: (event) => {
+    if (keepFromSeq !== undefined && event.seq < keepFromSeq) return
+    // A bounded window can orphan an inbox splice: the record names the message
+    // it was spliced into, and that message may sit before the cut. The splice is
+    // an injection trace, not conversation content, so the window drops it
+    // rather than carrying a dangling reference.
+    if (keepFromSeq !== undefined && event.type.startsWith('agent/inbox/')) {
+      droppedSplices += 1
+      return
+    }
     if (event.type === CHUNK_TYPE) {
       pendingChunks.push(event)
       return
@@ -368,6 +434,10 @@ for (const chunk of pendingChunks) { ensureFraming(chunk); keep(chunk); orphanCh
 await flush()
 scanner.finish()
 
+if (keepFromSeq !== undefined) {
+  console.log(`window      : keeping the last ${options.keepLastTurns} turn(s) from seq ${keepFromSeq} `
+    + `(${droppedSplices} inbox splices dropped: their target may precede the window)`)
+}
 console.log(`kept events : ${kept} (${orphanChunks} interrupted-partial chunks retained)`)
 if (synthesizedFrames > 0) {
   console.log(`repaired    : ${synthesizedFrames} missing turn/step frames synthesized (content untouched)`)
@@ -409,4 +479,5 @@ console.log(`artifact    : ${((written.length) / 1048576).toFixed(2)} MB on disk
 console.log(`read-back   : ${verified.events.length + 1} events (window), header id ${verified.meta.id}`)
 console.log(`verified    : ${verified.meta.id === successorId ? 'header identity OK' : 'IDENTITY MISMATCH'}`)
 await foldCheck(target)
-console.log(`next        : open it from the session list (it is catalogued beside the original)`)
+queueAdoption(String(sourceMeta.id), String(successorId))
+console.log(`next        : the host adopts it on its next sweep (mechanisms follow automatically)`)

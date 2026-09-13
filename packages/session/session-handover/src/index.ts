@@ -20,6 +20,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { readFileSync, writeFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
@@ -113,6 +114,17 @@ export interface Config {
   targetSessionIds?: string[]
   /** Observe and log the decision without creating a successor. */
   dryRun?: boolean
+  /**
+   * Queue of adoptions written by offline migration tools
+   * (`$DSH_HOME/session-handover-adoptions.jsonl` by default).
+   *
+   * A successor produced by a tool is a log file: nothing tells the running host
+   * that the conversation moved, so every mechanism keyed by the predecessor id
+   * (wake drivers, sentinels, watchers) keeps pointing at a session nobody is in.
+   * The spool closes that gap durably — the tool needs no API call and no live
+   * host, and the host adopts the successor as soon as it reads the queue.
+   */
+  adoptionSpoolPath?: string
 }
 
 /** Event types the compaction plugins append as their durable record. */
@@ -253,6 +265,58 @@ export function buildSuccessorSeed(
     seed.push(asAppend(event, seq++))
   }
   return { seed, checkpointSeq: checkpoint.seq }
+}
+
+
+/** One adoption request written by an offline migration tool. */
+interface AdoptionRequest {
+  readonly predecessorId: SessionId
+  readonly successorId: SessionId
+  readonly at?: string
+}
+
+/** Default spool location, under the deployment home. */
+function defaultSpoolPath(): string {
+  const home = process.env['DSH_HOME']
+  return home === undefined || home.length === 0
+    ? ''
+    : `${home}/session-handover-adoptions.jsonl`
+}
+
+/** Read the pending adoption queue; a missing or unreadable file is empty. */
+function readAdoptionQueue(path: string): AdoptionRequest[] {
+  if (path.length === 0) return []
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch {
+    return []
+  }
+  const requests: AdoptionRequest[] = []
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed.length === 0) continue
+    try {
+      const parsed = JSON.parse(trimmed) as Partial<AdoptionRequest>
+      if (typeof parsed.predecessorId !== 'string' || typeof parsed.successorId !== 'string') continue
+      requests.push({ predecessorId: parsed.predecessorId as SessionId, successorId: parsed.successorId as SessionId })
+    } catch {
+      // A torn or hand-edited line must not stop the rest of the queue.
+      continue
+    }
+  }
+  return requests
+}
+
+/** Remove the adopted entries, keeping anything the tool appends meanwhile. */
+function rewriteAdoptionQueue(path: string, remaining: readonly AdoptionRequest[]): void {
+  if (path.length === 0) return
+  const body = remaining.map(request => JSON.stringify(request)).join('\n')
+  try {
+    writeFileSync(path, body.length === 0 ? '' : `${body}\n`, 'utf8')
+  } catch (error: unknown) {
+    report(`could not rewrite the adoption queue: ${String(error)}`)
+  }
 }
 
 /**
@@ -402,9 +466,52 @@ export function apply(ctx: Context, config: Config): () => void {
   // Sessions that were already qualified before this process started: a restart
   // (or a compaction that landed while the plugin was disabled) must not strand
   // a conversation the log already marked as due.
+  /**
+   * Adopt successors that an offline migration tool installed.
+   *
+   * This is the automation half of "the mechanisms must follow the
+   * conversation": a tool-made successor is just a log file, so without this the
+   * wake drivers and watchers would keep pointing at the predecessor forever.
+   * Runs on a timer as well as at startup so a migration performed while the
+   * host was busy (or down) is picked up without an operator.
+   */
+  const adoptQueued = (): void => {
+    const spoolPath = config.adoptionSpoolPath ?? defaultSpoolPath()
+    const queue = readAdoptionQueue(spoolPath)
+    if (queue.length === 0) return
+    const remaining: AdoptionRequest[] = []
+    for (const request of queue) {
+      try {
+        if (request.predecessorId === request.successorId) continue
+        report(`adopting ${request.successorId} for ${request.predecessorId} (offline migration)`)
+        if (archive) {
+          try {
+            ctx.workspaceRegistry.archiveSession(request.predecessorId)
+          } catch (error: unknown) {
+            report(`could not archive ${request.predecessorId}: ${String(error)}`)
+          }
+        }
+        ctx.emit('session/handover', {
+          predecessorId: request.predecessorId,
+          successorId: request.successorId,
+          seedLength: 0,
+        })
+      } catch (error: unknown) {
+        // Keep the request queued rather than dropping an adoption silently.
+        remaining.push(request)
+        report(`adoption of ${request.successorId} failed and stays queued: ${String(error)}`)
+      }
+    }
+    rewriteAdoptionQueue(spoolPath, remaining)
+  }
+
   // The session store is optional here on purpose: a composition without it
   // still hands over at the ordinary turn boundary, and a harness that omits it
   // must not turn this plugin into a startup failure.
+  adoptQueued()
+  const spoolTimer = setInterval(adoptQueued, 30_000)
+  spoolTimer.unref?.()
+
   for (const session of ctx.sessions?.list?.() ?? []) {
     if (armIfDue(session)) {
       report(`${session.id} was already due at startup; handing over now`)
@@ -433,6 +540,7 @@ export function apply(ctx: Context, config: Config): () => void {
   })
 
   return () => {
+    clearInterval(spoolTimer)
     disposeEvent()
     disposeStatus()
   }

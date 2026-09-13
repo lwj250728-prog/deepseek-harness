@@ -59,6 +59,29 @@ function isCompactionRecord(event: SessionEvent): boolean {
   return event.type === 'compaction/summary' || event.type === 'compaction/prune'
 }
 
+
+/**
+ * Queue an adoption request for the running host.
+ *
+ * A successor written by this tool is only a log file: the host has no way to
+ * learn that a conversation moved, so mechanisms keyed by the predecessor id
+ * would keep pointing at it. Appending to the durable queue makes the host adopt
+ * the successor on its next sweep — no API call, no live host required here.
+ * @param predecessorId - the session whose conversation this file continues.
+ * @param successorId - the session this tool just wrote.
+ */
+function queueAdoption(predecessorId: string, successorId: string): void {
+  const home = process.env['DSH_HOME']
+  if (home === undefined || home.length === 0) return
+  const path = `${home}/session-handover-adoptions.jsonl`
+  try {
+    appendFileSync(path, `${JSON.stringify({ predecessorId, successorId, at: new Date().toISOString() })}\n`, 'utf8')
+    console.log(`adoption  : queued ${successorId} for ${predecessorId}`)
+  } catch (error: unknown) {
+    console.log(`adoption  : could not queue (run the host adoption by hand): ${String(error)}`)
+  }
+}
+
 const options = parseArgs(process.argv.slice(2))
 const buffer = await readFile(options.source)
 const { frames } = scanZstdFrames(buffer)
@@ -259,4 +282,5 @@ console.log(`artifact    : ${(written.length / 1048576).toFixed(2)} MB on disk (
 console.log(`messages    : assistant ${types.get('assistant/message') ?? 0}, user ${types.get('user/message') ?? 0}, `
   + `tool calls ${types.get('tool/call') ?? 0}, tool results ${types.get('tool/result') ?? 0}`)
 console.log(`fold check  : ${surface.nodes.length} surface nodes, ${surface.replacements.length} replacements, token delta ${tokens}`)
-console.log(`header id   : ${verifyHeader.value.toString('utf8').slice(0, 80)}...`)
+queueAdoption(String(sourceMeta.id), String(successorId))
+console.log(`adoption    : queued for the host (mechanisms follow automatically)`)
