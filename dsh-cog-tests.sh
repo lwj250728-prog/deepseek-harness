@@ -10579,6 +10579,61 @@ assert "落盘失败" in (rb.stderr or ""), "写入失败必须可见(不许静�
 print("就绪读数留痕: DRY 不写 / 追加不覆盖(2 行) / 上限截断(6→3 仍合法) / 附属写入失败非致命且可见")
 '
 
+# T256 (tp-212/cl-373): cl-368 给读数加了 repo(全仓 可交付/需先构建)、cl-369 加了 resolved(载体将加载的插件路径+mtime),
+# 而 T255 只钉了 DRY/追加/上限/非致命 —— **这两段新字段无人验**, 它们却是"重启会交付什么"的依据(数字错则决策错)。
+# 口径: 与 dsh-deploy-lag.py **同一套判定**逐项一致(不是各算一套); resolved 只许含本读数关心的包; mtime 必须等于真实文件。
+echo "[T256] 就绪读数新字段(repo/resolved)的同口径与边界"
+t "就绪读数的新字段必须同口径且不越界: repo 与 deploy-lag 逐项一致 + resolved 只含关心的包且 mtime 属实" python3 -c '
+import datetime, json, os, subprocess, sys, tempfile, time
+R = os.path.expanduser("~/dsh-fork")
+TOOL = os.path.join(R, "dsh-chain-readiness.py")
+LAG = os.path.join(R, "dsh-deploy-lag.py")
+VENDORS = ["packages/context/cognitive-inject", "packages/cognition/cognitive-pipeline"]
+T = tempfile.mkdtemp(prefix="t256-")
+LEDGER = os.path.join(T, "read.jsonl")
+now = time.time()
+# 夹具: 注入 lag 状态(只给两个关心包) ⇒ 判定确定且不依赖真实载体。
+# **必须是 carrier-stale + live 各一个**: 若两个都非 live, 则"把 live 也算可交付"这类变异行为惰性(探针会把它报成存活)。
+state = {"carrierStart": now - 3600, "packages": {VENDORS[0]: {"libMtime": now - 10, "srcMtime": now - 7200},
+                                               VENDORS[1]: {"libMtime": now - 7200, "srcMtime": now - 9000}}}
+STATE = os.path.join(T, "lag.json")
+with open(STATE, "w", encoding="utf8") as fh: json.dump(state, fh)
+env = dict(os.environ, DSH_CHAIN_READINESS_LEDGER=LEDGER, DSH_DEPLOY_LAG_STATE=STATE,
+           DSH_READY_VENDOR=",".join(VENDORS))
+r = subprocess.run([sys.executable, TOOL, "--record"], capture_output=True, text=True, timeout=600, env=env)
+assert r.returncode in (0, 1, 2), "就绪工具跑不通: %s" % ((r.stdout or "") + (r.stderr or ""))[-300:]
+line = [x for x in open(LEDGER, encoding="utf8").read().splitlines() if x.strip()][-1]
+rec = json.loads(line)
+# ① repo 三段必须与 deploy-lag 同口径(权威判定来自 deploy-lag 自己, 不是我这边的解释)
+lr = subprocess.run([sys.executable, LAG, "--json", "--only", ",".join(VENDORS)], capture_output=True, text=True, timeout=600, env=env)
+lag = json.loads([x for x in lr.stdout.strip().splitlines() if x.strip().startswith("{")][-1])
+verdicts = {x["package"]: x["verdict"] for x in lag["rows"]}
+want_deliver = sorted(p for p, v in verdicts.items() if v == "carrier-stale")
+want_build = sorted(p for p, v in verdicts.items() if v in ("build-stale", "missing"))
+repo = rec.get("repo") or {}
+assert repo.get("deliverableOnRestart") == want_deliver, "可交付清单与 deploy-lag 不一致: %s vs %s" % (repo.get("deliverableOnRestart"), want_deliver)
+assert repo.get("needsBuildFirst") == want_build, "需先构建清单与 deploy-lag 不一致: %s vs %s" % (repo.get("needsBuildFirst"), want_build)
+assert repo.get("scanned") == len(lag["rows"]), "扫描数与 deploy-lag 不一致: %s vs %s" % (repo.get("scanned"), len(lag["rows"]))
+# ② resolved 只许含关心的包, 且 artifactMtime 必须等于真实文件 mtime
+res = rec.get("resolved") or []
+assert len(res) == len(VENDORS), "resolved 条目数应为 %d(只含关心的包), 实得 %d" % (len(VENDORS), len(res))
+for item in res:
+    tgt = os.path.expanduser(item["target"])
+    assert any(tgt.endswith(v) for v in VENDORS), "resolved 越界(含了不关心的包): %s" % tgt
+    entry = os.path.join(tgt, "lib", "index.js")
+    real = datetime.datetime.fromtimestamp(os.path.getmtime(entry), datetime.timezone(datetime.timedelta(hours=8))).strftime("%m-%d %H:%M")
+    assert item["artifactMtime"] == real, "%s 的 artifactMtime 与真实文件不符: %s vs %s" % (item["plugin"], item["artifactMtime"], real)
+# ③ deploy-lag 不可用时允许 repo=null, 但不许编造部分字段
+env2 = dict(env, DSH_READY_DEPLOY_LAG=os.path.join(T, "no-such-tool.py"), DSH_CHAIN_READINESS_LEDGER=os.path.join(T, "read2.jsonl"))
+r2 = subprocess.run([sys.executable, TOOL, "--record"], capture_output=True, text=True, timeout=600, env=env2)
+p2 = os.path.join(T, "read2.jsonl")
+assert os.path.exists(p2), "第二种情形没有落盘(工具应仍能记录)"
+rec2 = json.loads([x for x in open(p2, encoding="utf8").read().splitlines() if x.strip()][-1])
+assert rec2.get("repo") is None, "deploy-lag 不可用时 repo 必须是 null(不许编造部分字段): %s" % rec2.get("repo")
+print("就绪读数新字段: repo 与 deploy-lag 三项逐项一致 / resolved 仅含关心包且 mtime 属实 / 上游不可用时为 null 不编造")
+'
+
+
 # cl-367: **把真实记录接进套件** —— cron 每 6h 跑套件即免费产生一行读数(这才是「看守留痕」, T255 是它的判据)。
 echo "[T255] 记录真实读数(cron 每 6h 免费执行)"
 bash "$HOME/dsh-fork/dsh-chain-readiness-record.sh" || true
