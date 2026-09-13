@@ -1,0 +1,23 @@
+{
+ "at": "2026-09-14T03:4x+08:00",
+ "note": "债基线登记簿(tp-207/T241): kind=debt 的必须棘轮(现实好于基线⇒写回更紧; 差于⇒判红); kind=floor/measurement 显式例外, 必须写 why。",
+ "entries": [
+  {"file": "change-coverage-baseline.json", "kind": "debt",
+   "reality": {"noSpecCount": "changeCoverageNoSpec"},
+   "why": "noSpecCount 有**廉价现实探针**(24h 改动包 × 零可跑 spec, 与 T237 同口径不跑 vitest); failingSpecs 的现实对账需跑 vitest, 由 T237 自身在跑动时棘轮。"},
+  {"file": "probe-arms-baseline.json", "kind": "debt",
+   "reality": {"frozenSingleArm": "probeSingleArm"},
+   "why": "frozenSingleArm 是「单臂探针债」冻结清单; 现实探针读 guard-fire 里**最近一次实测**的单臂数(不重跑探针)。"},
+  {"file": "oom-crash-baseline.json", "kind": "floor",
+   "why": "nRestarts 是**下界**(要求崩溃证据出现在该值之后), 收紧会让历史证据失效 ⇒ 不棘轮, 显式例外。"},
+  {"file": "assert-isolation-baseline.json", "kind": "debt-unratcheted",
+   "why": "冻结的豁免名单(names/exempt), 目前**没有现实对账器** ⇒ 显式标为债: 只减不增靠人工, 待补探针。"},
+  {"file": "ab-baselines.json", "kind": "measurement", "why": "A/B 分界测量数据(splitAt/beforeValue/afterValue), 不是债。"},
+  {"file": "ab-baselines.prev.json", "kind": "measurement", "why": "同上(上一版分界)。"},
+  {"file": "diversity-arm-baseline.json", "kind": "measurement", "why": "δ 实验 B 臂的基线(进程起点/哈希/窗口), 不是债。"},
+  {"file": "incubation-baseline.json", "kind": "measurement", "why": "孵化不变量漂移的存量残差, 属测量口径而非债。"},
+  {"file": "library-replay-baseline.json", "kind": "measurement", "why": "库回放实验的两臂定义与判据, 不是债。"},
+  {"file": "wake-intervention-baseline.json", "kind": "measurement", "why": "唤醒干预窗口的预登记(起止/小时/时代), 不是债。"},
+  {"file": "wake-intervention-baseline.prev-caliber.json", "kind": "measurement", "why": "同上(旧口径留档)。"}
+ ]
+}

@@ -10030,6 +10030,36 @@ finally:
 assert same_as_head(target), "复原后内容应仍与 HEAD 一致"
 print("T240: 仅 mtime 变新(内容与 HEAD 一致)不判 src 落后 —— 内容优先的判据生效(%s)" % os.path.basename(os.path.dirname(os.path.dirname(target))))
 '
+# ── T241 债基线的棘轮(tp-207) ──
+# 由来: 多处判据用「冻结存量债、只减不增」的写法, 但**只做减法判断、没有写回更紧值**的路径 ⇒ 现成实例:
+# change-coverage 声明 noSpecCount=2 而现实已是 1(我给 cognitive-inject 补了启用 spec) ⇒ 下次再坏回去仍判绿。
+# 判据: ①跑 --ratchet(现实好于基线必须写回)+ 判定必须绿; ②棘轮后不变式必须成立; ③盘点 11 个基线全部有分类与理由。
+echo "[T241] 债基线的棘轮"
+t "债基线必须棘轮: 现实好于基线须写回, 差于须红, 且全部基线有分类与理由" python3 -c '
+import json, os, subprocess, sys
+R = os.path.expanduser("~/dsh-fork")
+TOOL = os.path.join(R, "dsh-debt-baseline-ratchet.py")
+def run(*args):
+    r = subprocess.run([sys.executable, TOOL] + list(args), capture_output=True, text=True, timeout=900)
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+rc, out = run("--ratchet", "--json")
+assert rc == 0, "棘轮+判定应绿(现实好于基线时必须写回, 差于时必须红), 实得 exit=%d: %s" % (rc, out[-400:])
+rc2, out2 = run("--check", "--json")
+assert rc2 == 0, ("棘轮之后不变式必须成立(基线不得比现实松): exit=%d %s" % (rc2, out2[-400:]))
+rc3, out3 = run("--survey", "--json")
+assert rc3 == 0, "盘点跑不通: %s" % out3[-200:]
+rows = json.loads([x for x in out3.strip().splitlines() if x.strip().startswith("[")][-1])
+assert len(rows) >= 11, "基线盘点数 %d < 11 ⇒ 有基线没被分类(未分类=静默不判)" % len(rows)
+debt = [r for r in rows if r.get("kind") == "debt"]
+unratcheted = [r for r in rows if not r.get("ratcheted")]
+assert debt, "一条 debt 类基线都没有(登记簿腐烂?)"
+assert unratcheted, "所有基线都棘轮? 不可能 —— 至少下界类(nRestarts)与测量类不该棘轮"
+assert all(r.get("why") for r in rows), "有基线没写分类理由 ⇒ 盘点不可解释: %s" % [r.get("file") for r in rows if not r.get("why")]
+base = json.load(open(os.path.expanduser("~/.dsh/cognitive-pipeline/change-coverage-baseline.json"), encoding="utf8"))
+assert isinstance(base.get("noSpecCount"), int), "棘轮后 noSpecCount 必须是数(不是列表/缺失)"
+print("债基线棘轮: 棘轮+判定绿 / 不变式成立 / 盘点 %d 条全部有分类与理由 / change-coverage.noSpecCount=%s"
+      % (len(rows), base.get("noSpecCount")))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
