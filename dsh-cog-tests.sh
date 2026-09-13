@@ -2051,12 +2051,19 @@ assert "cl-083" in s and "element.length < 2" in s, "关键词层未限词级"
 # ── T66 派帧设链锚 + 语料词典过滤(cl-085 / cl-083 残留) ──
 echo "[T66] 行动帧设链锚(经验继承目标) + 关键词语料词典过滤"
 t "行动帧派发时设链锚" python3 -c '
-import os
+import os, re
 s = open(os.path.expanduser("~/dsh-fork/packages/context/quiet-driver/src/index.ts"), encoding="utf8").read()
-assert "setChainAnchor(String(sessionId), actionable.id)" in s, "行动帧未设链锚"
-i = s.index("setChainAnchor(String(sessionId), actionable.id)")
-seg = s[max(0, i-900):i]
+# 2026-09-13 12:1x: 本断言原先钉死字面量 setChainAnchor(String(sessionId), actionable.id) —— 而 549b9e0
+# (交接时跟随目标会话)把那个标识符改成了 targetSessionId ⇒ 断言**因改名而腐烂**(属性还在, 字面量对不上)。
+# 这正是"文本型断言"的通病(测试审视帧早就点过: 结构断言抓不住 wired-but-semantically-wrong, 却会被无关改名打红)。
+# 改为钉**属性**: 在行动帧路径内, 用 action-frame 选中的那个目标的 id 设锚, 且锚就是该目标。
+m = re.search(r"setChainAnchor\(String\((\w+)\),\s*actionable\.id\)", s)
+assert m is not None, "行动帧未设链锚(找不到 setChainAnchor(String(<谁>), actionable.id))"
+i = m.start()
+seg = s[max(0, i-1200):i]
 assert "actionable !== null" in seg, "设锚不在行动帧路径内"
+assert "const actionable" in seg, "设锚处取不到 actionable(行动帧目标)"
+print("设链锚: setChainAnchor(String(%s), actionable.id), 位于行动帧路径内" % m.group(1))
 '
 t "产物含设链锚(已部署)" bash -c "grep -q 'setChainAnchor' '$HOME/dsh-fork/packages/context/quiet-driver/lib/index.js'"
 t "关键词语料词典过滤在源码" python3 -c '
@@ -6343,34 +6350,72 @@ print("last-wins 成立: 只结算 1 条, 且用最后一次预登记的区间 %
 # 为什么带 waitChecker 就豁免: 日期门/样本门目标本来就会累积若干次未采纳的唤醒, 那是设计而非空转。
 echo "[T171] 重复催办判据(连续未采纳且无生效等待即红)"
 t "active 目标不得连续 3 次唤醒未采纳且无生效等待条件" python3 -c '
-import json, os, subprocess, collections
+import json, os, subprocess, collections, datetime
+# 2026-09-13 12:1x **口径修正(本断言原先会误报)**: 原来只看 goal-trigger-log 里的 adopted 标记, 而那个标记
+# **只在"被唤醒的那个回合/那个会话"里**比对池快照 ⇒ 推进若发生在别的会话(今天实测: 目标被唤醒在 A 会话,
+# 而我在 B 会话的帧里推进了它), 标记看不见 ⇒ 判成"连续未采纳"。这与孵化体检 12:0x 那次修的是同一类病。
+# 改口径: 唤醒算不算"有产出", 用**全局**的池历史判 —— 唤醒后 60 分钟内该目标的 nextAction 真的变了即算;
+# 另外把**停泊期**的唤醒(池里挂着 waitChecker)排除在外(那种唤醒注定不能转化, 不该计入未采纳连击)。
 D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+TZ = datetime.timezone(datetime.timedelta(hours=8))
+WINDOW_MIN = 60
+def pt(s):
+    try:
+        d = datetime.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        return (d if d.tzinfo else d.replace(tzinfo=TZ)).astimezone(TZ)
+    except Exception:
+        return None
 pool = {}
+hist = collections.defaultdict(list)
 for line in open(os.path.join(D, "dormant-goals.jsonl"), encoding="utf8"):
     if line.strip():
-        row = json.loads(line); pool[row.get("id")] = row
+        row = json.loads(line); gid = row.get("id")
+        if not gid: continue
+        pool[gid] = row
+        t = pt(row.get("lastActionAt") or row.get("ts"))
+        if t: hist[gid].append((t, str(row.get("nextAction") or ""), bool(str(row.get("waitChecker") or "").strip())))
+for v in hist.values(): v.sort()
+def advances_after(gid, t0):
+    nxt = None
+    out = []
+    for t, na, _g in hist.get(gid, []):
+        if nxt is not None and na and na != nxt and t0 < t <= t0 + datetime.timedelta(minutes=WINDOW_MIN):
+            out.append(t)
+        nxt = na
+    return out
+def parked_at(gid, when):
+    h = [g for g in hist.get(gid, []) if g[0] <= when]
+    return h[-1][2] if h else False
 trig = collections.defaultdict(list)
 for line in open(os.path.join(D, "goal-trigger-log.jsonl"), encoding="utf8"):
     if line.strip():
         r = json.loads(line); trig[r.get("goalId")].append(r)
-bad = []
+bad, detail = [], []
 for gid, g in pool.items():
     if g.get("status") != "active":
         continue
-    rows = trig.get(gid) or []
+    rows = [r for r in (trig.get(gid) or []) if pt(r.get("ts"))]
+    rows.sort(key=lambda r: pt(r.get("ts")))
     streak = 0
     for r in reversed(rows):
-        if r.get("adopted") is True:
+        if r.get("skipped"):        # 未投递的唤醒不计入连击
+            continue
+        t = pt(r.get("ts"))
+        if parked_at(gid, t):       # 停泊期的唤醒不计入连击
+            continue
+        if r.get("adopted") is True or advances_after(gid, t):
             break
         streak += 1
     checker = (g.get("waitChecker") or "").strip()
     waiting = False
     if checker:
-        waiting = subprocess.run(checker, shell=True, capture_output=True).returncode != 0   # 条件未满足=在等待
+        waiting = subprocess.run(checker, shell=True, capture_output=True).returncode != 0
     if streak >= 3 and not waiting:
         bad.append("%s(连续 %d 次未采纳, 无生效等待: %s)" % (gid, streak, checker or "无 waitChecker"))
+    detail.append("%s:%d" % (gid.split("-")[-1], streak))
 assert not bad, "疑似重复催办(该目标的 nextAction 可能已完成或不可推进): %s" % bad
-print("active 目标均未出现\"连续未采纳且无等待\"的空转")
+print("全局口径(唤醒后 %d 分钟内该目标 nextAction 真的变过即算产出; 未投递/停泊期不计): 未采纳连击 %s"
+      % (WINDOW_MIN, ", ".join(detail)))
 '
 # ── T172 唤醒→推进归因这把尺子本身(cl-251) ──
 # 起因: 这条读数第一版给出"严格 8.4%", 我差点据此判"提醒多半是噪声"。逐项校准发现**两处都是尺子的问题**:

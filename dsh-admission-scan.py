@@ -26,6 +26,7 @@ import json
 import math
 import os
 import re
+import statistics
 import sys
 from collections import Counter
 
@@ -128,6 +129,32 @@ class BM25:
         return {'targets': len(targets), 'hit': hit, 'rate': hit / len(targets)}
 
 
+def bootstrap(rows, seeds=(1, 2, 3, 4, 5), frac=0.8):
+    """稳定性检查(2026-09-13 12:2x, 由 cl-296.nextAction ① 驱动): 本脚本是**确定性**的, 所以"再跑一遍"
+    只会得到同一串数字 —— 那不叫稳定性。真正要回答的是"截断劣势是不是单次抽样的偶然": 故对库做
+    N 次 80% 子抽样, 每次重算 同一批 k 档下 `IDF 前 k` 与 `全收` 的命中率差, 报分布。
+
+    → ([(k, [gap...])], 说明)。gap = 全收命中率 − IDF 前 k 命中率(正 = 截断更差)。
+    """
+    import random as _rnd
+    gaps = {k: [] for k in (20, 40, 60)}
+    for sd in seeds:
+        rr = _rnd.Random(sd)
+        sub = rr.sample(rows, max(10, int(len(rows) * frac)))
+        docs = [full_text(r) for r in sub]
+        bm = BM25(docs, chars)
+        elems = [chars(full_text(r)) for r in sub]
+        base = bm.top1_same_chain_rate(sub, lambda i: set(elems[i]))
+        if base is None:
+            continue
+        for k in gaps:
+            r2 = bm.top1_same_chain_rate(sub, lambda i, k=k: set(sorted(dict.fromkeys(elems[i]),
+                                                                        key=lambda w: (-bm.idf(w), w))[:k]))
+            if r2 is not None:
+                gaps[k].append(base['rate'] - r2['rate'])
+    return gaps, '库 %d 条, %d 次 80%% 子抽样' % (len(rows), len(seeds))
+
+
 def main() -> int:
     rows = load()
     if not rows:
@@ -220,6 +247,19 @@ def main() -> int:
         print('  判读: cl-053 在该档是「保留最近 73%% > 内容词 69%%」; 是否仍成立以上面的数说话。')
 
     print('\n未复算(明确标注, 不假装覆盖): 陈旧元素污染测试(cl-053 §3b/3c) —— 需跨情境注入陈旧元素, 本脚本不做。')
+    if '--bootstrap' in sys.argv:
+        gaps, note = bootstrap(rows)
+        print('\n=== 稳定性(截断劣势是不是单次抽样偶然): %s ===' % note)
+        for k in sorted(gaps):
+            g = gaps[k]
+            if not g:
+                continue
+            worse = sum(1 for x in g if x > 0)
+            print('  k=%-4d 全收−IDF前k 的差: 中位 %+.1fpp, 最小 %+.1fpp, 最大 %+.1fpp; **%d/%d 次截断更差**'
+                  % (k, 100 * statistics.median(g), 100 * min(g), 100 * max(g), worse, len(g)))
+        allworse = all(sum(1 for x in gaps[k] if x > 0) == len(gaps[k]) for k in gaps if gaps[k])
+        print('  判读: %s' % ('每一次抽样里截断都更差 ⇒ cl-296 的"任何截断都更差"**不是单次噪声**'
+                              if allworse else '存在抽样中截断不更差的情形 ⇒ cl-296 该条需按分布重述(不得写成普遍结论)'))
     return 0
 
 
