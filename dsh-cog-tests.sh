@@ -5938,6 +5938,9 @@ r = subprocess.run(["bash", "/home/ubuntu/dsh-fork/dsh-guard-t158-probe.sh"], ca
 assert r.returncode == 1, "开火探针未按预期开火(exit=%d): %s" % (r.returncode, r.stderr[-160:])
 print("探针开火: " + r.stderr.strip().splitlines()[-1][:80])
 '
+# **cl-229 假红修正(2026-09-14 01:5x 实测)**: 本判据原来只看 mtime, 而今晚的**变异探针复原时用 `cp` 把目标文件时间戳推新**
+# (实测: session-persistence-jsonl/src/index.ts 的 mtime 比 lib 新 10898s, 但 `git diff` **为空** ⇒ 内容根本没改)。
+# ⇒ 判据必须先问一句"内容与 HEAD 一致吗": 一致的文件即使 mtime 新也不是"改了源码"(mtime 变化来自复原动作)。
 # ── T159 宿主面构建新鲜度(cl-229: 改了源码没重跑 emit ⇒ 打包静默带旧代码) ──
 # 起因: 第二道门埋点 15:50 写进源码却从未进产物, 而宿主面构建是两段式 —— `tsc -b` 先把 JS 发到
 # `lib/types/`, `tsdown --env.DSH_BUILD_FACE host` 再以 `lib/types/{index}.js` 为 entry 打包 `lib/index.js`。
@@ -5945,7 +5948,18 @@ print("探针开火: " + r.stderr.strip().splitlines()[-1][:80])
 # "改动生效了"与"构建成功了"之间没有任何判据。本组守: src 不得比 lib/types 的 emit 新。
 echo "[T159] 宿主面构建新鲜度(src 不得比 lib/types 的 emit 新)"
 t "凡已 emit 的包, src 不得比 lib/types 新(否则打包只会带旧代码)" python3 -c '
-import os, glob
+import os, glob, subprocess
+def content_changed(path):
+    # **先判内容**(cl-229 假红修正, 2026-09-14 01:5x): 内容与 HEAD 一致 ⇒ 即使 mtime 新也**不是**"改了源码" ——
+    # mtime 变新可能来自**变异探针的复原动作**(实测: session-persistence-jsonl/src/index.ts 的 mtime 比 lib 新 10898s,
+    # 而 git diff 为空; 复原已改为 cp -p)。只看 mtime 会把"我改过又还原"读成"改了源码没重跑 emit"。
+    r = subprocess.run(["git", "-C", os.path.expanduser("~/dsh-fork"), "diff", "--quiet", "HEAD", "--", path],
+                       capture_output=True)
+    if r.returncode == 0:
+        return False                  # 与 HEAD 一致
+    if r.returncode > 1:
+        return True                   # git 出错: 保守当作改过(宁可报, 不可漏)
+    return True
 stale = []
 for src in sorted(glob.glob(os.path.expanduser("~/dsh-fork/packages/*/*/src/index.ts"))):
     pkg = os.path.dirname(os.path.dirname(src))
@@ -5953,7 +5967,7 @@ for src in sorted(glob.glob(os.path.expanduser("~/dsh-fork/packages/*/*/src/inde
     if not os.path.exists(emitted):
         continue                      # 未构建的包不判(不是本组的事)
     gap = os.path.getmtime(src) - os.path.getmtime(emitted)
-    if gap > 1:                       # 1s 容忍文件系统粒度
+    if gap > 1 and content_changed(src):   # 1s 容忍文件系统粒度
         stale.append("%s(落后 %ds)" % (pkg.split("packages/")[-1], int(gap)))
 assert not stale, "改了源码却没重跑 tsc emit ⇒ 宿主打包只会带旧 emit(cl-229): " + "; ".join(stale[:5])
 print("所有已 emit 的包都不落后于源码")

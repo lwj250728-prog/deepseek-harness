@@ -19,7 +19,7 @@ if [ "${DSH_PROBE_CLEAN:-}" = "1" ]; then
 fi
 
 BAK=$(mktemp); cp "$SRC" "$BAK" || exit 3
-restore() { cp "$BAK" "$SRC"; rm -f "$BAK"; }
+restore() { cp -p "$BAK" "$SRC"; rm -f "$BAK"; }   # -p 保留 mtime: 复原若推新时间戳, 会污染一切基于 mtime 的判据(cl-229 的假红就是这么来的)
 trap restore EXIT
 
 python3 - "$SRC" <<'MK' || exit 3

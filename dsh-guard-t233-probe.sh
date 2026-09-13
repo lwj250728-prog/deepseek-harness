@@ -18,7 +18,7 @@ if [ "${DSH_PROBE_CLEAN:-}" = "1" ]; then
 fi
 
 BAK=$(mktemp); cp "$SRC" "$BAK" || exit 3
-trap 'cp "$BAK" "$SRC"; rm -f "$BAK"' EXIT
+trap 'cp -p "$BAK" "$SRC"; rm -f "$BAK"' EXIT   # -p 保留 mtime: 复原推新时间戳会污染 mtime 类判据
 python3 - "$SRC" <<'MK' || exit 3
 import sys
 p = sys.argv[1]
