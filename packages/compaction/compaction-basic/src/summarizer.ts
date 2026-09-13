@@ -10,6 +10,7 @@ import type {
   ContentBlock, FinishReason, GenerateOptions, Message, TokenUsage, ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { boundRegionToWindow } from './context-budget.ts'
 
 interface SummaryConfig {
   readonly summarizationProvider: string
@@ -143,10 +144,21 @@ export async function summarizeWithLlm(
   }
 
   const assembler = new BlockAssembler()
+  // The replayed region can itself exceed the summarizer's window — the state a
+  // session reaches when earlier compactions could not run. Bound it, and say so
+  // in the directive: a checkpoint must never imply it covers a span the model
+  // never saw.
+  const window = (await ctx.llm.resolveModelInfo(target.provider, target.model, signal)).context?.contextWindow
+  const bounded = boundRegionToWindow(input.messages, window, config.maxTokens)
+  const instruction = bounded.omittedMessages === 0
+    ? COMPACTION_INSTRUCTION
+    : `NOTE: the oldest ${bounded.omittedMessages} message(s) of this span were omitted because the span `
+      + 'exceeds this model window. Cover what is shown, and state explicitly in "Critical Context" that '
+      + 'earlier detail was omitted.\n\n' + COMPACTION_INSTRUCTION
   const messages: Message[] = [
-    ...input.messages,
+    ...bounded.messages,
     createUserMessage({
-      content: [{ type: 'text', text: COMPACTION_INSTRUCTION }],
+      content: [{ type: 'text', text: instruction }],
       source: { kind: 'plugin', plugin: 'dsh-compaction-basic' },
     }),
   ]
