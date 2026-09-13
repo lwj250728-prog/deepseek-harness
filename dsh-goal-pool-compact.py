@@ -35,6 +35,35 @@ def stamp(goal: dict) -> str:
     return str(goal.get('lastActionAt') or goal.get('lastProgressAt') or goal.get('createdAt') or '')
 
 
+
+def _pool_guard(path):
+    """目标池的**互斥锁**(tp-197 深层修法, cl-320 ①): 写者与压实共用 `<pool>.lock`。
+
+    为什么还需要锁(压实已有 mtime/size 指纹守卫): 指纹守卫是"检查后落盘", **检查与落盘之间**仍有一个窗口 ——
+    写者恰好在这个窗口里追加, 压实的落盘就会把那次写入静默回退。互斥把窗口关掉: 谁先拿锁谁先跑完。
+    指纹守卫保留作第二道(防"不持锁的写者", 例如别的会话直接编辑池文件)。
+    """
+    import contextlib
+    @contextlib.contextmanager
+    def _cm():
+        fh = None
+        try:
+            import fcntl
+            fh = open(str(path) + '.lock', 'w')
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        except Exception:
+            fh = None          # 非 POSIX / 取不到锁: 退化为无锁(仍有指纹守卫兜底), 不阻塞写入
+        try:
+            yield
+        finally:
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+    return _cm()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--pool', default=DEFAULT_POOL)
@@ -47,6 +76,17 @@ def main() -> int:
     # 2026-09-13 15:2x **实测事故(tp-197)**: 15:10 用唯一写入口写入三个目标的 waitChecker(逐条回读 ✓),
     # 15:11:34 本工具重写池子后**那三行全部消失**且无任何报警 —— 读-改-写竞态: 本工具读到的是**写入之前**的
     # 快照, 落盘时把快照写回 ⇒ 并发写入被静默回退。故读入时记下 (mtime_ns, size) 指纹, 落盘前复核。
+    # 持锁包住"读入 → 落盘"(tp-197 深层修法): 指纹守卫只看得到"检查之前"的变化, 锁把
+    # "检查之后、落盘之前"这个窗口也关掉。取不到锁就退化为无锁(指纹守卫兜底)。
+    _guard = _pool_guard(args.pool)
+    _guard.__enter__()
+    try:
+        return _compact_body(args)
+    finally:
+        _guard.__exit__(None, None, None)
+
+
+def _compact_body(args) -> int:
     _st = os.stat(args.pool)
     _fingerprint = (_st.st_mtime_ns, _st.st_size)
     rows = [json.loads(l) for l in open(args.pool, encoding='utf8') if l.strip()]

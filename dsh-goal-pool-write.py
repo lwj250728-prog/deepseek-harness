@@ -48,6 +48,35 @@ def load_current(pool: str) -> tuple[list[dict], dict]:
     return rows, current
 
 
+
+def _pool_guard(path):
+    """目标池的**互斥锁**(tp-197 深层修法, cl-320 ①): 写者与压实共用 `<pool>.lock`。
+
+    为什么还需要锁(压实已有 mtime/size 指纹守卫): 指纹守卫是"检查后落盘", **检查与落盘之间**仍有一个窗口 ——
+    写者恰好在这个窗口里追加, 压实的落盘就会把那次写入静默回退。互斥把窗口关掉: 谁先拿锁谁先跑完。
+    指纹守卫保留作第二道(防"不持锁的写者", 例如别的会话直接编辑池文件)。
+    """
+    import contextlib
+    @contextlib.contextmanager
+    def _cm():
+        fh = None
+        try:
+            import fcntl
+            fh = open(str(path) + '.lock', 'w')
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        except Exception:
+            fh = None          # 非 POSIX / 取不到锁: 退化为无锁(仍有指纹守卫兜底), 不阻塞写入
+        try:
+            yield
+        finally:
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+    return _cm()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('id')
@@ -65,6 +94,18 @@ def main() -> int:
     if not os.path.exists(args.pool):
         print('读不到目标池: %s' % args.pool, file=sys.stderr)
         return 3
+    # 持锁包住"读当前行 → 追加": 与压实互斥, 免得压实的落盘把这次写入静默回退(tp-197)。
+    _lock = _pool_guard(args.pool) if args.write else None
+    if _lock is not None:
+        _lock.__enter__()
+    try:
+        return _main_body(args, ap)
+    finally:
+        if _lock is not None:
+            _lock.__exit__(None, None, None)
+
+
+def _main_body(args, ap) -> int:
     rows, current = load_current(args.pool)
     cur = current.get(args.id)
     if cur is None:

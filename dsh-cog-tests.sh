@@ -9544,6 +9544,54 @@ rc4, _, _ = run()
 assert rc4 == 0, "复原后闸门仍判泄漏(exit=%d) ⇒ 残留" % rc4
 print("MUTANT 闸门: 干净放行 / 空清单报泄漏 %d 条(证明清单被消费) / 植入即判泄漏并指名 / 复原后回干净" % n_leak2)
 '
+# ── T233 池压实与写者的互斥(tp-197 深层修法 / cl-320 ①) ──
+# 由来: 压实已有 (mtime_ns,size) 指纹守卫, 但那是"检查后落盘" —— **检查与落盘之间**写者恰好追加,
+# 压实的落盘仍会把那次写入静默回退(15:10 事故)。修法: 两者共用 <pool>.lock 互斥。
+# 判据(确定性复现, 用压实自带的 DSH_COMPACT_DEBUG_SLEEP 窗口): 写者必须**等锁**(耗时>3.5s) /
+# 压实必须成功(written=true, 而不是被指纹守卫拒绝) / 终态行数 = 压实后 + 1 / 写者的行必须存活。
+echo "[T233] 池压实与写者的互斥"
+t "池压实与写者必须互斥: 写者等锁 + 压实成功 + 两者都不丢" python3 -c '
+import json, os, shutil, subprocess, sys, tempfile, time
+POOL = os.path.expanduser("~/.dsh/cognitive-pipeline/dormant-goals.jsonl")
+COMPACT = os.path.expanduser("~/dsh-fork/dsh-goal-pool-compact.py")
+WRITE = os.path.expanduser("~/dsh-fork/dsh-goal-pool-write.py")
+T = tempfile.mkdtemp(prefix="t233-")
+target = os.path.join(T, "pool.jsonl")
+shutil.copy(POOL, target)
+before = [json.loads(l) for l in open(target, encoding="utf8") if l.strip()]
+ids = {}
+for r in before:
+    ids[str(r.get("id"))] = r
+gid = sorted(ids)[0]
+comp = subprocess.Popen([sys.executable, COMPACT, "--pool", target, "--write", "--json"],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                        env=dict(os.environ, DSH_COMPACT_DEBUG_SLEEP="5"))
+time.sleep(0.8)
+t0 = time.time()
+w = subprocess.run([sys.executable, WRITE, gid, "--pool", target, "--next-action", "T233 竞态实验写入",
+                    "--reason", "T233", "--write"], capture_output=True, text=True, timeout=300)
+elapsed = time.time() - t0
+out, _ = comp.communicate(timeout=300)
+payload = {}
+for line in reversed([x for x in out.strip().splitlines() if x.strip()]):
+    try:
+        payload = json.loads(line)
+        break
+    except Exception:
+        continue
+assert w.returncode == 0, "写者失败: %s" % (w.stderr or w.stdout)[-200:]
+assert payload.get("written") is True, ("压实没写成(被拒绝或失败): %s ⇒ 锁没能让两者都成功" % json.dumps(payload, ensure_ascii=False)[:200])
+assert elapsed > 3.5, ("写者只用了 %.1fs ⇒ 它**没有等锁** ⇒ 互斥没生效(并发窗口仍然敞着)" % elapsed)
+after = [json.loads(l) for l in open(target, encoding="utf8") if l.strip()]
+last = {}
+for r in after:
+    last[str(r.get("id"))] = r
+assert "T233 竞态实验写入" in (last[gid].get("nextAction") or ""), "写者的行被压实的落盘吃掉了(这正是 tp-197 的静默回退)"
+assert len(after) == int(payload.get("rowsAfter")) + 1, ("终态行数 %d != 压实后 %s + 写者 1 ⇒ 有一方丢了"
+                                                       % (len(after), payload.get("rowsAfter")))
+print("竞态实验: 写者等锁 %.1fs / 压实 written=%s / 终态 %d 行(= 压实后 %s + 写者 1) ⇒ 两者都没丢"
+      % (elapsed, payload.get("written"), len(after), payload.get("rowsAfter")))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
