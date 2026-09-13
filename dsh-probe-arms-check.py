@@ -122,8 +122,8 @@ def main() -> int:
     results = {}
     for key, gid, mf in entries:
         expected = int(mf.get('expectedExit', 1))
-        with _mutex():
-            m, c, note = measure(_wrapped(str(mf['command'])), args.timeout)
+        # 变异互斥已移到 `dsh-mutation-lock.py --probe` 包装里(cl-322: 按文件上锁, 不再用一把全局锁)
+        m, c, note = measure(_wrapped(str(mf['command'])), args.timeout)
         v = verdict(m, c, expected)
         results[key] = {'guard': gid, 'mutant': m, 'clean': c, 'expected': expected, 'verdict': v, 'note': note}
         if args.write_arms:
