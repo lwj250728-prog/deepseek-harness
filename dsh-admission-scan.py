@@ -324,7 +324,12 @@ def main() -> int:
 
     print('\n未复算(明确标注, 不假装覆盖): 陈旧元素污染测试(cl-053 §3b/3c) —— 需跨情境注入陈旧元素, 本脚本不做。')
     if '--stale' in sys.argv:
-        st, note = stale_tests(rows)
+        # --stale-ns 允许自定义 N 档(2026-09-13 12:5x: 检验"伤害 ∝ N/库规模"这条密度假说 —— 固定 N 时
+        # 小库的每条文档摊到的异链陈旧元素更多, 故要把 N 按库规模缩放后再比)。
+        ns = (0, 50, 100, 200, 400)
+        if '--stale-ns' in sys.argv:
+            ns = tuple(int(x) for x in sys.argv[sys.argv.index('--stale-ns') + 1].split(','))
+        st, note = stale_tests(rows, ns=ns)
         print('\n=== cl-053 §3b/3c 陈旧元素污染复算(%s) ===' % note)
         print('(b) 本情境 IDF 前150 + N 个异链陈旧元素:')
         base_b = None
