@@ -17,23 +17,44 @@
  * from the source and fabricates frames the source never missed.
  *
  * Usage:
- *   node --import tsx/esm dsh-session-repair.mts <sourceArtifact> <destRoot> [--dry-run]
+ *   node --import tsx/esm dsh-session-repair.mts <sourceArtifact> <destRoot> [--dry-run] [--predecessor <sessionId>]
+ *
+ * `--predecessor` overrides the lineage the successor records and the id the
+ * online mechanisms are told to leave. Defaults to the source log's own session
+ * id — correct when the source IS a session, wrong when it is an intermediate
+ * artifact of a pipeline (compact → repair), where the real predecessor is the
+ * session the user was actually in.
  */
 import { appendFile, mkdir, open, readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname } from 'node:path'
+import { appendFileSync } from 'node:fs'
 import { SESSION_FORMAT_VERSION } from './packages/core/session/src/index.ts'
 import type { SessionEvent, SessionHeader, SessionId } from './packages/core/session/src/index.ts'
 import { SessionLogScanner, eventLines, logPath, sessionDir, toHeaderLine } from './packages/session/session-persistence-jsonl/src/format.ts'
 import { compressZstdFrame, createZstdFrameDecoder, scanZstdFrames } from './packages/session/session-persistence-jsonl/src/zstd.ts'
 
-interface Options { source: string; destRoot: string; dryRun: boolean }
+interface Options { source: string; destRoot: string; dryRun: boolean; predecessor?: string }
 
 function parseArgs(argv: readonly string[]): Options {
-  const [source, destRoot] = argv
-  if (source === undefined || destRoot === undefined) {
-    throw new Error('usage: dsh-session-repair.mts <sourceArtifact> <destRoot> [--dry-run]')
+  const positional: string[] = []
+  let predecessor: string | undefined
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]
+    if (arg === '--predecessor') {
+      predecessor = argv[index + 1]
+      if (predecessor === undefined || predecessor.startsWith('--')) {
+        throw new Error('--predecessor needs a session id')
+      }
+      index += 1
+      continue
+    }
+    if (arg !== undefined && !arg.startsWith('--')) positional.push(arg)
   }
-  return { source, destRoot, dryRun: argv.includes('--dry-run') }
+  const [source, destRoot] = positional
+  if (source === undefined || destRoot === undefined) {
+    throw new Error('usage: dsh-session-repair.mts <sourceArtifact> <destRoot> [--dry-run] [--predecessor <sessionId>]')
+  }
+  return { source, destRoot, dryRun: argv.includes('--dry-run'), ...predecessor === undefined ? {} : { predecessor } }
 }
 
 /** One structural orphan the meter would refuse to fold. */
@@ -139,12 +160,16 @@ const nextStructural = new Map<number, string>()
 
 const sourceMeta = pass(() => {})
 const successorId = `session-${(await import('node:crypto')).randomUUID()}` as SessionId
+// The successor records where it came from, exactly as a plugin handover does:
+// `parentSession` is the durable lineage edge, so the inheriting session can
+// name its predecessor instead of merely replacing it.
+const predecessorId = String(options.predecessor ?? sourceMeta.id) as SessionId
 const successorMeta: SessionHeader = {
   version: SESSION_FORMAT_VERSION,
   id: successorId,
   createdAt: Date.now(),
   ...sourceMeta.cwd === undefined ? {} : { cwd: sourceMeta.cwd },
-  ...sourceMeta.parentSession === undefined ? {} : { parentSession: sourceMeta.parentSession },
+  parentSession: predecessorId,
   ...sourceMeta.agentPreset === undefined ? {} : { agentPreset: sourceMeta.agentPreset },
   delegationDepth: sourceMeta.delegationDepth,
 }
@@ -268,4 +293,4 @@ await handle.sync()
 await handle.close()
 console.log(`successor   : ${successorId}`)
 console.log(`artifact    : ${((await stat(target)).size / 1048576).toFixed(2)} MB`)
-queueAdoption(String(sourceMeta.id), String(successorId))
+queueAdoption(String(predecessorId), String(successorId))

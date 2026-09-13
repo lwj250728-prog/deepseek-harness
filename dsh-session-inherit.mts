@@ -21,11 +21,12 @@
  *      them), with every surviving seq reference renumbered.
  *
  * Usage:
- *   node --import tsx/esm dsh-session-inherit.mts <sourceArtifact> <destRoot> [--dry-run]
+ *   node --import tsx/esm dsh-session-inherit.mts <sourceArtifact> <destRoot> [--dry-run] [--predecessor <sessionId>]
  */
 import { randomUUID } from 'node:crypto'
 import { appendFile, mkdir, open, readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname } from 'node:path'
+import { appendFileSync } from 'node:fs'
 import { SESSION_FORMAT_VERSION } from './packages/core/session/src/index.ts'
 import type { SessionEvent, SessionHeader, SessionId } from './packages/core/session/src/index.ts'
 import { foldSurface } from './packages/core/session/src/index.ts'
@@ -36,14 +37,28 @@ import { compressZstdFrame, createZstdFrameDecoder, scanZstdFrames } from './pac
 const CHUNK_TYPE = 'assistant/chunk'
 const BATCH_EVENTS = 500
 
-interface Options { source: string; destRoot: string; dryRun: boolean }
+interface Options { source: string; destRoot: string; dryRun: boolean; predecessor?: string }
 
 function parseArgs(argv: readonly string[]): Options {
-  const [source, destRoot] = argv
-  if (source === undefined || destRoot === undefined) {
-    throw new Error('usage: dsh-session-inherit.mts <sourceArtifact> <destRoot> [--dry-run]')
+  const positional: string[] = []
+  let predecessor: string | undefined
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]
+    if (arg === '--predecessor') {
+      predecessor = argv[index + 1]
+      if (predecessor === undefined || predecessor.startsWith('--')) {
+        throw new Error('--predecessor needs a session id')
+      }
+      index += 1
+      continue
+    }
+    if (arg !== undefined && !arg.startsWith('--')) positional.push(arg)
   }
-  return { source, destRoot, dryRun: argv.includes('--dry-run') }
+  const [source, destRoot] = positional
+  if (source === undefined || destRoot === undefined) {
+    throw new Error('usage: dsh-session-inherit.mts <sourceArtifact> <destRoot> [--dry-run] [--predecessor <sessionId>]')
+  }
+  return { source, destRoot, dryRun: argv.includes('--dry-run'), ...predecessor === undefined ? {} : { predecessor } }
 }
 
 /** Whether one event shadows a range (a compaction checkpoint or a prune). */
@@ -129,12 +144,15 @@ console.log(`cut         : after compaction #${records}, checkpoint seq ${checkp
 
 // ---- Pass 2: write the inherited seed --------------------------------------
 const successorId = `session-${randomUUID()}` as SessionId
+// The lineage edge: the source log's own session id, unless the source is an
+// intermediate pipeline artifact and the operator names the real predecessor.
+const predecessorId = String(options.predecessor ?? sourceMeta.id) as SessionId
 const successorMeta: SessionHeader = {
   version: SESSION_FORMAT_VERSION,
   id: successorId,
   createdAt: Date.now(),
   ...sourceMeta.cwd === undefined ? {} : { cwd: sourceMeta.cwd },
-  parentSession: sourceMeta.id,
+  parentSession: predecessorId,
   ...sourceMeta.agentPreset === undefined ? {} : { agentPreset: sourceMeta.agentPreset },
   delegationDepth: sourceMeta.delegationDepth,
 }
@@ -282,5 +300,5 @@ console.log(`artifact    : ${(written.length / 1048576).toFixed(2)} MB on disk (
 console.log(`messages    : assistant ${types.get('assistant/message') ?? 0}, user ${types.get('user/message') ?? 0}, `
   + `tool calls ${types.get('tool/call') ?? 0}, tool results ${types.get('tool/result') ?? 0}`)
 console.log(`fold check  : ${surface.nodes.length} surface nodes, ${surface.replacements.length} replacements, token delta ${tokens}`)
-queueAdoption(String(sourceMeta.id), String(successorId))
+queueAdoption(String(predecessorId), String(successorId))
 console.log(`adoption    : queued for the host (mechanisms follow automatically)`)

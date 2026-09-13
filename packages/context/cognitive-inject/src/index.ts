@@ -1099,13 +1099,19 @@ export function apply(ctx: Context, config: Config = {}): void {
     // ── Pre-input review (opt-in) ─────────────────────────────────────────
     // Before the raw experience blocks inject, a review subagent may
     // synthesize the ACCEPTED experiences for the main conversation. Only on
-    // the first step of a turn (step 1), for a root conversation session
-    // (no parentSession — subagent children never review, which would
-    // recurse), when the input is substantive and the session is out of its
-    // review cooldown. The review block REPLACES the raw blocks for this
-    // step; on any skip, timeout, or failure the raw path below runs.
+    // the first step of a turn (step 1), for a root conversation session,
+    // when the input is substantive and the session is out of its review
+    // cooldown. The review block REPLACES the raw blocks for this step; on any
+    // skip, timeout, or failure the raw path below runs.
+    //
+    // Root-ness is `origin !== 'subagent'`, NOT `parentSession === undefined`:
+    // a session-handover successor carries `parentSession = <predecessor>` to
+    // record its lineage, yet it is a top-level conversation that must review
+    // normally. Judging by parentSession silently disabled review for every
+    // inherited session. `origin` is what subagent children actually set
+    // (packages/subagent/subagent/src/child-agent.ts), so this cannot recurse.
     const review = resolved.review
-    if (review.enabled && (step === 1 || step === undefined) && agent.session.header.parentSession === undefined
+    if (review.enabled && (step === 1 || step === undefined) && agent.session.header.origin !== 'subagent'
       && situation.trim().length >= review.minTextChars
       && !reviewInCooldown(agent.session.id, review.cooldownMs)) {
       const reviewText = await runPreInputReview(ctx, agent, signal, situation, {
