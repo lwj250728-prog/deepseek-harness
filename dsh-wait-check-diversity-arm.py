@@ -33,6 +33,19 @@ REPO = os.environ.get('DSH_REPO') or os.path.expanduser('~/dsh-fork')
 
 
 
+
+def _deadline_release(passed, tag):
+    """时限放行的**唯一出口**: 只有"世界读到了、但条件仍不满足"才允许放行。
+
+    2026-09-13 15:4x(tp-196 第五条路径实测抓出): 初版把时限判定放在**读世界之前** ⇒ "空世界 + 时限已过" 也
+    exit 0, 即**时限成了绕过 fail-closed 的后门**。成文纪律(refine 门第 18~19 行)是"fail-closed 优先于时限:
+    时限放行的只是'测得出但样本不够', 不是'测不出来'"。故放行点收进本函数, 只在"读成功但条件不满足"处调用。
+    """
+    if not passed:
+        return False
+    print('[%s] 时限已到而条件仍未满足 => 放行, 放行理由=deadline(证据不足, 不得当作条件已满足)' % tag)
+    return True
+
 def _deadline_state(raw):
     """-> (是否已过, 'none'|'passed'|'bad')。空串=未声明时限(none)。
 
@@ -60,21 +73,28 @@ def pkg_of(path: str) -> str:
     return path
 
 
-def arm_enabled() -> tuple[bool, str]:
-    """活配置里 B 臂是否开启(以及 δ 值)。读不到 ⇒ fail-closed 视为未开。"""
+def arm_enabled() -> tuple[bool, str, bool]:
+    """活配置里 B 臂是否开启 → (开启?, 说明, **是否读到了世界**)。
+
+    2026-09-13 21:3x(tp-196 第五条路径的**第二次**修正, cl-314 同型): 初版只回 `(bool, why)` ⇒
+    "活配置**读不到**"与"活配置读到了但 enabled:false"在调用点长得一模一样, 于是**读不到世界的分支也走了时限放行**。
+    实测反例: `DSH_WEB_CONFIG=/tmp/does-not-exist.yml --deadline <过去>` ⇒ exit 0 —— 时限成了绕过 fail-closed
+    的后门(而成文纪律是"时限放行的只是'测得出但样本不够', 不是'测不出来'")。
+    故把"读成功但没开"(时限适用, 到点可放行)与"根本没读到"(fail-closed, 时限**不适用**)分开。
+    """
     try:
         text = open(PROFILE, encoding='utf8').read()
     except Exception as exc:  # noqa: BLE001
-        return False, '活配置读不到(%s)' % exc
+        return False, '活配置读不到(%s)' % exc, False
     m = re.search(r'diversityBonus:\s*\{([^}]*)\}', text)
     if m is None:
-        return False, '活配置里没有 diversityBonus(未接 B 臂)'
+        return False, '活配置里没有 diversityBonus(未接 B 臂)', True
     body = m.group(1)
     enabled = re.search(r'enabled:\s*(true|false)', body)
     delta = re.search(r'delta:\s*([0-9.]+)', body)
     if enabled is None or enabled.group(1) != 'true':
-        return False, 'diversityBonus.enabled 不是 true'
-    return True, 'δ=%s' % (delta.group(1) if delta else '?')
+        return False, 'diversityBonus.enabled 不是 true', True
+    return True, 'δ=%s' % (delta.group(1) if delta else '?'), True
 
 
 def process_start() -> datetime.datetime | None:
@@ -246,9 +266,6 @@ def main() -> int:
     if _dl_state == 'bad':
         print('[diversity-arm] 时限写错(' + repr('%r') + ' 无法解析) => fail-closed 不放行')
         return 1
-    if _dl_passed:
-        print('[diversity-arm] 时限已到而条件仍未满足 => 按**时限放行**并标注放行理由=deadline(证据不足, 不得当作条件已满足)')
-        return 0
     if args.set_aref:
         import shutil
         src = os.path.expanduser(args.set_aref)
@@ -269,8 +286,14 @@ def main() -> int:
         intent = [] if args.intent.strip().lower() in ('', 'none', '无') else [x.strip() for x in args.intent.split(',') if x.strip()]
         return write_rebaseline(intent)
 
-    on, why = arm_enabled()
+    on, why, readable = arm_enabled()
+    if not readable:
+        # 读不到活配置 = 读不到世界 ⇒ fail-closed, **时限不适用**(2026-09-13 21:3x 实测: 这一支当初会靠时限放行)。
+        print('[wait-diversity] %s ⇒ fail-closed 不放行(时限不适用: 时限放行的只是"测得出但样本不够")' % why)
+        return 1
     if not on:
+        if _deadline_release(_dl_passed, 'diversity-arm'):
+            return 0
         print('[wait-diversity] B 臂未在跑(%s) ⇒ 继续等待(判读需要 B 臂先见效)' % why)
         return 1
     start = process_start()
@@ -292,6 +315,8 @@ def main() -> int:
             return 1
     newest, which = max(stamps, key=lambda x: x[0])
     if newest > start:
+        if _deadline_release(_dl_passed, 'diversity-arm'):
+            return 0
         print('[wait-diversity] B 臂**还没生效**: %s(%s) 晚于进程启动(%s) ⇒ 等重启把它带上, 继续等待'
               % (which, newest.strftime('%F %T'), start.strftime('%F %T')))
         return 1
@@ -324,6 +349,8 @@ def main() -> int:
     if args.json:
         print(json.dumps(payload, ensure_ascii=False))
     if elapsed_h < args.min_hours:
+        if _deadline_release(_dl_passed, 'diversity-arm'):
+            return 0
         print('[wait-diversity] B 臂只跑了 %.1fh(< %.0fh) ⇒ 继续等待(还差 %.1f 小时)'
               % (elapsed_h, args.min_hours, args.min_hours - elapsed_h))
         return 1
@@ -331,6 +358,8 @@ def main() -> int:
         print('[wait-diversity] 读不到审计账本 ⇒ fail-closed 视为未满足')
         return 1
     if turns < args.min_turns:
+        if _deadline_release(_dl_passed, 'diversity-arm'):
+            return 0
         print('[wait-diversity] 可判回合 %d < %d(自 B 臂起跑) ⇒ 继续等待, 不打扰' % (turns, args.min_turns))
         return 1
     print('[wait-diversity] 条件已满足: B 臂已跑 %.1fh ≥ %.0fh 且可判回合 %d ≥ %d ⇒ 该复算三项预登记判据了'

@@ -28,6 +28,14 @@ READOUT = os.path.join(D, 'wake-intervention-readout.jsonl')
 
 
 
+
+def _deadline_release(passed, tag):
+    """时限放行的**唯一出口**: 只有"世界读到了、但条件仍不满足"才允许放行(tp-196 第五条路径)。"""
+    if not passed:
+        return False
+    print('[%s] 时限已到而条件仍未满足 => 放行, 放行理由=deadline(证据不足, 不得当作条件已满足)' % tag)
+    return True
+
 def _deadline_state(raw):
     """-> (是否已过, 'none'|'passed'|'bad')。空串=未声明时限(none)。
 
@@ -83,11 +91,13 @@ def main() -> int:
     if _dl_state == 'bad':
         print('[wait-check-intervention] 时限写错(%r) => fail-closed 不放行' % (args.deadline,))
         return 1
-    if _dl_passed:
-        print('[wait-check-intervention] 时限已到而条件仍未满足 => 按**时限放行**, 放行理由=deadline(证据不足, '
-              '不得当作条件已满足)')
-        return 0
 
+    # 2026-09-13 15:5x(tp-196 第五条路径): **账本缺失**与"账本里有记录但没有 disable 行"是两件事 ——
+    # 前者是"读不到世界"(fail-closed, 时限不适用), 后者才是"读成功但条件不满足"(时限可放行)。
+    # 实测缺陷: 空世界下 load() 返回 [] ⇒ 走到"没有 disable 记录 ⇒ 继续等待"这个**放行点** ⇒ 时限成了后门。
+    if not os.path.exists(IV):
+        print('[wait-check-intervention] 读不到干预账本(%s) ⇒ fail-closed 不放行(时限不适用: 时限放行的只是"测得出但样本不够")' % IV, file=sys.stderr)
+        return 1
     recs = load(IV)
     # 2026-09-13 12:5x(行动帧执行时抓出): 本门**不认识预登记的窗口** —— 我 12:34 用 plan-disable 把窗口改期到
     # 09-14 03:12, 而门只看"最后一条 disable", 于是它盯着**上一轮已经判读并处置完的窗口**报"条件已满足"
@@ -103,15 +113,21 @@ def main() -> int:
         last_plan = max(pending, key=lambda r: str(r.get('ts')))
         due = ms_of(last_plan.get('dueAt'))
         if due is not None and now_ms < due:
+            if _deadline_release(_dl_passed, 'wait-check-intervention'):
+                return 0
             print('[wait-check-intervention] 预登记窗口**尚未开启**(plan-disable dueAt=%s, 还剩 %.1f 小时) '
                   '⇒ 继续等待, 不打扰' % (str(last_plan.get('dueAt'))[:19], (due - now_ms) / 3600000.0))
             return 1
         after = [r for r in dis if (ms_of(r.get('ts')) or 0) > (ms_of(last_plan.get('ts')) or 0)]
         if not after:
+            if _deadline_release(_dl_passed, 'wait-check-intervention'):
+                return 0
             print('[wait-check-intervention] 预登记窗口已到点但**没有开窗记录**(开窗腿失败或尚未跑) ⇒ 继续等待; '
                   '查腿账本 wake-intervention-legs.jsonl 的 plan-disable 行')
             return 1
     if not dis:
+        if _deadline_release(_dl_passed, 'wait-check-intervention'):
+            return 0
         print('[wait-check-intervention] 尚未开始: 没有 disable 记录 ⇒ 继续等待(不打扰)')
         return 1
     d = dis[-1]
@@ -121,6 +137,8 @@ def main() -> int:
         return 1
     now = datetime.datetime.now().timestamp() * 1000
     if now < start:
+        if _deadline_release(_dl_passed, 'wait-check-intervention'):
+            return 0
         print('[wait-check-intervention] 窗口未到(计划 %s 开始) ⇒ 继续等待' % str(d.get('ts'))[:19])
         return 1
     planned_end = start + float(d.get('plannedHours') or 24) * 3600 * 1000
@@ -128,9 +146,13 @@ def main() -> int:
     ended = bool(res) or now >= planned_end
     if not ended:
         left = (planned_end - now) / 3600000.0
+        if _deadline_release(_dl_passed, 'wait-check-intervention'):
+            return 0
         print('[wait-check-intervention] 窗口进行中(还剩 %.1f 小时) ⇒ 继续等待, 不打扰' % left)
         return 1
     if args.min_hours > 0 and (now - start) / 3600000.0 < args.min_hours:
+        if _deadline_release(_dl_passed, 'wait-check-intervention'):
+            return 0
         print('[wait-check-intervention] 窗口只走了 %.1f 小时(< %.1f) ⇒ 继续等待'
               % ((now - start) / 3600000.0, args.min_hours))
         return 1
@@ -139,11 +161,15 @@ def main() -> int:
     rows = [r for r in load(READOUT) if r.get('target') == args.target]
     fresh = [r for r in rows if str(r.get('startIso', ''))[:16] == start_iso[:16]]
     if not fresh:
+        if _deadline_release(_dl_passed, 'wait-check-intervention'):
+            return 0
         print('[wait-check-intervention] 窗口已结束但**本窗口**的判读行还没出(判读器应于结束 +5 分钟跑) ⇒ 继续等待')
         return 1
     adj = load(os.path.join(D, 'wake-intervention-adjudication.jsonl'))
     key = str(d.get('ts'))[:19]
     if any(key in str(r.get('windowId') or '') for r in adj):
+        if _deadline_release(_dl_passed, 'wait-check-intervention'):
+            return 0
         print('[wait-check-intervention] 本窗口**已判读并处置**(判读账本已有该窗口的裁决行, 见 wake-intervention-adjudication.jsonl) '
               '⇒ 无可读之物, 继续等待/不打扰')
         return 1

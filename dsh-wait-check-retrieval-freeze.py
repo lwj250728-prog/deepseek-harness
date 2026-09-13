@@ -27,6 +27,20 @@ TZ = datetime.timezone(datetime.timedelta(hours=8))
 
 
 
+
+def _deadline_release(passed, tag):
+    """时限放行的**唯一出口**: 只有"世界读到了、但条件仍不满足"才允许放行。
+
+    2026-09-13 15:4x(tp-196 第五条路径实测抓出): 初版把时限判定放在**读世界之前** ⇒ "空世界 + 时限已过"
+    也 exit 0, 即**时限成了绕过 fail-closed 的后门**。而成文纪律是(refine 门第 18~19 行)"fail-closed 优先于
+    时限: 时限放行的只是'测得出但样本不够', 不是'测不出来'"。故放行点收进本函数, 只在各门"读成功但条件
+    不满足"的那几处调用; 读不到世界/缺前置的分支一律**不调用**它。
+    """
+    if not passed:
+        return False
+    print('[%s] 时限已到而条件仍未满足 => 放行, 放行理由=deadline(证据不足, 不得当作条件已满足)' % tag)
+    return True
+
 def _deadline_state(raw):
     """-> (是否已过, 'none'|'passed'|'bad')。空串=未声明时限(none)。
 
@@ -63,9 +77,6 @@ def main() -> int:
     if _dl_state == 'bad':
         print('[retrieval-freeze] 时限写错(' + repr('%r') + ' 无法解析) => fail-closed 不放行')
         return 1
-    if _dl_passed:
-        print('[retrieval-freeze] 时限已到而条件仍未满足 => 按**时限放行**并标注放行理由=deadline(证据不足, 不得当作条件已满足)')
-        return 0
     p = freeze_path()
     if not os.path.exists(p):
         print('[freeze] 未声明冻结(缺 %s) ⇒ 放行' % p)
@@ -93,6 +104,8 @@ def main() -> int:
             return 1
     if args.json:
         print(json.dumps(f, ensure_ascii=False))
+    if _deadline_release(_dl_passed, 'retrieval-freeze'):
+        return 0
     print('[freeze] 检索侧**冻结中**(%s 起, 依据: %s) ⇒ 不驱动; 重开条件: %s'
           % (str(f.get('at'))[:19], str(f.get('by'))[:40], str(f.get('reopenWhen'))[:120]))
     return 1

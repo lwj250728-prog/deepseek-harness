@@ -9191,6 +9191,100 @@ assert last.get("waitChecker") == "NEW-with-deadline.py", (
     "并发写入被压实吃掉了(末行成了 %r) —— 声明丢失且无人报警" % last.get("waitChecker"))
 print("并发写入被拒(exit 2), 末行保住: %s" % last.get("waitChecker"))
 '
+# ── T228 三个 wait-check 门的时限五条路径(tp-196) ──
+# 由来: 今天给 dsh-wait-check-retrieval-freeze/diversity-arm/intervention 三个门加了 --deadline, 但**只有我手工跑过**;
+# 参考实现是 refine 门那组。本组把它参数化, 并加上 refine 门的成文纪律所要求的第五条路径:
+#   "fail-closed 优先于时限: 时限放行的只是'测得出但样本不够', 不是'测不出来'" —— 实测**三个门当初全部违反**
+#   (时限判定放在读世界之前 ⇒ 空世界+时限已过也 exit 0, 即时限成了绕过 fail-closed 的后门),
+#   修法=把放行收进唯一出口 `_deadline_release()`, 只在"读成功但条件不满足"处调用。
+echo "[T228] 门的时候限五条路径(fail-closed 优先于时限)"
+t "三个门的时限五条路径(读不到世界不得靠时限放行)" python3 -c '
+import datetime, json, os, subprocess, sys, tempfile
+TZ = datetime.timezone(datetime.timedelta(hours=8))
+REPO = os.path.expanduser("~/dsh-fork")
+NOW = datetime.datetime.now(TZ)
+PAST = (NOW - datetime.timedelta(hours=2)).isoformat()
+FUT = (NOW + datetime.timedelta(days=1)).isoformat()
+GATES = (("retrieval-freeze", os.path.join(REPO, "dsh-wait-check-retrieval-freeze.py")),
+         ("diversity-arm", os.path.join(REPO, "dsh-wait-check-diversity-arm.py")),
+         ("intervention", os.path.join(REPO, "dsh-wait-check-intervention.py")))
+def broken_world():
+    d = tempfile.mkdtemp(prefix="tp196-broken-")
+    open(os.path.join(d, "retrieval-freeze.json"), "w", encoding="utf8").write("{ this is not json")
+    return {"dir": d}
+def readable_world(name):
+    d = tempfile.mkdtemp(prefix="tp196-ok-")
+    if name == "retrieval-freeze":
+        json.dump({"at": NOW.isoformat(), "scope": "x", "by": "t", "reason": "s", "reopenWhen": "x",
+                   "reviewBy": FUT, "lifted": False},
+                  open(os.path.join(d, "retrieval-freeze.json"), "w", encoding="utf8"))
+    elif name == "diversity-arm":
+        cfg = os.path.join(d, "config.yml")
+        open(cfg, "w", encoding="utf8").write("diversityBonus: { enabled: true, delta: 0.075 }\n")
+        json.dump({"at": NOW.isoformat(), "hashes": {}, "declaredIntent": [], "windowLabel": "synth"},
+                  open(os.path.join(d, "diversity-arm-baseline.json"), "w", encoding="utf8"))
+        return {"dir": d, "cfg": cfg}
+    else:
+        with open(os.path.join(d, "wake-interventions.jsonl"), "w", encoding="utf8") as f:
+            f.write(json.dumps({"ts": NOW.isoformat(), "event": "plan-disable", "goal": "g-x", "dueAt": FUT,
+                                "hours": 24.0, "reversalExpectation": "x", "reason": "synth"}) + "\n")
+    return {"dir": d}
+def run(tool, world, *args):
+    env = dict(os.environ, DSH_COG_DIR=world["dir"])
+    if world.get("cfg"):
+        env["DSH_WEB_CONFIG"] = world["cfg"]
+    return subprocess.run([sys.executable, tool, *args], capture_output=True, text=True, timeout=300, env=env)
+empty = {"dir": tempfile.mkdtemp(prefix="tp196-empty-")}
+def unreadable_world(name):
+    # 2026-09-13 21:3x(tp-196 执行中的**判据自纠**): 初版对三个门一律用"空 COG_DIR"当读不到世界, 但那只对
+    # D-相对的读成立。δ 门的活配置与进程时刻走**绝对路径**, 空 COG_DIR 不影响它 ⇒ 它在那个世界里**读得到**,
+    # 于是"空 COG_DIR + 时限已过"会放行 —— 而那是"读成功但 B 臂没在跑"这一**合法**情形(见 ⑥ 反向对照),
+    # 不是 fail-closed 后门。判据若照旧报红, 就是把合法放行误判成漏洞(cl-314 同型: 判据假设了它的世界。
+    # 这不是我编的解释: 实测 DSH_WEB_CONFIG=/nonexistent + 过去时限当时真返回 0 ⇒ 那才是真洞, 已修)。
+    #   · 冻结门: 状态文件**存在但读不了**(坏 JSON)。缺文件 = 未声明冻结 = 本就该放行, 不算读不到。
+    #   · δ 门: 活配置文件不存在 ⇒ arm_enabled 报"活配置读不到" ⇒ 必须 fail-closed, 时限不适用。
+    #   · 干预门: 干预账本缺失(D-相对) ⇒ 空 COG_DIR 即是。
+    if name == "retrieval-freeze":
+        return broken_world()
+    if name == "diversity-arm":
+        w = {"dir": tempfile.mkdtemp(prefix="tp196-nocfg-")}
+        w["cfg"] = os.path.join(w["dir"], "no-such-config.yml")
+        return w
+    return {"dir": tempfile.mkdtemp(prefix="tp196-noledger-")}
+bad = []
+for name, tool in GATES:
+    ok = readable_world(name)
+    w_unreadable = unreadable_world(name)
+    r = run(tool, w_unreadable)
+    if r.returncode == 0:
+        bad.append(name + " ①读不到世界却放行")
+    r = run(tool, empty, "--deadline", "not-a-time")
+    if r.returncode == 0 or "时限写错" not in (r.stdout + r.stderr):
+        bad.append(name + " ②坏时限未 fail-closed")
+    r = run(tool, ok, "--deadline", FUT)
+    if r.returncode == 0:
+        bad.append(name + " ③未到时限却放行")
+    r = run(tool, ok, "--deadline", PAST)
+    if r.returncode != 0 or "deadline" not in (r.stdout + r.stderr):
+        bad.append(name + " ④时限已过却没放行/没标注理由")
+    r = run(tool, w_unreadable, "--deadline", PAST)
+    if r.returncode == 0:
+        bad.append(name + " ⑤读不到状态却靠时限放行(时限成了 fail-closed 后门)")
+# ⑥ 反向对照(δ 门): 活配置**读到了**且 B 臂没在跑 ⇒ "读成功但条件不满足", 时限到了**就该放行**(带标注),
+#    无时限则必须继续等。没有这一条, 把实现改成"一律 fail-closed"也能骗过 ①②⑤。
+off = {"dir": tempfile.mkdtemp(prefix="tp196-off-")}
+off["cfg"] = os.path.join(off["dir"], "cfg.yml")
+open(off["cfg"], "w", encoding="utf8").write("diversityBonus: { enabled: false, delta: 0.075 }\n")
+tool = dict(GATES)["diversity-arm"]
+r = run(tool, off, "--deadline", PAST)
+if r.returncode != 0 or "deadline" not in (r.stdout + r.stderr):
+    bad.append("diversity-arm ⑥读成功但未在跑时, 时限到了却没放行/没标注")
+r = run(tool, off)
+if r.returncode == 0:
+    bad.append("diversity-arm ⑥无时限却放行")
+assert not bad, "门的时限路径不成立: " + "; ".join(bad)
+print("3 个门 × 5 条路径 + δ 门反向对照全部成立(含 fail-closed 优先于时限)")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
