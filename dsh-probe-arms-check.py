@@ -76,6 +76,26 @@ def verdict(mutant: int | None, clean: int | None, expected: int, note: str = ''
     return 'other'
 
 
+def _leak_scan() -> list:
+    """**跑完变异必须干净**(cl-334): 探针靠 bash `trap ... EXIT` 复原, 而 SIGKILL/超时会让 trap 不执行 ⇒ 残留可能留下,
+    而且真的发生过(dsh-probe-binding.py 带着 T230 的变异体, 锚点漂移检查被静默关掉, 闸门因白名单过宽而看不见)。
+    抽成函数是因为第一版把它内联在**写回之后** ⇒ `--write-arms` 直接 `UnboundLocalError: leaks`(把测量写回路径弄崩)。"""
+    gate = os.path.join(os.path.expanduser('~/dsh-fork'), 'dsh-mutant-gate.py')
+    leaks = []
+    if os.path.exists(gate):
+        try:
+            g = subprocess.run([sys.executable, gate, '--check', '--json'], capture_output=True, text=True, timeout=600)
+            for line in reversed([x for x in (g.stdout or '').strip().splitlines() if x.strip().startswith('{')]):
+                try:
+                    leaks = (json.loads(line) or {}).get('leaks') or []
+                    break
+                except Exception:
+                    continue
+        except Exception as exc:
+            print('[arms] 变异闸门跑不起来(不阻塞测量): %s' % exc, file=sys.stderr)
+    return leaks
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--write-arms', action='store_true', help='把实测 arms 写回登记簿(唯一写入者)')
@@ -161,6 +181,10 @@ def main() -> int:
         if args.write_arms:
             mf['arms'] = {'mutant': m, 'clean': c}
 
+    leaks = _leak_scan()   # **先扫残留, 再写回**(第一版放在写回之后 ⇒ --write-arms 直接 UnboundLocalError)
+    if leaks:
+        print('[arms] **本轮测量被污染**: 测量结束后闸门仍报 %d 处变异残留 ⇒ 某个探针没能复原(SIGKILL/超时?); '
+              '残留会让对应判据静默失效: %s' % (len(leaks), [x.get('file') for x in leaks][:5]), file=sys.stderr)
     if args.write_arms:
         reg['armsMeasuredAt'] = datetime.datetime.now(TZ).isoformat()
         reg['leakAfterMeasurement'] = [x.get('file') for x in leaks] if leaks else []
@@ -227,25 +251,7 @@ def main() -> int:
                         % (g, results[g]['note'] or results[g]['verdict'], results[g]['mutant'],
                            results[g]['clean'], results[g]['expected']))
 
-    # **跑完变异必须干净**(cl-334): 探针靠 bash `trap ... EXIT` 复原, 而 SIGKILL/超时会让 trap 不执行 ⇒ 残留可能留下,
-    # 而且**今晚真的发生过一次**(dsh-probe-binding.py 带着 T230 的变异体, 锚点漂移检查被静默关掉, 闸门因白名单过宽而看不见)。
-    # 所以在测量**结束时**跑一次变异闸门: 非零即"本轮测量被污染", 写进登记簿并让退出码非零(可见性优先)。
-    _gate = os.path.join(os.path.expanduser('~/dsh-fork'), 'dsh-mutant-gate.py')
-    leaks = []
-    if os.path.exists(_gate):
-        try:
-            _g = subprocess.run([sys.executable, _gate, '--check', '--json'], capture_output=True, text=True, timeout=600)
-            for _line in reversed([x for x in (_g.stdout or '').strip().splitlines() if x.strip().startswith('{')]):
-                try:
-                    leaks = (json.loads(_line) or {}).get('leaks') or []
-                    break
-                except Exception:
-                    continue
-        except Exception as exc:
-            print('[arms] 变异闸门跑不起来(不阻塞测量): %s' % exc, file=sys.stderr)
-    if leaks:
-        print('[arms] **本轮测量被污染**: 测量结束后闸门仍报 %d 处变异残留 ⇒ 某个探针没能复原(SIGKILL/超时?); '
-              '残留会让对应判据静默失效: %s' % (len(leaks), [x.get('file') for x in leaks][:5]), file=sys.stderr)
+    _lease_stop['v'] = True
     _lease_stop['v'] = True
     try:
         os.remove(LEASE)
