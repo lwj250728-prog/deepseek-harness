@@ -8922,6 +8922,57 @@ if frames and isinstance(frames[-1].get("ts"), (int, float)):
 print("底座 %s; 外部分 %s 均分 %s(评审者 %s), 帧 %d 次" % (
     summ.strftime("%m-%d %H:%M"), str(row.get("ts"))[:16], row.get("meanScore"), row.get("reviewer"), len(frames)))
 '
+
+# ── T222 开火探针必须**双臂可区分**(tp-189) ──
+# 由来: guard-fire 只看出场码 ⇒ 单臂探针无法区分"判据抓住变异"与"判据本来就红"(世界漂移/依赖坏掉/断言不在套件里)。
+# 实测 45 条带命令探针里只有 1 条实现干净臂。判据分两层:
+#   ①**便宜层**(每次套件都跑): 登记簿里每条带命令的 mustFire 必须有**实测填入**的 arms{mutant,clean}
+#     (由 dsh-probe-arms-check.py --write-arms 填, 不许手写), 且新增的单臂探针不许出现、冻结清单不许腐烂;
+#   ②**抽样复核层**(防"arms 字段造假"): 抽 3 条重跑双臂, 与登记值必须一致 —— 声明必须与实测一致。
+echo "[T222] 开火探针双臂可区分(实测填入 + 抽样复核 + 新增门槛)"
+t "开火探针必须双臂可区分(arms 实测填入, 抽样复核一致, 新增不许单臂)" python3 -c '
+import json, os, subprocess, sys
+D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+REG = os.path.join(D, "guard-fire.json")
+BASE = os.path.join(D, "probe-arms-baseline.json")
+CHK = os.environ.get("DSH_ARMS_CHECK") or os.path.expanduser("~/dsh-fork/dsh-probe-arms-check.py")
+reg = json.load(open(REG, encoding="utf8"))
+base = json.load(open(BASE, encoding="utf8")) if os.path.exists(BASE) else {}
+frozen = set(base.get("frozenSingleArm") or [])
+# 条目键 = guard|assertion(与 dsh-probe-arms-check.py 同一口径): 同一 guard 下可能有**多条**带命令条目
+# (T139/T140 各有 2 条), 按 guard id 冻结会让"同 guard 下新增一条单臂探针"对门槛不可见 —— 这是对账时抓出的洞。
+def ekey(mf, gid):
+    return "%s|%s" % (gid, str(mf.get("assertion") or "")[:40])
+entries = [(ekey(mf, str(g.get("guard"))), mf) for g in (reg.get("guards") or [])
+           for mf in (g.get("mustFire") or []) if str(mf.get("command") or "").strip()]
+assert entries, "登记簿里没有带命令的 mustFire(判据前提不成立)"
+missing = [k for k, mf in entries if not isinstance(mf.get("arms"), dict)]
+assert not missing, "这些探针没有**实测填入**的 arms{mutant,clean}(不许手写, 也不许没有): %s" % [k.split("|")[0] for k in missing[:5]]
+two_arm = [k for k, mf in entries if mf["arms"].get("clean") == 0]
+single = [k for k, mf in entries if mf["arms"].get("clean") == mf["arms"].get("mutant")]
+assert two_arm, "一条双臂探针都没有(全单臂 ⇒ 开火证明不了区分力)"
+new_single = [g for g in single if g not in frozen]
+assert not new_single, ("出现**新的单臂探针**(不在冻结清单里) ⇒ 登记前必须让干净臂(DSH_PROBE_CLEAN=1)退出 0: %s"
+                        % [g.split("|")[0] for g in new_single[:5]])
+rotten = [g for g in frozen if g not in {k for k, _ in entries}]
+assert not rotten, "冻结清单腐烂(条目已不存在, 应同步缩减): %s" % [g.split("|")[0] for g in rotten[:5]]
+assert len(two_arm) >= int(base.get("twoArmCount") or 0), "双臂探针数不得比冻结时更少"
+# 抽样复核: 防 arms 字段造假 —— 抽 3 条(含全部双臂)重跑双臂
+sample = sorted(set(two_arm) | set([k for k in single if k not in frozen][:2]))[:3]
+for gid in sample:
+    mf = next(mf for k2, mf in entries if k2 == gid)
+    want = int(mf.get("expectedExit", 1))
+    env_m = {k: v for k, v in os.environ.items() if k != "DSH_PROBE_CLEAN"}
+    m = subprocess.run(["bash", "-lc", mf["command"]], capture_output=True, text=True, timeout=600, env=env_m)
+    c = subprocess.run(["bash", "-lc", mf["command"]], capture_output=True, text=True, timeout=600,
+                       env=dict(os.environ, DSH_PROBE_CLEAN="1"))
+    assert m.returncode == mf["arms"].get("mutant"), "%s 的变异臂与登记值不一致(登记 %s, 实测 %d)" % (gid, mf["arms"].get("mutant"), m.returncode)
+    assert c.returncode == mf["arms"].get("clean"), "%s 的干净臂与登记值不一致(登记 %s, 实测 %d)" % (gid, mf["arms"].get("clean"), c.returncode)
+    assert m.returncode == want or c.returncode == 0, "%s 双臂都不对(变异 %d / 干净 %d / 期望 %d)" % (gid, m.returncode, c.returncode, want)
+print("探针 %d 条: 双臂 %d(实测填入 %s)、单臂债 %d(冻结 %d)、抽样复核 %s 一致"
+      % (len(entries), len(two_arm), ",".join(k.split("|")[0] for k in two_arm), len(single), len(frozen),
+         ",".join(k.split("|")[0] for k in sample)))
+'
 # ── T220 "停驱"必须是被行为消费的状态, 而不是一句口头停止 ──
 # 起因(2026-09-13 11:2x, 用户指令"停止这个会话的驱动"): 驱动器(quiet-driver)一次只驱动**一个**目标会话
 # (`targetSessionId` + 运行时绑定文件), 所以"停驱"在实现上=**目标不是它** + **此后没有帧派给它**。
