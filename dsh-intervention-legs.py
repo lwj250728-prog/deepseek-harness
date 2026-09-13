@@ -59,6 +59,30 @@ def iso(ts: str):
         return None
 
 
+def plans(recs):
+    """预登记的**开窗**(2026-09-13 12:3x 补): 干预实验的两端都该由持久 tick 驱动 —— 此前只有恢复腿在
+    runner 里, 而"开窗"仍靠我手敲一条 disable 命令(那一刻我若没敲/敲错, 整个实验就不存在或时间戳不对)。
+    故新增 plan-disable 事件(含 dueAt/hours/reversalExpectation), 由 tick 到点执行 disable。
+
+    → [{key, goal, dueAt, hours, expectation, done}]
+    """
+    out = []
+    done = {(str(r.get('goal')), str(r.get('reason'))[:40]) for r in recs if r.get('event') == 'disable'}
+    for r in recs:
+        if r.get('event') != 'plan-disable':
+            continue
+        due = iso(r.get('dueAt'))
+        goal = r.get('goal') or r.get('goalId')
+        if due is None or not goal:
+            continue
+        out.append({'key': str(r.get('ts')), 'goal': goal, 'dueAt': due,
+                    'hours': float(r.get('hours') or 24.0),
+                    'expectation': str(r.get('reversalExpectation') or ''),
+                    'reason': str(r.get('reason') or ''),
+                    'done': any(g == goal and '预登记窗口开启' in rs for g, rs in done)})
+    return out
+
+
 def windows(recs):
     """→ [{key, goal, disableAt, dueAt, restoreAt}]；key = disable 行的 ts(窗口唯一标识)。"""
     out = []
@@ -97,6 +121,32 @@ def main() -> int:
             for r in load_jsonl(ledger_path) if r.get('exit') == 0}
     now = datetime.datetime.now(TZ)
     failures, overdue, ran = [], [], []
+
+    # 预登记的开窗腿: 到点即执行 disable(带预登记里的期望), 之后按正常窗口走恢复/判读/复核
+    for pl in plans(recs):
+        if pl['done'] or now < pl['dueAt']:
+            continue
+        cmd = [sys.executable, os.path.join(REPO, 'dsh-wake-intervention.py'), 'disable', pl['goal'],
+               '--hours', str(pl['hours']), '--reason', '预登记窗口开启(cron tick, dsh-intervention-legs.py)',
+               '--reversal-expectation', pl['expectation']]
+        late_min = (now - pl['dueAt']).total_seconds() / 60.0
+        if args.dry_run:
+            print('[dry-run] 到期腿 %s/plan-disable(已超期 %.1f 分钟): %s' % (pl['goal'], late_min, ' '.join(cmd[1:4])))
+            continue
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            rc, tail = r.returncode, ((r.stdout or r.stderr).strip().splitlines() or [''])[-1][:160]
+        except subprocess.TimeoutExpired:
+            rc, tail = 124, '超时'
+        row = {'ts': now.isoformat(), 'window': pl['key'], 'goal': pl['goal'], 'leg': 'plan-disable',
+               'due': pl['dueAt'].isoformat(), 'lateMin': round(late_min, 1), 'exit': rc,
+               'scheduler': 'cron-tick', 'origin': os.environ.get('DSH_RUN_ORIGIN', 'manual'),
+               'cmd': ' '.join(cmd[1:]), 'tail': tail}
+        with open(ledger_path, 'a', encoding='utf8') as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + '\n')
+        ran.append(row)
+        if rc != 0:
+            failures.append('%s/plan-disable exit=%d %s' % (pl['goal'], rc, tail))
 
     for w in windows(recs):
         legs = []
