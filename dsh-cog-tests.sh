@@ -10429,6 +10429,59 @@ real = run("0.05")  # 不带夹具注入点 ⇒ 真实库
 print("余量策略: 新增对 %s→%s→%s(单调, 0.7 归零); 成员路在 0.7 下仍服务 %s 个情境" % (a0["policy"]["addedPairs"], a005["policy"]["addedPairs"], a07["policy"]["addedPairs"], a07["policy"]["served"]))
 '
 
+# T253 (cl-359): 目标"链检索侧在载体加载后可用"的判定此前要我手工拼三样(部署滞后 + 产物可用 + 线上链记录),
+# 而**漏跑一环就会把"产物可用"误读成"已生效"**。这条判据把六档状态机全部夹具化验证(不伪造真实载体),
+# 并钉住"不许跳步": 未加载时不许谈效果, 样本不足时不许谈通过, 观测不成立时必须单独成一档。
+echo "[T253] 链就绪状态机(六档)"
+t "链就绪状态机: 未构建/未加载/样本不足/通过/不通过/观测不成立 六档不许跳步" python3 -c '
+import json, os, subprocess, sys, tempfile, time
+R = os.path.expanduser("~/dsh-fork")
+TOOL = os.path.join(R, "dsh-chain-readiness.py")
+assert os.path.exists(TOOL), "就绪报告不在: %s" % TOOL
+T = tempfile.mkdtemp(prefix="t253-")
+now = time.time()
+def lag(kind):
+    pk = {"pkg-a": {}, "pkg-b": {}}
+    for k in pk:
+        if kind == "not-built": pk[k] = {"libMtime": now - 7200, "srcMtime": now - 60}
+        elif kind == "built-stale": pk[k] = {"libMtime": now - 10, "srcMtime": now - 7200}
+        else: pk[k] = {"libMtime": now - 7200, "srcMtime": now - 9000}
+    return {"carrierStart": now - 3600, "packages": pk}
+for kind in ("not-built", "built-stale", "live"):
+    with open(os.path.join(T, "lag-%s.json" % kind), "w", encoding="utf8") as fh: json.dump(lag(kind), fh)
+def rec(i, chain, cited):
+    return {"injectionId": "inject_%d" % i, "createdAt": int((now - 1000 * i) * 1000), "expIds": ["exp_%d" % i],
+            "triggerSource": "static:t", "jumpWords": [], "chainId": chain, "strategyId": None,
+            "sessionId": "session-x", "cited": cited}
+def ledger(kind):
+    rows = [rec(i, None, False) for i in range(2)]
+    if kind in ("pass", "fail"):
+        rows += [rec(10 + i, "chain-x", i == 0 if kind == "pass" else False) for i in range(3)]
+    with open(os.path.join(T, "%s.jsonl" % kind), "w", encoding="utf8") as fh:
+        for r in rows: fh.write(json.dumps(r) + chr(10))
+for kind in ("none", "pass", "fail"): ledger(kind)
+def run(lagkind, led, verify):
+    env = dict(os.environ, DSH_READY_VENDOR="pkg-a,pkg-b", DSH_READY_MIN_N="3",
+               DSH_DEPLOY_LAG_STATE=os.path.join(T, "lag-%s.json" % lagkind),
+               DSH_CHAIN_REPORT_LEDGER=os.path.join(T, "%s.jsonl" % led), DSH_READY_VERIFY_CMD=verify)
+    r = subprocess.run([sys.executable, TOOL, "--json"], capture_output=True, text=True, timeout=300, env=env)
+    assert r.returncode in (0, 1, 2, 3), "就绪报告跑不通: %s" % ((r.stdout or "") + (r.stderr or ""))[-300:]
+    return r.returncode, json.loads(r.stdout)
+expect = [("not-built", "none", "true", 2, "not-built"),
+          ("built-stale", "none", "true", 2, "built-stale"),
+          ("live", "none", "true", 2, "live-warming"),
+          ("live", "pass", "true", 0, "live-judging"),
+          ("live", "fail", "true", 1, "live-judging"),
+          ("live", "none", "false", 3, "blocked")]
+for lagkind, led, verify, rc, state in expect:
+    got_rc, data = run(lagkind, led, verify)
+    assert data["state"] == state, "%s/%s/verify=%s: 期望状态 %s, 实得 %s" % (lagkind, led, verify, state, data["state"])
+    assert got_rc == rc, "%s/%s/verify=%s: 期望 rc=%d, 实得 %d" % (lagkind, led, verify, rc, got_rc)
+assert "重启" in run("built-stale", "none", "true")[1]["next"], "未加载时下一步必须指向载体加载(而不是让人误以为在等效果)"
+print("就绪状态机六档全对: 未构建/未加载/样本不足(2) · 通过(0)/不通过(1) · 观测不成立(3)")
+'
+
+
 
 
 
