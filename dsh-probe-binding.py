@@ -271,7 +271,7 @@ def check(args) -> int:
     # 快照自检(2026-09-13 实测的必要性): 本工具读的套件/登记簿都是**别的会话也在写**的共享文件 ——
     # 实测同一个 T223 在相隔数秒的两次运行里一次红一次绿(读到了半写状态的套件) ⇒ 结论不可用。
     snap = file_sha(suite)
-    reds, greens, inconsumed = [], [], []
+    reds, greens, inconsumed, half_bound = [], [], [], []
     unbound_now = 0
     for rec in bn['probes']:
         gid, why = rec.get('guard'), []
@@ -290,6 +290,14 @@ def check(args) -> int:
             n = f(body, frag)
             if n != 1:
                 why.append('锚点漂移: 探针已失效(片段在 %s 里出现 %d 次, 期望 1)' % (os.path.basename(path), n))
+        # (b0) **半绑定必须判红**(tp-201 的前置修法, 2026-09-13 22:3x):
+        # 锚点绑上了、但判据体取不到(NAME 解析不出 / 断言名对不上) ⇒ 以前会**静默跳过整段过期检查** ⇒
+        # 判据在「测了个空」时报绿。这正是 T230 第一版合成世界踩到的那条**假绿**路径(探针 NAME 用单引号 ⇒ name='')。
+        if rec.get('anchors') and not rec.get('bodySha256'):
+            # 债条(冻结的单臂探针)**只报告**: 对一条已知未验证的探针再判"过期检查无从进行"是误伤(实测 T118),
+            # 债的收口方式是把它变成双臂, 不是多一条红。
+            (half_bound if rec.get('inDebt') else why).append(
+                '半绑定: 锚点绑上了但判据体取不到(NAME 解析不出或断言名不匹配) ⇒ 过期检查无从进行')
         # (b) 判据体哈希: 一致, 或体改了但已重验
         if rec.get('bodySha256'):
             cur, err = suite_body_sha(suite, rec.get('name') or '')
@@ -332,6 +340,8 @@ def check(args) -> int:
         print('%s 判据体在测量期间被改写(%s) ⇒ 本次结论不可用(并发写入)' % (TAG, os.path.basename(suite)),
               file=sys.stderr)
         return 3
+    if half_bound:
+        print('%s 半绑定(债条, 只报告): %s' % (TAG, '; '.join(half_bound[:6])))
     frozen_inc = int(bn.get('inconsumedCount') or 0)
     print('%s 注入点未被判据路径消费(只报告, 非硬红): %d 条 / 冻结基线 %d 条%s'
           % (TAG, len(inconsumed), frozen_inc, (': ' + '; '.join(inconsumed[:6])) if inconsumed else ''))
