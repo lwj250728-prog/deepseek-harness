@@ -201,6 +201,20 @@ def main() -> int:
     # ── E. 外部锚(机器可核) ──
     head = git('log', '-1', '--pretty=%h %s')[:120]
     suite, suite_trend, suite_fail_ids = '', [], []
+    # 套件绿 = **我的判据套件**绿, 与仓库自带测试是否存在无关(2026-09-13 反证侦查: 685 个 spec 被跟踪而工作区只剩 81,
+    # 我的套件与锚完全不敏感)。这里把两个数摆出来, 让"绿"的覆盖面有界而不是无边。
+    def _spec_counts():
+        try:
+            tracked = subprocess.run(['git', '-C', REPO, 'ls-files'], capture_output=True, text=True,
+                                     timeout=120).stdout.splitlines()
+            specs = [x for x in tracked if x.endswith('.spec.ts') and '/tests/' in x]
+            present = [x for x in specs if os.path.exists(os.path.join(REPO, x))]
+            return str(len(specs)), str(len(present))
+        except Exception:
+            return '(未知)', '(未知)'
+
+    spec_tracked, spec_present = _spec_counts()
+
     log = os.path.join(D, '.cog-tests.log')
     if os.path.exists(log):
         lines = open(log, encoding='utf8', errors='replace').read().splitlines()
@@ -364,6 +378,10 @@ def main() -> int:
         ('- **失败集换血**(不是同一把尺子): 新增 %s ｜ 消失 %s'
          % ('; '.join((suite_fail_churn or {}).get('appeared') or []) or '(无)',
             '; '.join((suite_fail_churn or {}).get('vanished') or []) or '(无)')) if suite_fail_churn else '',
+        '- **仓库测试健康(我的套件不覆盖此维度)**: 已跟踪 spec %s / 工作区实存 %s%s'
+        % (spec_tracked, spec_present,
+           '' if spec_tracked in ('(未知)', spec_present) else ' ⇒ **缺 %s 个**(本锚对测试被删完全不敏感, 不得据此说仓库健康)'
+           % (int(spec_tracked) - int(spec_present) if spec_tracked.isdigit() and spec_present.isdigit() else '(未知)')),
         '- 结单 %d 条是**裸计数**: 含"改了读数口径后关掉"的条目(如孵化空转告警), 不可当"问题已解决"的证据'
         % len(cl_closed),
         '', '## F 本期**未证**项(不得被上面的计数盖掉)', '']

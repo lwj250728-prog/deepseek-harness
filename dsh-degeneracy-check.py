@@ -100,9 +100,20 @@ def check(args) -> int:
         try:
             # **共享**变异锁: 与 arms 检查用同一把(cl-316 ②) —— 变异是按**文件**冲突的, 不是按机制。
             lock = open(os.path.join(cog_dir(), '.mutation.lock'), 'w')
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            print('%s 取不到共享变异锁(另一个变异机制在跑) ⇒ 本次不施加变异' % TAG, file=sys.stderr)
+            import signal as _sig
+
+            def _on_alarm(_s, _f):
+                raise TimeoutError('等锁超时')
+
+            _sig.signal(_sig.SIGALRM, _on_alarm)
+            _sig.alarm(int(getattr(args, 'lock_wait', 180)))   # 等锁而不是立刻放弃:
+            # 立刻 exit 3 会让 T231 在 arms 检查跑的时候变红 —— 判据的裁决取决于另一个检查在不在跑。
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            finally:
+                _sig.alarm(0)
+        except (OSError, TimeoutError):
+            print('%s 等共享变异锁超时(另一个变异机制在跑) ⇒ 本次不施加变异(exit 3, 不等于判据通过)' % TAG, file=sys.stderr)
             return 3
         except Exception:
             lock = None
@@ -209,6 +220,7 @@ def main() -> int:
     ap.add_argument('--suite', default=None)
     ap.add_argument('--repo', default=REPO)
     ap.add_argument('--timeout', type=float, default=600.0)
+    ap.add_argument('--lock-wait', dest='lock_wait', type=float, default=180.0)
     args = ap.parse_args()
     suite = args.suite or os.path.join(args.repo, 'dsh-cog-tests.sh')
     if args.list:
