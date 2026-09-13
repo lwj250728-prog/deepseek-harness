@@ -86,6 +86,11 @@ def main() -> int:
     ap.add_argument('--probe', default=None)
     ap.add_argument('--timeout', type=float, default=180.0)
     ap.add_argument('--show', action='store_true')
+    # `--shell <整串>`: 用 `bash -lc` 执行**一个** argv —— 修复实测到的回归(2026-09-14 00:1x):
+    # 早先的 REMAINDER 形态要求调用方把命令当 argv 传, 但 arms 检查是把**包装后的整串**交给 `bash -lc` 的,
+    # 于是 `cd X && rm -rf ... && ...` 里的 `&&` 被外层 shell 吃掉, 包装器只拿到 `... -- cd /home/...` 这段前缀,
+    # 而 `cd` 是内建、在子进程里不存在 ⇒ 返回 3 ⇒ T118 被误报成 mutant-mismatch(3/3)。⇒ 必须由包装器自己解释整串。
+    ap.add_argument('--shell', default=None)
     ap.add_argument('cmd', nargs=argparse.REMAINDER)
     args = ap.parse_args()
 
@@ -111,12 +116,17 @@ def main() -> int:
         print('%s 已按文件加锁 %d 个: %s' % (TAG, len(targets), ', '.join(os.path.basename(t) for t in targets)),
               file=sys.stderr)
 
+    if args.shell is not None:
+        try:
+            return subprocess.run(['bash', '-lc', args.shell]).returncode
+        except Exception as exc:
+            print('%s --shell 执行失败: %s' % (TAG, exc), file=sys.stderr)
+            return 3
     cmd = [c for c in args.cmd if c != '--']
     if not cmd:
         return 0
     try:
-        r = subprocess.run(cmd)
-        return r.returncode
+        return subprocess.run(cmd).returncode
     except FileNotFoundError as exc:
         print('%s 命令不存在: %s' % (TAG, exc), file=sys.stderr)
         return 3

@@ -117,7 +117,9 @@ def main() -> int:
         m = re.search(r'(/\S+?\.sh)', cmd)
         if not os.path.exists(WRAP) or not m:
             return cmd
-        return 'python3 %s --probe %s -- %s' % (WRAP, m.group(1), cmd)
+        # 整串必须作为**一个** argv 交给包装器(shlex.quote), 否则 `&&` 会被外层 bash 吃掉(实测回归: T118 误报 3/3)
+        import shlex
+        return 'python3 %s --probe %s --shell %s' % (WRAP, shlex.quote(m.group(1)), shlex.quote(cmd))
 
     results = {}
     for key, gid, mf in entries:
