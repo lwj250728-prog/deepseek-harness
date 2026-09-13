@@ -22,8 +22,11 @@ const threshold = Number((args.find(a => a.startsWith('--threshold')) ?? '--thre
 const asJson = args.includes('--json')
 const goalMargin = Number((args.find(a => a.startsWith('--goal-margin')) ?? '--goal-margin=0.05').split('=')[1] ?? 0.05)
 
-const chains = JSON.parse(readFileSync(join(COG, 'chains.json'), 'utf8'))
-const exps = readFileSync(join(COG, 'experiences.jsonl'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+// 夹具注入点(cl-357): 判据要能喂合成数据 —— 否则"加余量后不许比不加更宽"这条单调性只能在会漂移的真实库上测。
+const chainsPath = process.env.DSH_CHAIN_AUDIT_CHAINS || join(COG, 'chains.json')
+const expsPath = process.env.DSH_CHAIN_AUDIT_EXPS || join(COG, 'experiences.jsonl')
+const chains = JSON.parse(readFileSync(chainsPath, 'utf8'))
+const exps = readFileSync(expsPath, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
 const byId = new Map(exps.map(e => [e.expId, e]))
 
 const pairs = []
@@ -32,7 +35,7 @@ for (const chain of chains) {
   const goalVec = situationVector(String(chain.goal ?? ''))
   const principleVec = chain.distilledPrinciple ? situationVector(String(chain.distilledPrinciple)) : null
   const memberVecs = members.map(m => ({
-    action: m.actionVector,
+    action: m.actionVector ?? actionVector(String(m.sar?.action ?? ''), []),   // 夹具可省 actionVector
     situation: situationVector(String(m.sar?.situation ?? '')),
   }))
   for (const query of exps) {
@@ -91,6 +94,8 @@ const report = {
   policy: {
     addedPairs: policyAdded.length,
     winnerChanged: policyChanges.length,
+    // 策略下"有链被服务"的情境数 —— 用它断言"成员路不受余量影响"(余量只该管链自身语义路)
+    served: new Set(pairs.filter(p => p.policyHit).map(p => p.queryExpId)).size,
   },
   decision: {
     queries: perQuery.size,

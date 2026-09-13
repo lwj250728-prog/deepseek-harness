@@ -10394,6 +10394,42 @@ assert d4["failing"] == [] and d4["notYet"], "不可判时不许带 failing(待�
 print("链注入仪表五档全对: 不可判(无链/仅一次性会话) / 通过(含一次性会话不污染) / 不通过(指名判据)")
 '
 
+# T252 (cl-357): cl-356 给"链自身语义键"加了 goalMargin, 但**审计脚本本身没有判据** ⇒ 结论可能静默失真。
+# 这条用合成夹具钉两条不变式(与实现无关): ①余量越大, 新增过阈对只许更少(单调)且足够大时归零;
+# ②余量**只管链自身语义路** —— 成员文本命中不论余量多大都必须照常服务(否则等于把余量错误地加到成员路上)。
+echo "[T252] 链检索键余量策略(单调 + 成员路不受影响)"
+t "链检索键的余量策略: 加余量只许更严不许更宽 + 成员路不受余量影响" python3 -c '
+import json, os, subprocess, sys, tempfile
+R = os.path.expanduser("~/dsh-fork")
+TOOL = os.path.join(R, "dsh-chain-key-audit.mjs")
+assert os.path.exists(TOOL), "审计脚本不在: %s" % TOOL
+T = tempfile.mkdtemp(prefix="t252-")
+Q = "排查服务重启后验证恢复失败的原因"
+exps = [{"expId": "exp_1", "sar": {"situation": Q, "action": "排查"}},
+        {"expId": "exp_2", "sar": {"situation": "完全无关的菜谱话题", "action": "做饭"}}]
+with open(os.path.join(T, "exps.jsonl"), "w", encoding="utf8") as fh:
+    for e in exps: fh.write(json.dumps(e, ensure_ascii=False) + chr(10))
+# 四条链: 目标几乎相同 / 同域不同事 / 通用词 / 薄边(分数落在 阈值 与 阈值+0.05 之间) —— 成员都是一个不相关经验
+goals = ["排查服务重启后验证恢复失败", "服务重启后检查日志与端口占用", "机制与系统的验证流程", "服务重启后验证恢复"]
+chains = [{"chainId": "chain-%d" % i, "goal": g, "memberExpIds": ["exp_2"]} for i, g in enumerate(goals)]
+with open(os.path.join(T, "chains.json"), "w", encoding="utf8") as fh: fh.write(json.dumps(chains, ensure_ascii=False))
+def run(margin):
+    env = dict(os.environ, DSH_CHAIN_AUDIT_CHAINS=os.path.join(T, "chains.json"), DSH_CHAIN_AUDIT_EXPS=os.path.join(T, "exps.jsonl"))
+    r = subprocess.run(["npx", "tsx", TOOL, "--json", "--goal-margin=%s" % margin], cwd=R, capture_output=True, text=True, timeout=600, env=env)
+    assert r.returncode == 0, "审计跑不通(margin=%s): %s" % (margin, ((r.stdout or "") + (r.stderr or ""))[-300:])
+    return json.loads(r.stdout[r.stdout.index("{"):])
+a0, a005, a07 = run("0"), run("0.05"), run("0.7")
+old_served = a0["situationsServed"]["old"]
+assert old_served == 1, "预置不成立: 成员路应服务 1 个情境, 实得 %s" % old_served
+assert a0["policy"]["addedPairs"] > a005["policy"]["addedPairs"], "薄边没被挡住: margin0=%s margin0.05=%s" % (a0["policy"]["addedPairs"], a005["policy"]["addedPairs"])
+assert a0["policy"]["addedPairs"] >= a005["policy"]["addedPairs"] >= a07["policy"]["addedPairs"], "单调性被破坏: %s/%s/%s" % (a0["policy"]["addedPairs"], a005["policy"]["addedPairs"], a07["policy"]["addedPairs"])
+assert a07["policy"]["addedPairs"] == 0, "余量足够大时链自身语义键不该再放行任何一条, 实得 %s" % a07["policy"]["addedPairs"]
+assert a07["policy"]["served"] == old_served, "成员路被余量误伤: margin0.7 服务 %s 个情境, 成员路本应 %s 个" % (a07["policy"]["served"], old_served)
+real = run("0.05")  # 不带夹具注入点 ⇒ 真实库
+print("余量策略: 新增对 %s→%s→%s(单调, 0.7 归零); 成员路在 0.7 下仍服务 %s 个情境" % (a0["policy"]["addedPairs"], a005["policy"]["addedPairs"], a07["policy"]["addedPairs"], a07["policy"]["served"]))
+'
+
+
 
 
 
