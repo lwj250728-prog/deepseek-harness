@@ -408,6 +408,39 @@ else:
                       '读三率时不得把它当成"唤醒驱动了推进"的证据。'
                       % (_rev.get('changes'), _rev.get('withoutWake'),
                          round(100 * (_rev.get('withoutWakeRate') or 0), 1))]
+    # 2026-09-13 11:1x(行动帧 goal-digital-life-incubation 第⑤步): 干预判读结论必须**常驻且抹不掉** ——
+    # 本文件是整份重写的, 手写段落下次生成就没了(本脚本末尾 open('w') 覆盖全文)。故结论落
+    # wake-intervention-adjudication.jsonl(追加式), 由本脚本渲染成常驻段: 持久性由数据保证, 不靠"别删"。
+    _adj = []
+    try:
+        _adj_path = os.path.join(D, 'wake-intervention-adjudication.jsonl')
+        if os.path.exists(_adj_path):
+            _adj = [json.loads(l) for l in open(_adj_path, encoding='utf8') if l.strip()]
+    except Exception:
+        _adj = []
+    if _adj:
+        _a = _adj[-1]
+        _w = _a.get('windowLeg') or {}
+        _r = _a.get('reversalLeg') or {}
+        lines += ['',
+                  '**干预判读·常驻**(源: wake-intervention-adjudication.jsonl, 判读于 %s | 目标 %s)'
+                  % (str(_a.get('ts') or '')[:16], _a.get('goal') or '?'),
+                  '- 窗口 %s' % (_a.get('windowId') or '?'),
+                  '- **干预腿结论 %s**: %s' % (_w.get('conclusion') or '?', _w.get('reading') or ''),
+                  '- %s' % (_w.get('whyNotNoEffect') or ''),
+                  '- **恢复腿结论 %s**(预登记期望=%s / 当时记录=%s): %s'
+                  % (_r.get('conclusion') or '?', _r.get('expectedVerdict') or '?',
+                     _r.get('recordedVerdict') or '?', _r.get('whyVoid') or ''),
+                  '- 根因: %s' % (_a.get('rootCause') or ''),
+                  '- 持久化修法: %s' % (_a.get('durableFix') or ''),
+                  '- 下一步: %s' % (_a.get('nextAction') or '')]
     text = '\n'.join(lines) + '\n'
-    open(os.path.join(D, 'incubation-stats.md'), 'w', encoding='utf8').write(text)
+    # 原子写(2026-09-13 11:1x): 这份文件是世界模型引用的一手读数, 原来 open('w') 先截断再写 ——
+    # 生成中途失败会把它清空。改成 temp+fsync+os.replace, 与其它产物同一纪律。
+    _out = os.path.join(D, 'incubation-stats.md')
+    with open(_out + '.tmp', 'w', encoding='utf8') as _fh:
+        _fh.write(text)
+        _fh.flush()
+        os.fsync(_fh.fileno())
+    os.replace(_out + '.tmp', _out)
     print(text)

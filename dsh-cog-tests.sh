@@ -4139,6 +4139,26 @@ else:
     assert "DSH_RUN_ORIGIN=cron" in out, "开火核验排程未带 origin=cron 标记: 首班到了也留不下可判读的痕迹"
     print("首班未到(尚无 origin=cron 记录), 排程已带 origin 标记")
 '
+# tp-189(2026-09-12 20:3x): "开火"本身不是证据 —— 单臂探针只证明命令非零退出, 而"判据在原件上本来就红"
+# 同样让任何探针非零退出(世界漂移/依赖坏掉/断言不在套件里)。故开火必须与**干净臂**配对: 该断言在最近一轮
+# 套件裁决里必须是 ✓。本条判据不重跑 45 个探针(那条已有), 它只核对核验器自己落盘的配对计数 —— 这样
+# 删掉配对逻辑会让字段消失、配对出红会让红计数非 0, 两种情况都转红(声明必须被行为消费)。
+t "开火必须与干净臂配对(核验日志里的配对红数须为 0)" python3 -c '
+import os, re
+DIR = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+log = os.path.join(DIR, "guard-fire.log")
+assert os.path.exists(log), "开火核验日志不存在(机制从未产出痕迹): " + log
+lines = [l for l in open(log, encoding="utf8", errors="replace").read().splitlines() if l.strip()]
+assert lines, "开火核验日志是空的"
+last = lines[-1]
+m = re.search(r"干净臂绿(\d+) 红(\d+) 取不到(\d+)", last)
+assert m, ("最近一条核验记录里没有干净臂配对计数 ⇒ 配对逻辑没被行为消费(或被删掉了): " + last[-90:])
+green, red, na = int(m.group(1)), int(m.group(2)), int(m.group(3))
+assert red == 0, "有 %d 条守卫的干净臂是红的(= 判据在原件上就红, 那道开火没有意义)" % red
+assert green >= 30, ("配对为绿的开火只有 %d 条(<30) —— 干净臂大面积取不到时不得算通过(会退化成无条件放行), "
+                     "实得: 绿%d 红%d 取不到%d" % (green, green, red, na))
+print("干净臂配对: 绿 %d | 红 %d | 取不到 %d" % (green, red, na))
+'
 
 # ── T120 机制台账: 防"修复广度不完整"(cl-148) ──
 # 本轮实证: 我给"排程痕迹必须可辨来源"加 origin 标记时只改了 5 个新机制里的 3 个,
@@ -7167,6 +7187,37 @@ assert row.get("before") == "旧步骤 A" and row.get("after") == "新步骤 B",
 assert row.get("ts"), "记录缺 ts(按 ts 排序的消费方会读错)"
 print("笔记写入不记行 / 前进写入记 1 行(before→after 正确)")
 '
+# 2026-09-13 11:1x(实测事故, 非假想): `--write --show` 是**静默空操作** —— --show 在写入之前就 return 0,
+# 于是"写了并给我看看"变成"只看了看"。取证: cl-265 干预窗口的恢复腿我用的正是这张组合, 工具打印正常、
+# exit 0、我据此以为恢复完成, 而池里没有任何新行(/tmp 的 before-write 备份也没有那一次), 目标带着
+# /bin/false 静默停摆 27 小时。已改为: 纯 --show 才短路, --write --show 写入后回显**落盘的那一行**。
+t "--write --show 必须真的写入(不得静默空操作), 纯 --show 必须只读" python3 -c '
+import json, os, subprocess, tempfile
+W = os.environ.get("DSH_POOL_WRITE_TOOL") or "/home/ubuntu/dsh-fork/dsh-goal-pool-write.py"
+tmp = tempfile.mkdtemp(); pool = os.path.join(tmp, "pool.jsonl")
+base = {"id": "g-show", "status": "active", "nextAction": "步骤 A", "notes": "",
+        "lastActionAt": "2026-09-12T00:00:00+08:00", "lastProgressAt": "2026-09-12T00:00:00+08:00",
+        "triggerThresholds": {"kernel": 1.01, "focus": 1.01}, "waitChecker": "/bin/false"}
+open(pool, "w", encoding="utf8").write(json.dumps(base, ensure_ascii=False) + "\n")
+def nrows():
+    return len([l for l in open(pool, encoding="utf8") if l.strip()])
+def last():
+    return json.loads([l for l in open(pool, encoding="utf8") if l.strip()][-1])
+def run(args):
+    return subprocess.run(["python3", W, "g-show", "--pool", pool] + args,
+                          capture_output=True, text=True, timeout=300)
+n0 = nrows()
+r = run(["--append-note", "  恢复腿笔记", "--write", "--show"])
+assert r.returncode == 0, "写法跑不通: " + (r.stderr or r.stdout)[-160:]
+assert nrows() == n0 + 1, ("--write --show 是静默空操作(池里没多出行) —— 这正是让一次干预恢复无声失效的形态: "
+                           "工具打印正常、exit 0, 而恢复没发生")
+assert str(last().get("notes") or "").endswith("恢复腿笔记"), "写入的新行没有带上笔记"
+assert "恢复腿笔记" in r.stdout, "--write --show 没有回显**落盘的那一行**(应回显写入后的行)"
+r2 = run(["--show"])
+assert nrows() == n0 + 1, "纯 --show 竟然写了行(它必须只读)"
+assert "\"id\"" in r2.stdout, "纯 --show 没有回显当前行"
+print("--write --show 真写入并回显新行; 纯 --show 只读")
+'
 # ── T186 唤醒→推进因果检验的判别力(cl-264) ──
 # 起因(2026-09-12 04:2x): 反向判据说"42% 的推进没有唤醒"⇒ 提醒不必要; 但"不必要"不等于"无用"。新工具
 # dsh-wake-causality.py 用"有唤醒时段 vs 无唤醒时段"的推进速率做对照, 预登记判读 catalyst/anti/no-signal/insufficient。
@@ -8657,6 +8708,53 @@ r3 = run()
 assert r3.returncode != 0, "缺 citation-era.json 时必须非 0 退出(否则跨时代平均会静默回来)"
 assert "缺时代" in (r3.stderr + r3.stdout), "缺时代时须明说原因, 实得: " + (r3.stderr or r3.stdout)[-160:]
 print("时代门: 混算 20.0%% -> 按时代 50.0%%(剔 3 条); 推到 2030 => 已结算 0; 缺时代 => exit %d" % r3.returncode)
+'
+# ── T219 干预窗口的**恢复腿**必须真的跑过(cl-265 事故判据) ──
+# 实测事故(2026-09-13 11:0x): 09-12 08:00 disable 掉 goal-experience-library 的唤醒做干预实验, 计划 24h 后
+# 恢复, 而恢复靠 `systemd-run --on-active` 排的**瞬态定时器**; 当天夜里 dsh 因会话过大 OOM 崩溃, 用户管理器里
+# 的瞬态定时器一并消失 ⇒ 恢复从未触发, 池子里留着 thresholds 1.01/1.01 + waitChecker=/bin/false,
+# 一个 active 目标被**静默停摆 27 小时**, 期间没有任何判据说它不对。本组守三件:
+# ①窗口结束后池子不得仍留干预特征(指纹取自 disable 行自己记的 thresholdsAfter/waitCheckerAfter, 不硬编码);
+# ②每条已结束的 disable 必须有 restore 事件行(恢复不能只发生在我的记忆里); ③判据本身不依赖瞬态定时器(由 cron 每小时跑)。
+echo "[T219] 干预恢复腿(窗口结束后池不得仍留干预态; 恢复必须有据)"
+t "干预恢复腿: 窗口结束后池不得仍留干预态, 且恢复须有记录" python3 -c '
+import json, os, subprocess, sys, tempfile, datetime
+CHK = os.environ.get("DSH_RESTORE_CHECK") or "/home/ubuntu/dsh-fork/dsh-intervention-restore-check.py"
+TZ = datetime.timezone(datetime.timedelta(hours=8)); now = datetime.datetime.now(TZ)
+def build(restore_event, pool_off):
+    tmp = tempfile.mkdtemp()
+    recs = [{"ts": (now - datetime.timedelta(hours=30)).isoformat(), "event": "disable", "goal": "g-x",
+             "plannedHours": 24, "thresholdsAfter": {"kernel": 1.01, "focus": 1.01},
+             "waitCheckerAfter": "/bin/false"}]
+    if restore_event:
+        recs.append({"ts": (now - datetime.timedelta(hours=1)).isoformat(), "event": "restore", "goal": "g-x",
+                     "thresholdsAfter": {"kernel": 0.6, "focus": 0.55}, "waitCheckerAfter": "x.py"})
+    open(os.path.join(tmp, "wake-interventions.jsonl"), "w", encoding="utf8").write(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in recs) + "\n")
+    pool = ({"id": "g-x", "triggerThresholds": {"kernel": 1.01, "focus": 1.01}, "waitChecker": "/bin/false"}
+            if pool_off else
+            {"id": "g-x", "triggerThresholds": {"kernel": 0.6, "focus": 0.55}, "waitChecker": "x.py"})
+    open(os.path.join(tmp, "dormant-goals.jsonl"), "w", encoding="utf8").write(
+        json.dumps(pool, ensure_ascii=False) + "\n")
+    return tmp
+def run(tmp):
+    return subprocess.run([sys.executable, CHK], capture_output=True, text=True,
+                          env=dict(os.environ, DSH_COG_DIR=tmp), timeout=300)
+# ① 窗口结束(30h 前 disable + 24h 计划) 而池子仍是干预态 ⇒ 必须红(这就是那 27 小时的形态)
+r = run(build(False, True))
+assert r.returncode == 2, "窗口已结束而池子仍是干预态, 判据却没红(恢复腿失效会被静默放行)"
+assert "仍是干预态" in (r.stdout + r.stderr), "判红了但没说清是哪种缺口: " + (r.stdout + r.stderr)[-160:]
+# ② 对照: 有 restore 记录且池子已恢复 ⇒ 必须绿(防"一律判红"的假绿)
+r2 = run(build(True, False))
+assert r2.returncode == 0, "已正常恢复却判红(判据变成一律红): " + (r2.stdout + r2.stderr)[-160:]
+# ③ 池子看起来恢复了, 却没有 restore 记录 ⇒ 仍须红(恢复不能只发生在我的记忆里)
+r3 = run(build(False, False))
+assert r3.returncode == 2, "池子已恢复但没有 restore 记录, 判据没红(恢复无据可依)"
+assert "restore 事件行" in (r3.stdout + r3.stderr), "判红原因不对: " + (r3.stdout + r3.stderr)[-160:]
+# ④ 有 restore 记录但池子没真恢复 ⇒ 必须红(登记不等于恢复 —— 这与 2026-09-13 那次"以为恢复了"同型)
+r4 = run(build(True, True))
+assert r4.returncode == 2, "只登记了 restore 而池子没恢复, 判据没红(登记被当成了恢复)"
+print("恢复腿判据: 池仍干预⇒红 / 已恢复⇒绿 / 无记录⇒红 / 只登记未恢复⇒红")
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
