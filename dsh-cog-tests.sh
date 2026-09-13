@@ -9897,7 +9897,9 @@ _injected = os.environ.get("DSH_CHANGE_COVERAGE_FAILING")
 if _injected is not None:
     failing = [x for x in _injected.split(",") if x]
 _measured = (not os.environ.get("DSH_CHANGE_COVERAGE_NO_RUN")) or (_injected is not None)
-if _measured and set(failing) < set(known_f):
+# cl-375: **自动棘轮不许把集合收紧到空** —— 06:30:27 那次 cron 跑里 vitest 输出没有可识别的 FAIL 行, 于是 failing=[],
+# 棘轮据此写了"2 → 0"(把真实债务擦掉), 下一次跑这两条 spec 反而成了"新红"。收紧到空必须**显式注入**。
+if _measured and failing and set(failing) < set(known_f):
     try:
         _b = json.load(open(BASE, encoding="utf8"))
         _b["failingSpecs"] = list(failing)
