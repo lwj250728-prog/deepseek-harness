@@ -81,7 +81,11 @@ def request_text() -> str:
     ]
     for k, desc in DIMS.items():
         lines += ['- **%s** — %s' % (k, desc), '  - 锚点: %s' % ANCHORS[k]]
-    lines += ['', '## 本期总结(机器生成, 未加解读)', '', '```json',
+    lines += ['', '## 如何自己核对(推荐)', '',
+              '`python3 ~/dsh-fork/dsh-stage-summary.py --dry-run --since <本期起点>` **只算不落盘**(不写账本、不重写 md),',
+              '你可以拿它的输出与下面这份 JSON 逐项对账; 也请顺手核对 git/账本/测试/进程等外部锚。',
+              '若发现某个数字对不上, 请在 evidence 或 unverifiable 里写明**具体是哪一项差多少** —— 那是这份评审最有价值的部分。',
+              '', '## 本期总结(机器生成, 未加解读)', '', '```json',
               json.dumps(summary, ensure_ascii=False, indent=1), '```']
     if prev:
         lines += ['', '## 上一期外部分(供对照, 不可直接沿用)', '', '```json',
