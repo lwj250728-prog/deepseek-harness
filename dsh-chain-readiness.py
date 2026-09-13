@@ -24,17 +24,25 @@
   DSH_READY_MIN_N=<int>                链记录判定的样本阈值(默认 10)
   DSH_DEPLOY_LAG_STATE / DSH_CHAIN_REPORT_LEDGER 等由被调工具自己读取(它们已支持注入)  ⇒ 判据可全链夹具化
 
-用法: dsh-chain-readiness.py [--json]
+用法: dsh-chain-readiness.py [--json] [--record]
+  --record: 把本次读数**追加**成一行滚动数据到 `chain-readiness.jsonl`(cl-367)。
+    · 为什么需要: cron 每 6h 跑套件(内含本工具的检查), 但读数只活在输出里 ⇒ 无法回答"现在是第几档、何时翻档"。
+    · 正确性要求: ①**追加**而非重写(并发跑套件不许互相覆盖); ②有上限(默认留最后 2000 行), 触发时**用文件锁**做截断;
+      ③`DSH_CHAIN_READINESS_DRY=1` 时**不写**(判据自检不许污染读数历史)。
+  DSH_CHAIN_READINESS_LEDGER=<path>  替代默认读数文件(判据用它注入临时文件)
+  DSH_CHAIN_READINESS_KEEP=<int>     保留行数上限(默认 2000)
 退出码: 0 = pass; 1 = fail; 2 = 尚未到可判(未构建/未加载/样本不足); 3 = 观测不成立。
 """
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import subprocess
 import sys
 
+TZ = datetime.timezone(datetime.timedelta(hours=8))
 REPO = os.path.expanduser('~/dsh-fork')
 VENDORS = ['packages/context/cognitive-inject', 'packages/cognition/cognitive-pipeline']
 DEPLOY_LAG = os.path.join(REPO, 'dsh-deploy-lag.py')
@@ -55,9 +63,52 @@ def run_json(cmd: list[str], env: dict) -> tuple[int, dict | None, str]:
     return r.returncode, payload, out
 
 
+def record_reading(data: dict) -> str | None:
+    """把一次读数追加进滚动文件(cl-367)。
+
+    **追加**保证并发跑套件时互不覆盖; 只有超过上限(默认 2000 行)时才截断, 且截断持有 flock ——
+    否则两个套件同时截断会互相吃掉对方的行(本会话已见账本被重复追加/重写的情形)。
+    """
+    import fcntl
+    path = os.environ.get('DSH_CHAIN_READINESS_LEDGER') or os.path.join(
+        os.path.expanduser('~/.dsh/cognitive-pipeline'), 'chain-readiness.jsonl')
+    keep = int(os.environ.get('DSH_CHAIN_READINESS_KEEP') or 2000)
+    try:
+        line = json.dumps({
+            'ts': datetime.datetime.now(TZ).isoformat(),
+            'state': data.get('state'),
+            'next': data.get('next'),
+            'vendorVerdicts': data.get('vendorVerdicts'),
+            # "待加载/待构建"的包名清单: 这是"还差什么"的可判读部分
+            'pending': sorted(k for k, v in (data.get('vendorVerdicts') or {}).items() if v in ('carrier-stale', 'build-stale', 'missing')),
+            'steps': [{'name': s.get('name'), 'ok': s.get('ok')} for s in data.get('steps', [])],
+        }, ensure_ascii=False)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'a', encoding='utf8') as fh:
+            fh.write(line + chr(10))
+            fh.flush()
+            os.fsync(fh.fileno())
+        # 只有明显超限时才截断(避免每次跑都重写整个文件)
+        with open(path, 'r+', encoding='utf8') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            rows = [x for x in lock.read().splitlines() if x.strip()]
+            if len(rows) > keep + keep // 5:
+                tmp = path + '.tmp'
+                with open(tmp, 'w', encoding='utf8') as out:
+                    out.write(chr(10).join(rows[-keep:]) + chr(10))
+                    out.flush()
+                    os.fsync(out.fileno())
+                os.replace(tmp, path)
+    except Exception as exc:      # noqa: BLE001 —— **附属写入失败不许影响主判定**(记录是尽力而为, 但必须可见)
+        print('[ready] 读数落盘失败(不影响本次判定): %s' % exc, file=sys.stderr)
+        return None
+    return path
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--json', action='store_true')
+    ap.add_argument('--record', action='store_true', help='把本次读数追加一行到滚动数据(cl-367)')
     args = ap.parse_args()
     vendors = [x for x in (os.environ.get('DSH_READY_VENDOR') or '').split(',') if x] or VENDORS
     min_n = int(os.environ.get('DSH_READY_MIN_N') or 10)
@@ -142,6 +193,10 @@ def main() -> int:
     }[state]
     data = {'state': state, 'steps': steps, 'next': nxt, 'vendors': vendors, 'minN': min_n,
             'vendorVerdicts': {k: v.get('verdict') for k, v in (rows.items() if lag else [])}}
+    recorded = None
+    if args.record and os.environ.get('DSH_CHAIN_READINESS_DRY') != '1':
+        recorded = record_reading(data)
+
     if args.json:
         print(json.dumps(data, ensure_ascii=False))
     else:
@@ -150,6 +205,8 @@ def main() -> int:
             mark = '✓' if s['ok'] is True else ('✗' if s['ok'] is False else '—(不可判)')
             print('  %s %s  %s' % (mark, s['name'], s['detail']))
         print('[ready] 下一步: %s' % nxt)
+        if args.record:
+            print('[ready] 读数已落盘: %s' % (recorded or '未写(DRY 或写入失败)'))
     return rc
 
 

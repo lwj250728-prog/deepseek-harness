@@ -10535,6 +10535,55 @@ assert out3 == out1, "两次运行结果不一致 ⇒ 测量不可复算"
 print("标定脚本: 缺 key fail-closed(rc 3 且无结论) / 分组按成员(2+1) / 留一法排除自身(p50=%.3f) / 阈值边界(0.95→2) / 可复算" % loo["p50"])
 '
 
+# T255 (tp-211/cl-367): cron 每 6h 跑套件(内含部署滞后/就绪检查), 但读数只活在输出里 ⇒ 无法回答"现在第几档、何时翻档";
+# 这条钉住"留痕"的四个正确性要求: DRY 不写 / 追加不覆盖(并发跑套件) / 有上限(不无限长) / 附属写入失败**非致命**。
+# 最后一条是本轮执行时踩出来的: 记录函数第一版因 `datetime` 未导入 + `TZ` 未定义**直接把工具打崩**(rc=1、无任何输出) ——
+# 附属功能崩掉带走主判定, 比不记录更坏。
+echo "[T255] 就绪读数的滚动留痕"
+t "链就绪读数必须落成可判读的滚动数据: DRY 不写 + 追加不覆盖 + 有上限 + 附属写入失败不许带走主判定" python3 -c '
+import json, os, subprocess, sys, tempfile
+R = os.path.expanduser("~/dsh-fork")
+TOOL = os.path.join(R, "dsh-chain-readiness.py")
+assert os.path.exists(TOOL), "就绪工具不在: %s" % TOOL
+T = tempfile.mkdtemp(prefix="t255-")
+LEDGER = os.path.join(T, "read.jsonl")
+def run(env_extra, args=("--record",)):
+    env = dict(os.environ, DSH_CHAIN_READINESS_LEDGER=LEDGER, **env_extra)
+    return subprocess.run([sys.executable, TOOL] + list(args), capture_output=True, text=True, timeout=300, env=env)
+# ① DRY 不写(判据自检不许污染读数历史)
+r = run({"DSH_CHAIN_READINESS_DRY": "1"})
+assert not os.path.exists(LEDGER), "DRY 模式竟然写了读数文件"
+# ② 追加而不是覆盖: 两次运行 ⇒ 两行, 字段齐全, 且**待加载清单**非空(这是"还差什么"的可判读部分)
+run({})
+first = open(LEDGER, encoding="utf8").read()
+run({})
+rows = [json.loads(x) for x in open(LEDGER, encoding="utf8") if x.strip()]
+assert len(rows) == 2, "两次运行应有 2 行(追加), 实得 %d ⇒ 覆盖了历史" % len(rows)
+last = rows[-1]
+for key in ("ts", "state", "pending", "vendorVerdicts"):
+    assert key in last, "读数缺字段 %s: %s" % (key, sorted(last.keys()))
+assert isinstance(last["pending"], list), "pending 应为清单: %s" % last["pending"]
+assert len(first.splitlines()) == 1, "第一次运行应恰好 1 行"
+# ③ 有上限: KEEP=3 写 6 次 ⇒ 截断到 3 行, 且仍是合法 JSONL(截断不许产出半行)
+for _ in range(6):
+    run({"DSH_CHAIN_READINESS_KEEP": "3"})
+kept = [x for x in open(LEDGER, encoding="utf8").read().splitlines() if x.strip()]
+assert len(kept) == 3, "上限 3 未生效(或截断过头): %s 行" % len(kept)
+assert all(isinstance(json.loads(x), dict) for x in kept), "截断后不是合法 JSONL"
+# ④ 附属写入失败必须**非致命**: 指一个写不进去的路径 ⇒ 仍打印状态、退出码仍由状态机决定, 且失败可见
+bad = dict(os.environ, DSH_CHAIN_READINESS_LEDGER="/proc/definitely-not-writable/x.jsonl")
+rb = subprocess.run([sys.executable, TOOL, "--record"], capture_output=True, text=True, timeout=300, env=bad)
+assert rb.returncode in (0, 1, 2), "写入失败不该把主判定带走(实测过的崩溃: rc=1 且无输出): rc=%d" % rb.returncode
+assert "[ready]" in (rb.stdout or ""), "写入失败时仍必须给出状态判定: %s" % (rb.stdout or "")[:200]
+assert "落盘失败" in (rb.stderr or ""), "写入失败必须可见(不许静默): %s" % (rb.stderr or "")[:200]
+print("就绪读数留痕: DRY 不写 / 追加不覆盖(2 行) / 上限截断(6→3 仍合法) / 附属写入失败非致命且可见")
+'
+
+# cl-367: **把真实记录接进套件** —— cron 每 6h 跑套件即免费产生一行读数(这才是「看守留痕」, T255 是它的判据)。
+echo "[T255] 记录真实读数(cron 每 6h 免费执行)"
+bash "$HOME/dsh-fork/dsh-chain-readiness-record.sh" || true
+
+
 
 
 
