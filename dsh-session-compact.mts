@@ -218,6 +218,110 @@ function remapProvenance(event: SessionEvent): SessionEvent {
   return result as SessionEvent
 }
 
+/**
+ * Structural scaffolding the SOURCE log may be missing.
+ *
+ * A log written by a seed that began mid-turn (an inherited view cut at a
+ * compaction checkpoint, for example) can carry an `assistant/message` with no
+ * enclosing `step/start`. The transcript reader tolerates that, but the token
+ * meter — which every pressure-based compaction decision depends on — refuses
+ * to fold it, so such a session can never compact and never hands over. Copying
+ * is the moment to make the successor well-formed: synthesize the missing
+ * frame, never invent content.
+ */
+let openTurn: number | undefined
+let openStep: number | undefined
+let syntheticTurn: number | undefined
+let syntheticStep: { turn: number; step: number } | undefined
+let synthesizedFrames = 0
+
+/**
+ * Emit the turn/step frame a content event needs, when the source lacked it.
+ *
+ * The frame must name the SAME turn and step the content event carries: the
+ * token meter rejects an `assistant/message` whose enclosing open step names a
+ * different pair, so a frame synthesized with a guessed number would trade one
+ * unreadable log for another.
+ */
+function ensureFraming(event: SessionEvent): void {
+  const type = event.type
+  // Only what the meter actually pairs: an assistant/message must find its
+  // enclosing step open, with the SAME turn and step. A user/message needs no
+  // frame, and fabricating one for it opened a step that then collided with the
+  // source's own structure.
+  const needsFrame = false
+  if (!needsFrame) return
+  const data = (event as { data?: { turn?: number; step?: number } }).data
+  const turn = data?.turn ?? openTurn ?? 1
+  const step = data?.step ?? 1
+  if (openTurn !== turn) {
+    // A different turn opened without its own turn/start in the source.
+    if (openTurn !== undefined) {
+      keep({ type: 'turn/end', seq: 0, time: event.time, data: { turn: openTurn, reason: { kind: 'completed' } } } as SessionEvent)
+      synthesizedFrames += 1
+    }
+    keep({ type: 'turn/start', seq: 0, time: event.time, data: { turn } } as SessionEvent)
+    synthesizedFrames += 1
+    openTurn = turn
+    openStep = undefined
+    syntheticTurn = turn
+  }
+  if (openStep === undefined || openStep !== step) {
+    if (openStep !== undefined) {
+      keep({ type: 'step/end', seq: 0, time: event.time, data: { turn, step: openStep } } as SessionEvent)
+      synthesizedFrames += 1
+    }
+    keep({ type: 'step/start', seq: 0, time: event.time, data: { turn, step } } as SessionEvent)
+    synthesizedFrames += 1
+    openStep = step
+    syntheticStep = { turn, step }
+  }
+}
+
+/**
+ * Close any frame this copy synthesized, before the source's own structure
+ * resumes: the meter rejects a `step/start` that arrives while another step is
+ * still open, so a synthetic frame left hanging would break the very fold it was
+ * added to repair.
+ */
+function closeSyntheticFrames(time: number): void {
+  if (syntheticStep !== undefined) {
+    keep({
+      type: 'step/end',
+      seq: 0,
+      time,
+      data: { turn: syntheticStep.turn, step: syntheticStep.step },
+    } as SessionEvent)
+    synthesizedFrames += 1
+    syntheticStep = undefined
+    openStep = undefined
+  }
+  if (syntheticTurn !== undefined) {
+    keep({
+      type: 'turn/end',
+      seq: 0,
+      time,
+      data: { turn: syntheticTurn, reason: { kind: 'completed' } },
+    } as SessionEvent)
+    synthesizedFrames += 1
+    syntheticTurn = undefined
+    openTurn = undefined
+  }
+}
+
+/** Track the open turn/step so `ensureFraming` knows what is missing. */
+function trackFraming(event: SessionEvent): void {
+  const data = (event as { data?: { turn?: number; step?: number } }).data
+  const structural = event.type === 'turn/start' || event.type === 'step/start'
+    || event.type === 'step/end' || event.type === 'turn/end'
+  // The source's own structure must not arrive while ours is still open.
+  if (structural) closeSyntheticFrames(event.time)
+  if (event.type === 'turn/start') { openTurn = data?.turn ?? openTurn; openStep = undefined; return }
+  if (event.type === 'step/start') { openStep = data?.step ?? 1; return }
+  if (event.type === 'step/end') { openStep = undefined; return }
+  if (event.type === 'turn/end') { openTurn = undefined; openStep = undefined }
+}
+
 if (target !== undefined) {
   await mkdir(sessionDir(options.destRoot, cwd, successorId), { recursive: true })
   await writeFile(target, await compressZstdFrame(`${JSON.stringify(toHeaderLine(successorMeta))}\n`))
@@ -246,10 +350,12 @@ const scanner = new SessionLogScanner(headerFrame.value, {
         // message does NOT reference belongs to a run that never finalized —
         // dropping it would lose content the successor could not recover.
         if (sources.has(chunk.seq)) dropped += 1
-        else { keep(chunk); orphanChunks += 1 }
+        else { ensureFraming(chunk); keep(chunk); orphanChunks += 1 }
       }
       pendingChunks = []
     }
+    ensureFraming(event)
+    trackFraming(event)
     keep(remapProvenance(event))
   },
 })
@@ -258,11 +364,14 @@ for (const plaintext of decoded) {
   scanner.write(plaintext)
   if (batch.length >= BATCH_EVENTS) await flush()
 }
-for (const chunk of pendingChunks) { keep(chunk); orphanChunks += 1 }
+for (const chunk of pendingChunks) { ensureFraming(chunk); keep(chunk); orphanChunks += 1 }
 await flush()
 scanner.finish()
 
 console.log(`kept events : ${kept} (${orphanChunks} interrupted-partial chunks retained)`)
+if (synthesizedFrames > 0) {
+  console.log(`repaired    : ${synthesizedFrames} missing turn/step frames synthesized (content untouched)`)
+}
 console.log(`dropped     : ${dropped} redundant streaming deltas`)
 console.log(`successor id: ${successorId}`)
 
