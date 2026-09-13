@@ -9847,34 +9847,59 @@ print("T236: 无锁⇒泄漏 / 持锁⇒在飞(exit 0) / 锁被持⇒带外码 7
 echo "[T237] 改动覆盖(行为版: 改动过的包必须跑过 spec)"
 t "改动覆盖(行为): 改动过的包必须跑过 spec——新破损才红, 存量债与零 spec 包冻结" python3 -c '
 import glob, json, os, re, subprocess, sys
-ROOT = os.path.expanduser("~/dsh-fork")
-BASE = os.path.expanduser("~/.dsh/cognitive-pipeline/change-coverage-baseline.json")
-out = subprocess.run(["git", "-C", ROOT, "log", "--since=24 hours ago", "--name-only",
-                      "--pretty=format:", "--", "packages"], capture_output=True, text=True).stdout
-changed = [f for f in sorted(set(out.split())) if f.endswith(".ts") and "/src/" in f]
-assert changed, "24h 内没有 src 改动 ⇒ 前提不成立(不得空过)"
-pkgs = sorted({"/".join(f.split("/")[:3]) for f in changed})
+ROOT = os.environ.get("DSH_CHANGE_COVERAGE_ROOT") or os.path.expanduser("~/dsh-fork")
+BASE = os.environ.get("DSH_CHANGE_COVERAGE_BASE") or os.path.expanduser("~/.dsh/cognitive-pipeline/change-coverage-baseline.json")
+# 三个注入点(供 T239 的合成世界用): ROOT / PKGS(绕开 git) / NO_RUN(只判分类不跑 spec)
+_pkgs_env = os.environ.get("DSH_CHANGE_COVERAGE_PKGS")
+if _pkgs_env:
+    pkgs = [x for x in _pkgs_env.split(",") if x]
+else:
+    out = subprocess.run(["git", "-C", ROOT, "log", "--since=24 hours ago", "--name-only",
+                          "--pretty=format:", "--", "packages"], capture_output=True, text=True).stdout
+    changed = [f for f in sorted(set(out.split())) if f.endswith(".ts") and "/src/" in f]
+    pkgs = sorted({"/".join(f.split("/")[:3]) for f in changed})
+assert pkgs, "没有改动过的包(24h 内 git 无改动, 且未给 PKGS 注入) ⇒ 前提不成立(不得空过)" 
 specs, no_spec = [], []
 for p in pkgs:
-    found = sorted(glob.glob(os.path.join(ROOT, p, "tests", "*.spec.ts")))
+    # **按包内任意位置判定**(tp-206/T239 修正): 原来只看 `tests/*.spec.ts`, 而 spec 并非只在 tests/ 下
+    # (实测仓库级有 scripts/*.spec.ts; 包内虽目前都在 tests/, 但没有任何东西保证将来如此) ⇒ 一旦漏判,
+    # 有 spec 的包会被记进"零可跑 spec 的债"且永不报红(冻结规则只许减不许增)。
+    # 用 os.walk + **剪枝**(第一版用 recursive glob, 会走进 node_modules ⇒ 12 个包就慢到超时)
+    found, dis = [], []
+    for dirpath, dirnames, filenames in os.walk(os.path.join(ROOT, p)):
+        dirnames[:] = [d for d in dirnames if d != "node_modules"]
+        for fn in filenames:
+            if fn.endswith(".spec.ts.disabled"):
+                dis.append(os.path.join(dirpath, fn))
+            elif fn.endswith(".spec.ts"):
+                found.append(os.path.join(dirpath, fn))
+    found, dis = sorted(found), sorted(dis)
     if found:
         specs.extend(found[:3])
     else:
-        no_spec.append(p)
-r = subprocess.run(["npx", "vitest", "run"] + specs, cwd=ROOT, capture_output=True, text=True, timeout=1800)
-tail = (r.stdout or "") + (r.stderr or "")
-assert ("Test Files" in tail or "Tests " in tail), "vitest 没产出口径(基础设施问题, 不是测试失败): %s" % tail[-300:]
-failing = sorted(set(re.findall(r"FAIL\s+\|thread-safe\|\s+(\S+\.spec\.ts)", tail)))
+        no_spec.append((p, len(dis)))
+if os.environ.get("DSH_CHANGE_COVERAGE_NO_RUN"):
+    failing = []
+    tail = ""
+else:
+    r = subprocess.run(["npx", "vitest", "run"] + specs, cwd=ROOT, capture_output=True, text=True, timeout=1800)
+    tail = (r.stdout or "") + (r.stderr or "")
+    assert ("Test Files" in tail or "Tests " in tail), "vitest 没产出口径(基础设施问题, 不是测试失败): %s" % tail[-300:]
+    failing = sorted(set(re.findall(r"FAIL\s+\|thread-safe\|\s+(\S+\.spec\.ts)", tail)))
 base = json.load(open(BASE, encoding="utf8"))
 known_f = set(base.get("failingSpecs") or [])
 known_n = int(base.get("noSpecCount") or 0)
 fresh = [f for f in failing if f not in known_f]
 assert not fresh, ("**新出现的破损 spec**(不在冻结基线里): %s ⇒ 改动过的包有新的测试失败, 必须处置或登记基线"
                    % fresh[:4])
-assert len(no_spec) <= known_n, ("**改动过但没有可跑 spec 的包** 从 %d 涨到 %d: %s ⇒ 覆盖空洞变多(现有债: cognitive-inject/session-title 的 spec 全 .disabled)"
+assert len(no_spec) <= known_n, ("**改动过但没有可跑 spec 的包** 从 %d 涨到 %d: %s ⇒ 覆盖空洞变多。"
+                                 "每条必须**可解释**(要么包里真没有 spec, 要么 spec 全是 .disabled —— 括号里给出 disabled 个数)"
                                  % (known_n, len(no_spec), no_spec))
-print("改动覆盖(行为): %d 包改动 / 跑了 %d 个 spec / 失败 %d 个(冻结 %d, 无新增) / 无可跑 spec 的包 %d 个(冻结 %d)"
-      % (len(pkgs), len(specs), len(failing), len(known_f), len(no_spec), known_n))
+assert all(isinstance(x, tuple) and x[1] > 0 for x in no_spec) or not no_spec, \
+    "零可跑 spec 的清单里有**无法解释**的条目(包里既没有 spec 也没有 .disabled ⇒ 判定口径有问题): %s" % no_spec
+print("改动覆盖(行为): %d 包改动 / 跑了 %d 个 spec / 失败 %d 个(冻结 %d, 无新增) / 无可跑 spec 的包 %d 个(冻结 %d): %s"
+      % (len(pkgs), len(specs), len(failing), len(known_f), len(no_spec), known_n,
+         ", ".join("%s(%d 个 .disabled)" % (x[0].split("packages/")[-1], x[1]) for x in no_spec) or "无"))
 if failing:
     print("  已知失败(冻结, 留给归属方): %s" % ", ".join(os.path.basename(x) for x in failing))
 '
@@ -9936,6 +9961,41 @@ assert not viol, ("变异复原没有保持元数据/内容: %s —— 正解是
                   "(如 T159 src 比 lib 新)会被自己的变异机制污染成假红" % "; ".join(viol[:4]))
 print("变异复原的元数据保持: 样本 %d 条探针 / 比对 %d 条 / 目标文件 %d 个 —— sha256 与 mtime_ns 全部不变"
       % (len(cmds), checked, targets_n))
+'
+# ── T239 T237 的「零可跑 spec」判定口径(tp-206) ──
+# 由来: T237 原来只看 `{pkg}/tests/*.spec.ts`, 而"spec 只在 tests/ 下"是**假设不是查证**
+# ⇒ 一旦包把 spec 放在 src/, T237 会把它记进"零可跑 spec 的债"且永不报红(冻结规则只许减不许增)。
+echo "[T239] T237 零可跑 spec 判定口径"
+t "零可跑 spec 的判定必须按包内任意位置: tests/ 外的 spec 也算 + 债清单逐条可解释" python3 -c '
+import json, os, subprocess, sys, tempfile
+ROOT = os.path.expanduser("~/dsh-fork")
+T = tempfile.mkdtemp(prefix="t239-")
+def w(rel, text=""):
+    p = os.path.join(T, rel)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf8") as fh:
+        fh.write(text)
+    return p
+w("packages/a/alpha/tests/a.spec.ts", "export {}\n")                 # 常规位置: 有可跑 spec
+w("packages/b/beta/src/b.spec.ts", "export {}\n")                     # **tests/ 之外**: 必须也算有 spec(tp-206 的反例)
+w("packages/c/gamma/tests/c.spec.ts.disabled", "export {}\n")         # 只有 disabled: 必须记债且写明个数
+w("packages/d/delta/src/d.spec.ts.disabled", "export {}\n")
+base = os.path.join(T, "base.json")
+with open(base, "w", encoding="utf8") as fh:
+    json.dump({"failingSpecs": [], "noSpecCount": 2, "at": "2026-09-14T00:00:00+08:00"}, fh)
+env = dict(os.environ, DSH_CHANGE_COVERAGE_ROOT=T, DSH_CHANGE_COVERAGE_NO_RUN="1",
+           DSH_CHANGE_COVERAGE_BASE=base,
+           DSH_CHANGE_COVERAGE_PKGS="packages/a/alpha,packages/b/beta,packages/c/gamma,packages/d/delta")
+r = subprocess.run([sys.executable, os.path.join(ROOT, "dsh-assert-runner.py"),
+                    "--name", "改动覆盖(行为): 改动过的包必须跑过 spec——新破损才红, 存量债与零 spec 包冻结"],
+                   capture_output=True, text=True, timeout=900, env=env)
+out = (r.stdout or "") + (r.stderr or "")
+assert r.returncode == 0, "合成世界里判据应绿(4 个包里 2 个有 spec、2 个只有 disabled, 债 2 <= 冻结 2): exit=%d %s" % (r.returncode, out[-300:])
+assert "b/beta" not in out.split("不可靠")[0].split("无可跑 spec")[-1], "**tests/ 之外的 spec(b/beta/src/b.spec.ts)被判成零 spec** ⇒ 判定口径仍只看 tests/: %s" % out[-300:]
+low = out[-400:]
+assert "c/gamma(" in low and "d/delta(" in low, "零 spec 清单没有逐条写明原因(应形如 c/gamma(N 个 .disabled)): %s" % low
+assert "1 个 .disabled" in low, "没有把 disabled 个数写出来 ⇒ 清单不可解释: %s" % low
+print("T239: tests/ 之外的 spec 被算作有 spec / 只有 disabled 的包进债且写明个数 / 清单可解释")
 '
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
