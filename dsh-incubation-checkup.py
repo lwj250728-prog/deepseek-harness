@@ -91,6 +91,13 @@ def main() -> int:
                      len(post) - len(delivered), la.strftime("%H:%M") if la else "无", pw, pa))
         if la and pw >= MIN_WAKES and pa == 0:
             viol.append(gid)
+    # 不可测(covered): 有 lastActionAt 但可计唤醒 < MIN_WAKES ⇒ 分母为空, 判据**不可能**触发。
+    # 它既不等于"通过"(没测到), 也不能触发结单(结单=声称"已恢复转化", 而分母为空时无从说起)。
+    # 由来(cl-342): 04:00 体检在 pw=0/0/0 下仍打"通过", 且每 2h 给告警补写一条假结单
+    # "下次体检无违规(唤醒已恢复转化)"(24h 内无任何可计唤醒转化) ⇒ 盲读数写假结单。
+    untestable = [gid for gid, _st, _tw, _dlv, _pk, _sk, la, pw, _pa in rows
+                  if la and pw < MIN_WAKES]
+    verdict = "不通过" if viol else ("通过" if not untestable else "不可测(covered)")
 
     sec = ["", "---", "",
            "## 转化率体检(origin=%s，%s，近 %dh；按 lastActionAt 分界；口径 2026-09-13 修正)" % (
@@ -104,7 +111,9 @@ def main() -> int:
             "- 已知偏差(漏报方向): 采纳用插件的 `adopted` 标记, 它只在**被唤醒的那个回合**里比对池快照 ⇒ "
             "推进若发生在别的会话/别的回合, 该标记看不见(会让告警**迟报**, 不会造成误报)",
             "", "**判据**（改写后 24h 内不得出现'**可计**唤醒 ≥%d 且采纳 0'）：**%s**%s" % (
-        MIN_WAKES, "通过" if not viol else "不通过", (" —— 违规: " + ", ".join(viol)) if viol else ""), ""]
+        MIN_WAKES, verdict, (" —— 违规: " + ", ".join(viol)) if viol else ""),
+            ("- **不可测(covered)**: %s 的可计唤醒 < %d ⇒ 判据在构造上不可能触发, 本行**不是通过**;"
+             " 要让它可测须先修投递(见 投递/触发行 列)" % (", ".join(untestable), MIN_WAKES)) if untestable else "", ""]
     with open(STATS, "a", encoding="utf8") as f:
         f.write("\n".join(sec) + "\n")
     print("[incubation-checkup] origin=%s 体检完成: %d 个目标, 违规 %d" % (ORIGIN, len(rows), len(viol)))
@@ -118,14 +127,20 @@ def main() -> int:
         with open(LEDGER, "a", encoding="utf8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
         return 1
-    # 恢复: 关闭遗留告警
-    exists = os.path.exists(LEDGER)
-    if exists:
-        lr = [json.loads(l) for l in open(LEDGER, encoding="utf8") if l.strip()]
-        op = next((r for r in reversed(lr) if r.get("id") == "cl-incubation-stall" and r.get("status") not in TERMINAL), None)
-        if op is not None:
+    # 恢复: 关闭遗留告警 —— 只认**每个 id 的最新一行**的状态(账本是 append-only, 历史里的
+    # open 行永远存在; 用 "任意一行非终态" 去找 open 会把 09-13T10:00 那条陈旧 open 行
+    # 每 2h 重新"关闭"一次, 于是每 2h 追加一条假结单 —— cl-342 实测 12:00→04:00 共 9 条)。
+    if not untestable and os.path.exists(LEDGER):
+        with open(LEDGER, encoding="utf8") as f:
+            lr = [json.loads(l) for l in f if l.strip()]
+        last = {}
+        for r in lr:
+            last[r.get("id")] = r          # 后写覆盖先写 ⇒ 取到该 id 的权威状态
+        op = last.get("cl-incubation-stall")
+        if op is not None and op.get("status") not in TERMINAL:
             r = dict(op)
-            r.update({"status": "done", "doneNote": "下次体检无违规(唤醒已恢复转化)", "ts": now.isoformat()})
+            r.update({"status": "done", "doneNote": "下次体检无违规且判据可测(可计唤醒≥%d)" % MIN_WAKES,
+                      "ts": now.isoformat()})
             with open(LEDGER, "a", encoding="utf8") as f:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
     return 0
