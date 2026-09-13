@@ -466,6 +466,50 @@ describe('cognitive-inject priming', () => {
     }
   })
 
+  it('uses the SEMANTIC space for chain keys when an embedder exists (换个说法也找得到; cl-360)', async () => {
+    const { ctx, teardown } = await mount()
+    try {
+      const SIT = '服务重启后需要验证恢复'
+      const GOAL = '上线后要把服务拉起来并确认一切正常'      // 与情境**词面不同**, 但在假向量空间里语义相近
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '旧事一', '执行甲', '结果甲', undefined, undefined, 'chain-sem')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_2', '旧事二', '执行乙', '结果乙', undefined, undefined, 'chain-sem')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_3', '旧事三', '执行丙', '结果丙', undefined, undefined, 'chain-sem')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_9', SIT, '重启服务并验证', '恢复成功')   // 负责开闸(词面命中)
+      await ctx.cognitivePipeline.consolidateChain('chain-sem', GOAL)
+      // 假 embedder: 情境向量与链目标向量**语义相近**(词面无关) —— 只有走语义空间才可能命中。
+      const fake = { embed: async (text: string) => (text === SIT ? [1, 0] : text === GOAL ? [0.92, 0.08] : null) }
+      Object.defineProperty(ctx.cognitivePipeline, 'embedder', { value: fake, configurable: true })
+      const { agent, session } = stubAgent('chain-sem')
+      session.append('turn/start', { turn: 1 })
+      const injected = await fire(ctx, agent, 1, 1, SIT)
+      const chainText = injected.find(text => text.includes('【经验链参考】'))
+      expect(chainText).toBeDefined()
+      expect(chainText).toContain('chain-sem')
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('keeps the lexical fallback when the embedder cannot embed (退化不许变成不服务; cl-360)', async () => {
+    const { ctx, teardown } = await mount()
+    try {
+      const SIT = '服务重启后需要验证恢复'
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', SIT, '重启服务并验证', '恢复成功', undefined, undefined, 'chain-lex')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_2', SIT, '查看日志确认', '确认无异常', undefined, undefined, 'chain-lex')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_3', SIT, '跑一次冒烟', '通过', undefined, undefined, 'chain-lex')
+      await ctx.cognitivePipeline.consolidateChain('chain-lex', SIT)   // 目标与情境词面一致 ⇒ 词面路本就该命中
+      // embedder 存在但**嵌入失败**(返回 null): 必须退回词面, 而不是整条链检索失效。
+      const failing = { embed: async () => null }
+      Object.defineProperty(ctx.cognitivePipeline, 'embedder', { value: failing, configurable: true })
+      const { agent, session } = stubAgent('chain-lex')
+      session.append('turn/start', { turn: 1 })
+      const injected = await fire(ctx, agent, 1, 1, SIT)
+      expect(injected.some(text => text.includes('【经验链参考】'))).toBe(true)
+    } finally {
+      await teardown()
+    }
+  })
+
   it('does NOT serve a chain whose GOAL only shares generic wording (薄边不算命中, cl-356)', async () => {
     const { ctx, teardown } = await mount()
     try {

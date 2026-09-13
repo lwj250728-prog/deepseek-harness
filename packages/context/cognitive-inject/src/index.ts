@@ -530,7 +530,8 @@ async function retrieve(
   // 而 rawHits 中位 276 ⇒ 未注入的库里条目**无法区分**"检索到了却排在第 6 名之外"与"根本没被检索到"
   // (实测: 库 198 条里时代内未注入 133 条, 其中仅 55 条有证据可归因)。这里补落**完整检索 id 列表**
   // (上限截断并标记), 让"检索到却没注入"可归因 —— 只记录, 不改变注入什么。
-  retrievedIds: readonly string[], retrievedIdsTruncated: boolean }> {
+  retrievedIds: readonly string[], retrievedIdsTruncated: boolean,
+  queryEmbedding: readonly number[] | null }> {
   const vector = actionVector(situation, [])
   const situationVec = situationVector(situation)
   const embedder = service.embedder
@@ -630,7 +631,9 @@ async function retrieve(
   const RETRIEVED_IDS_CAP = 500
   const retrievedIds = hits.slice(0, RETRIEVED_IDS_CAP).map(hit => hit.expId)
   return { hits: covered, rotated, rawHits, topHits, textChars: textChars(covered), preTop, belowGate: droppedByThreshold,
-    retrievedIds, retrievedIdsTruncated: hits.length > RETRIEVED_IDS_CAP }
+    retrievedIds, retrievedIdsTruncated: hits.length > RETRIEVED_IDS_CAP,
+    // cl-360: 把已经算好的查询向量交给链检索 —— 否则链的语义准入会**每回合再embedding一次**(白花一次调用)。
+    queryEmbedding }
 }
 
 /**
@@ -794,12 +797,13 @@ function referenceBlock(
  * @param config - resolved chain sub-configuration.
  * @returns the best chain over the bar with its rendered subtree, or null.
  */
-function retrieveChain(
+async function retrieveChain(
   service: CognitivePipelineService,
   situation: string,
   sessionId: string,
   config: { minSimilarity: number, depth: number, maxChars: number, goalMargin: number, maxPerSession: number },
-): { chainId: string, similarity: number, text: string } | null {
+  queryEmbedding: readonly number[] | null,
+): Promise<{ chainId: string, similarity: number, text: string } | null> {
   const chains = service.store.chainsSnapshot()
   if (chains.length === 0) return null
   const actionQuery = actionVector(situation, [])
@@ -819,20 +823,32 @@ function retrieveChain(
     // cl-355: 链**自己的语义**也是检索键 —— 只看成员文本时, "换个说法问同一件事"会让这条链彻底找不到
     // (实测用例: 成员文本与情境无关、而链的目标表述与情境一致 ⇒ 修复前判红)。目标与蒸馏原则都是链自己
     // 沉淀下来的说法, 与成员文本互补; 三者取最大(命中任一个即算找到), 仍是同一个阈值口径。
-    const keyScore = Math.max(
-      cosine(situationQuery, situationVector(chain.goal)),
-      ...(chain.distilledPrinciple === undefined
-        ? []
-        : [cosine(situationQuery, situationVector(chain.distilledPrinciple))]),
-    )
+    // cl-360: **有 embedder 就走语义空间**(与经验检索同一条路), 否则退回词面 hash 向量。
+    // 经验侧早就是这样取分的(retrieve 里 `queryEmbedding !== null && exp.embedding` 分支), 而链键此前只在词面空间 ——
+    // "换个说法问同一件事"在词面空间本来就难命中, 这正是链召回的**质量上限**(不是可用性前提)。
+    const keyTexts = [String(chain.goal ?? '')]
+    if (chain.distilledPrinciple !== undefined) keyTexts.push(String(chain.distilledPrinciple))
+    let keyScore = Math.max(...keyTexts.map(text => cosine(situationQuery, situationVector(text))))
+    if (queryEmbedding !== null) {
+      const keyVectors = await Promise.all(keyTexts.map(async text => {
+        const vector = await service.embedder?.embed(text)
+        return vector === undefined || vector === null ? null : vector
+      }))
+      for (const vector of keyVectors) {
+        if (vector !== null) keyScore = Math.max(keyScore, cosine(queryEmbedding, vector))
+      }
+    }
     let memberScore = 0
     for (const memberId of chain.memberExpIds) {
       const exp = byId.get(memberId)
       if (exp === undefined) continue
-      const member = Math.max(
+      let member = Math.max(
         cosine(actionQuery, exp.actionVector),
         cosine(situationQuery, situationVector(exp.sar.situation)),
       )
+      if (queryEmbedding !== null && exp.embedding !== undefined) {
+        member = Math.max(member, cosine(queryEmbedding, exp.embedding))
+      }
       if (member > memberScore) memberScore = member
     }
     // cl-356: 两条路各自的门槛 —— 成员文本命中按 minSimilarity; 链自身语义(短文本, 易撞通用词)要按 minSimilarity+goalMargin。
@@ -1140,7 +1156,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (record.sessionId !== agent.session.id) continue
       for (const expId of record.expIds) sessionCounts.set(expId, (sessionCounts.get(expId) ?? 0) + 1)
     }
-    const { hits, rotated, rawHits, topHits, textChars, preTop, belowGate, retrievedIds, retrievedIdsTruncated } = await retrieve(ctx.cognitivePipeline, situation, threshold, topK,
+    const { hits, rotated, rawHits, topHits, textChars, preTop, belowGate, retrievedIds, retrievedIdsTruncated, queryEmbedding } = await retrieve(ctx.cognitivePipeline, situation, threshold, topK,
       expId => sessionCounts.get(expId) ?? 0, resolved.noveltyMargin,
       { enabled: config.utilityFusion?.enabled === true,
         base: config.utilityFusion?.base ?? 0.7,
@@ -1285,7 +1301,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     // 全库零调用者), 于是 hitCount/citedCount 恒 0 —— "从未被看见"被读成"没人要"。
     // 只在这条主注入路径上附加(策略路径不动), 且同会话同链只服务一次。
     const chainHit = resolved.chain.enabled
-      ? retrieveChain(ctx.cognitivePipeline, situation, agent.session.id, resolved.chain)
+      ? await retrieveChain(ctx.cognitivePipeline, situation, agent.session.id, resolved.chain, queryEmbedding)
       : null
     const chainMessage = chainHit === null ? null : chainBlock(chainHit)
     // Record the injection for citation-rate measurement: which expIds reached
