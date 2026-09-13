@@ -27,7 +27,7 @@ import sys
 src, dst, which = sys.argv[1], sys.argv[2], sys.argv[3]
 s = open(src, encoding="utf8").read()
 REPL = {
-    "A": [("resolved.chain.enabled ? retrieveChain(ctx.cognitivePipeline, situation, agent.session.id, resolved.chain) : null",
+    "A": [("resolved.chain.enabled ? await retrieveChain(ctx.cognitivePipeline, situation, agent.session.id, resolved.chain, queryEmbedding) : null",
            "null /* MUTANT A: 链检索被抹掉 */")],
     "B": [("chainHit === null ? {} : { chainId: chainHit.chainId }",
            "/* MUTANT B: 注入记录不再带 chainId */")],
