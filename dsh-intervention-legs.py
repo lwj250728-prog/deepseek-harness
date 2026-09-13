@@ -68,8 +68,11 @@ def plans(recs):
     """
     out = []
     done = {(str(r.get('goal')), str(r.get('reason'))[:40]) for r in recs if r.get('event') == 'disable'}
+    # plan-cancel(2026-09-13 13:0x 补): 预登记的窗口若因**与另一个实验重叠**而要改期, 必须有正式的取消事件 ——
+    # 否则旧 plan 到点照样开窗(账本是追加式的, 直接"改一行"改不掉已经写下的计划)。这是"计划也必须可撤销"。
+    cancelled = {str(r.get('planKey')) for r in recs if r.get('event') == 'plan-cancel'}
     for r in recs:
-        if r.get('event') != 'plan-disable':
+        if r.get('event') != 'plan-disable' or str(r.get('ts')) in cancelled:
             continue
         due = iso(r.get('dueAt'))
         goal = r.get('goal') or r.get('goalId')

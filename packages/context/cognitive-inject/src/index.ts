@@ -17,6 +17,8 @@
 
 import { appendFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
+import { readFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
@@ -63,6 +65,11 @@ export interface Config {
    *  显式开启(profile 里写 true); 关掉即回滚到纯相似度排序。
    *  **只影响排序, 不影响过阈判定**(阈值仍按 similarity, 见下方 filter)。 */
   utilityFusion?: { enabled?: boolean, base?: number, slope?: number }
+  /** cl-284 多样性加成(预登记实验, 2026-09-13): 给**历史零注入**的库内条目一个排序加成,
+   *  `rankKey = 原 rankKey × (1 + delta)`, δ 只施加于"本会话未注入且历史注入次数=0"的条目。
+   *  只影响排序, 不改过阈判定与 topK; 默认 **关闭**(delta=0 ⇒ 与 A 臂逐字一致) ⇒ 回滚=把 enabled 改回 false。
+   *  预登记与判据见 experiment-diversity-bonus-20260912.md(覆盖率 +≥8pp 为主动判据, 引用率是护栏)。 */
+  diversityBonus?: { enabled?: boolean, delta?: number, ledgerPath?: string }
   /** Minimum situation-vector similarity to consider a memory related (default 0.4). */
   minSimilarity?: number
   /** After a failed step, multiply minSimilarity by this factor (default 0.6). */
@@ -144,6 +151,11 @@ export const Config: z<Config> = z.object({
     base: z.number().default(0.7),
     slope: z.number().default(0.06),
   }).default({ enabled: false, base: 0.7, slope: 0.06 }),
+  diversityBonus: z.object({
+    enabled: z.boolean().default(false),
+    delta: z.number().min(0).max(0.5).default(0.075),
+    ledgerPath: z.string().default('~/.dsh/cognitive-pipeline/injections.jsonl'),
+  }).default({ enabled: false, delta: 0.075, ledgerPath: '~/.dsh/cognitive-pipeline/injections.jsonl' }),
   minSimilarity: z.number().min(0).max(1).default(0.4),
   failureThresholdFactor: z.number().min(0).max(1).default(0.6),
   failureTopK: z.number().step(1).min(1).max(10).default(3),
@@ -178,6 +190,8 @@ export const Config: z<Config> = z.object({
 export interface ResolvedConfig {
   readonly topK: number
   readonly utilityFusion: { enabled: boolean, base: number, slope: number }
+  /** cl-284: 多样性加成(δ 施加于历史零注入条目)。 */
+  readonly diversityBonus: { enabled: boolean, delta: number, ledgerPath: string }
   readonly minSimilarity: number
   readonly failureThresholdFactor: number
   readonly failureTopK: number
@@ -221,6 +235,12 @@ export function resolveConfig(config: Config): ResolvedConfig {
       enabled: config.utilityFusion?.enabled === true,
       base: config.utilityFusion?.base ?? 0.7,
       slope: config.utilityFusion?.slope ?? 0.06,
+    },
+    diversityBonus: {
+      enabled: config.diversityBonus?.enabled === true,
+      delta: config.diversityBonus?.delta ?? 0.075,
+      ledgerPath: config.diversityBonus?.ledgerPath
+        ?? '~/.dsh/cognitive-pipeline/injections.jsonl',
     },
     minSimilarity: config.minSimilarity ?? 0.4,
     failureThresholdFactor: config.failureThresholdFactor ?? 0.6,
@@ -411,6 +431,33 @@ const AXIS_BOOST_GAIN = 0.05
  * pole-matching nudge per candidate (see {@link axisBoost}), so premise
  * discrimination (新手↔资深) survives the flattened embedding ranking.
  */
+/** cl-284: 读"历史上真被注入过"的 expId 集合(带 TTL 缓存)。
+ *
+ * 为什么读账本而不是读 store 字段: "注入过"这件事**只写在 injections.jsonl 里**(每行的 expIds);
+ * store 的 hitCount 是"检索命中"而不是"被注入"。每回合读 ~1400 行账本太重 ⇒ 缓存 5 分钟。
+ * 读不到 ⇒ 返回 null, 调用方按"不用加成"处理(**不让一个坏账本悄悄改变实验语义**)。
+ */
+let injectedCache: { at: number, ids: Set<string> } | null = null
+function historicallyInjectedIds(ledgerPath: string): Set<string> | null {
+  const TTL = 5 * 60 * 1000
+  if (injectedCache !== null && Date.now() - injectedCache.at < TTL) return injectedCache.ids
+  try {
+    const path = ledgerPath.startsWith('~') ? join(homedir(), ledgerPath.slice(1)) : ledgerPath
+    const ids = new Set<string>()
+    for (const line of readFileSync(path, 'utf8').split('\n')) {
+      if (line.trim().length === 0) continue
+      try {
+        const row = JSON.parse(line) as { expIds?: string[] }
+        for (const id of row.expIds ?? []) ids.add(id)
+      } catch { /* 坏行跳过: 单行坏了不该让整份历史失效 */ }
+    }
+    injectedCache = { at: Date.now(), ids }
+    return ids
+  } catch {
+    return null
+  }
+}
+
 async function retrieve(
   service: CognitivePipelineService,
   situation: string,
@@ -419,6 +466,9 @@ async function retrieve(
   novelty?: (expId: string) => number,
   noveltyMargin = 0,
   fusion: { enabled: boolean, base: number, slope: number } = { enabled: false, base: 0.7, slope: 0.06 },
+  // cl-284 多样性加成(预登记实验): 只对**历史零注入**的条目提权, δ 默认 0 ⇒ 与 A 臂逐字一致。
+  diversityBonus: { enabled: boolean, delta: number } = { enabled: false, delta: 0 },
+  injectedIds: ReadonlySet<string> | null = null,
 ): Promise<{ hits: readonly RankedHit[], rotated: boolean, rawHits: number,
   topHits: readonly number[], textChars: number,
   preTop: readonly { expId: string, similarity: number,
@@ -434,6 +484,7 @@ async function retrieve(
   const embedder = service.embedder
   const queryEmbedding = embedder === null ? null : await embedder.embed(situation)
   const FUSION = fusion
+  const DIV = diversityBonus
   const scoredBeforeThreshold = service.store.experiencesSnapshot()
     .filter(exp => !isTaskRestatement(exp))
     // cl-102: 帧生记录不回注帧——自我回声(帧→关于帧的经验→再注入帧)是实测
@@ -465,7 +516,11 @@ async function retrieve(
         similarity: sim,
         // cl-218: 效用融合只作用于**排序键**; similarity 保持原样, 供阈值判定与离线 A 档复核。
         utility: gain,
-        rankKey: FUSION.enabled ? sim * (FUSION.base + FUSION.slope * gain) : sim,
+        // cl-284: 多样性加成只改**排序键**, 不改 similarity(过阈判定仍按 similarity) —
+        // 与 utilityFusion 同一条纪律(阈值不许被排序泄漏进来)。
+        rankKey: (FUSION.enabled ? sim * (FUSION.base + FUSION.slope * gain) : sim)
+          * (DIV.enabled && DIV.delta > 0 && injectedIds !== null && !injectedIds.has(exp.expId)
+            ? (1 + DIV.delta) : 1),
         channels: { semantic, symptom: symptomPart, axis: axisPart },
         ...exp.selfReflexive === true ? { selfReflexive: true } : {},
       }
@@ -947,7 +1002,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       expId => sessionCounts.get(expId) ?? 0, resolved.noveltyMargin,
       { enabled: config.utilityFusion?.enabled === true,
         base: config.utilityFusion?.base ?? 0.7,
-        slope: config.utilityFusion?.slope ?? 0.06 })
+        slope: config.utilityFusion?.slope ?? 0.06 },
+      resolved.diversityBonus,
+      resolved.diversityBonus.enabled ? historicallyInjectedIds(resolved.diversityBonus.ledgerPath) : null)
     const retrievalIds = { retrievedIds, retrievedIdsTruncated }
     if (hits.length === 0) {
       audit({ stage: 'no-candidates', threshold, rotated, rawHits , ...retrievalIds })
