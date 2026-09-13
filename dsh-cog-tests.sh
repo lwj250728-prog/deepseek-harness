@@ -9062,6 +9062,24 @@ bad = [k for k, v in frags.items() if not str((v or {}).get("sha256") or "").str
 assert not bad, "这些片段没有 sha256: %s" % bad
 print("采集指纹 %s…(片段: %s), 记于 %s" % (fpv[:12], ",".join(sorted(frags)), str(obj.get("fingerprintAt"))[:19]))
 '
+
+# ── T225 会话加载主路径的 OOM 回归守卫(tp-192) ──
+# 2026-09-13 02:00 的 OOM 修复(aef45a8: 冷会话整份物化 → 有界尾读 readTail + 物化预算 maxMaterializeBytes)
+# 改了会话加载主路径。包自带 12 例测试(实测全绿), 但**认知套件里没有任何引用**(T28 因此长期红) —— 而那三件事
+# 包内测试结构上覆盖不到: ①回归真的会红(实测把预算改成无上限 ⇒ 1 failed | 11 passed);
+# ②**已部署产物**里真有这条路径(源码改了没重建 = 线上仍是旧行为); ③崩溃循环计数器不得无凭增长。
+echo "[T225] OOM 回归守卫(有界尾读测试 + 产物标记 + 崩溃计数)"
+t "会话加载主路径的 OOM 回归守卫(回归会红/产物有路径/崩溃计数不无凭增长)" python3 -c '
+import os, subprocess, sys
+D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+CHK = os.environ.get("DSH_OOM_CHECK") or os.path.expanduser("~/dsh-fork/dsh-oom-regression-check.py")
+BP = os.environ.get("DSH_OOM_BASELINE") or os.path.join(D, "oom-crash-baseline.json")
+assert os.path.exists(CHK), "缺回归守卫脚本(判据前提不成立): " + CHK
+assert os.path.exists(BP), ("缺崩溃计数基线 ⇒ 没有基线就谈不上不让它增长(修法: python3 %s --baseline)" % CHK)
+r = subprocess.run([sys.executable, CHK], capture_output=True, text=True, timeout=1500)
+assert r.returncode == 0, "OOM 回归守卫判红: " + ((r.stderr or r.stdout).strip()[-300:])
+print((r.stdout or "").strip().splitlines()[-1][:120] + " | " + "; ".join((r.stdout or "").strip().splitlines()[:2])[:160])
+'
 # ── T220 "停驱"必须是被行为消费的状态, 而不是一句口头停止 ──
 # 起因(2026-09-13 11:2x, 用户指令"停止这个会话的驱动"): 驱动器(quiet-driver)一次只驱动**一个**目标会话
 # (`targetSessionId` + 运行时绑定文件), 所以"停驱"在实现上=**目标不是它** + **此后没有帧派给它**。
