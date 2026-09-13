@@ -862,7 +862,9 @@ files = [f for f in sorted(set(out.split())) if f.endswith(".ts") and "/src/" in
 assert files, "24h 内无 src 改动(元测试前提不成立)"
 missing = [f for f in files
            if "/".join(f.split("/")[:3]) not in suite and f.split("/")[-1] not in suite]
-assert not missing, "改动但无断言引用: %s" % missing[:3]
+assert not missing, ("改动但无断言引用 %d 个(只列前 5): %s —— 注意别用'加一句注释'骗过本条: "
+                      "正解是给它**在改动之后跑过**的覆盖见证(见 T226 与 dsh-session-coverage-witness.py)"
+                      % (len(missing), missing[:5]))
 '
 
 # ── T29 经验样本二次处理(2026-09-09 00:1x 固化——cl-045: 81 条帧经验效用因 snake_case 键名恒为 None) ──
@@ -9079,6 +9081,26 @@ assert os.path.exists(BP), ("缺崩溃计数基线 ⇒ 没有基线就谈不上�
 r = subprocess.run([sys.executable, CHK], capture_output=True, text=True, timeout=1500)
 assert r.returncode == 0, "OOM 回归守卫判红: " + ((r.stderr or r.stdout).strip()[-300:])
 print((r.stdout or "").strip().splitlines()[-1][:120] + " | " + "; ".join((r.stdout or "").strip().splitlines()[:2])[:160])
+'
+
+# ── T226 改动必须有**在改动之后跑过**的覆盖(tp-193 / T28 的执行型替代) ──
+# T28 的原判据只认文本引用(套件里出现文件路径或 basename) ⇒ **加一句注释就能变绿**, 那正好奖励假覆盖。
+# 本组把它换成执行型见证: 三个被改的 src 文件(packages/api/remotes/src/agent-lookup.ts /
+# packages/client/runtime/src/client/sessions/manager.ts / packages/host/apiproxy/src/api-proxy.ts)
+# 对应的四个 spec 必须**真的跑过且全绿**(实测 93 例), 并且见证里必须记下"注入变异会转红"(可证伪)。
+# 任何 src/spec 在见证之后被改过 ⇒ 哈希不符 ⇒ 判红, 要求重新核验(这正是 T28 想要的"改了要有覆盖",
+# 只是把"有没有文本引用"换成"有没有在改动之后跑过")。
+echo "[T226] 改动须有"改动之后跑过"的覆盖(执行型见证: 93 例 + 可证伪 + 哈希)"
+t "改动必须有改动之后跑过的覆盖见证(执行型, 非文本引用)" python3 -c '
+import os, subprocess, sys
+D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+W = os.environ.get("DSH_COV_WITNESS") or os.path.expanduser("~/dsh-fork/dsh-session-coverage-witness.py")
+WP = os.environ.get("DSH_COV_WITNESS_FILE") or os.path.join(D, "session-coverage-witness.json")
+assert os.path.exists(W), "缺见证工具(判据前提不成立): " + W
+assert os.path.exists(WP), ("缺覆盖见证 ⇒ 判红: 没有「在改动之后跑过」的证据(修法: python3 %s --write)" % W)
+r = subprocess.run([sys.executable, W, "--check"], capture_output=True, text=True, timeout=300)
+assert r.returncode == 0, "覆盖见证判红: " + ((r.stderr or r.stdout).strip()[-300:])
+print((r.stdout or "").strip().splitlines()[-1][:160])
 '
 # ── T220 "停驱"必须是被行为消费的状态, 而不是一句口头停止 ──
 # 起因(2026-09-13 11:2x, 用户指令"停止这个会话的驱动"): 驱动器(quiet-driver)一次只驱动**一个**目标会话
