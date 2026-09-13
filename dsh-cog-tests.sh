@@ -10481,6 +10481,61 @@ assert "重启" in run("built-stale", "none", "true")[1]["next"], "未加载时�
 print("就绪状态机六档全对: 未构建/未加载/样本不足(2) · 通过(0)/不通过(1) · 观测不成立(3)")
 '
 
+# T254 (tp-210/cl-366): 语义标定脚本(`dsh-chain-key-semantic-audit.mjs`)的读数**支撑了三个设计决定**
+# (cl-361 门槛在语义空间无效 / cl-362 跨字段→同字段 / cl-363 否决相对排名与键排名), 但它自己**从来没有判据**;
+# 而它在文件头声明了一条关键性质: "拿不到 key 就退出 3, 不静默退回词面" —— 声明在、行为不在是本会话反复出现的病。
+echo "[T254] 语义标定脚本的判据(夹具注入, 不联网)"
+t "语义标定脚本: 缺 key 必须 fail-closed + 留一法排除自身 + 分组按成员 + 可复算" python3 -c '
+import json, os, subprocess, sys, tempfile
+R = os.path.expanduser("~/dsh-fork")
+TOOL = os.path.join(R, "dsh-chain-key-semantic-audit.mjs")
+assert os.path.exists(TOOL), "标定脚本不在: %s" % TOOL
+T = tempfile.mkdtemp(prefix="t254-")
+# 合成夹具: A 与 B 非正交(余弦 0.2); Q 与 A 0.6 / 与 B 0.904 ⇒ 用来钉阈值边界与分组
+stub = {"A": [1, 0], "B": [0.2, 0.98], "Q": [0.6, 0.8], "actA": [1, 0], "actB": [0.2, 0.98], "actQ": [0.6, 0.8], "G": [1, 0]}
+with open(os.path.join(T, "stub.json"), "w", encoding="utf8") as fh: json.dump(stub, fh)
+with open(os.path.join(T, "chains.json"), "w", encoding="utf8") as fh:
+    json.dump([{"chainId": "chain-x", "goal": "G", "memberExpIds": ["exp_A", "exp_B"]}], fh)
+with open(os.path.join(T, "exps.jsonl"), "w", encoding="utf8") as fh:
+    for e in [{"expId": "exp_A", "sar": {"situation": "A", "action": "actA"}},
+              {"expId": "exp_B", "sar": {"situation": "B", "action": "actB"}},
+              {"expId": "exp_C", "sar": {"situation": "Q", "action": "actQ"}}]:
+        fh.write(json.dumps(e, ensure_ascii=False) + chr(10))
+base = dict(os.environ, DSH_SEMANTIC_AUDIT_CHAINS=os.path.join(T, "chains.json"),
+            DSH_SEMANTIC_AUDIT_EXPS=os.path.join(T, "exps.jsonl"))
+# ① **fail-closed**: 没有 key 且没有 stub ⇒ 必须 rc 3, 且**不许**在 stdout 上给出结论 JSON(静默退回词面会让标定结论变假)
+env_no_key = dict(base, DSH_SEMANTIC_AUDIT_CRED="/nonexistent-cred.yaml")
+env_no_key.pop("DSH_SEMANTIC_AUDIT_STUB", None)
+r = subprocess.run(["npx", "tsx", TOOL, "--json"], cwd=R, capture_output=True, text=True, timeout=600, env=env_no_key)
+assert r.returncode == 3, "缺 key 时必须 exit 3(fail-closed), 实得 %d: %s" % (r.returncode, (r.stdout or "")[-200:])
+assert "{" not in (r.stdout or ""), "缺 key 时不许输出结论 JSON(否则等于静默退化): %s" % (r.stdout or "")[:200]
+# ② 夹具读数: 分组按 memberExpIds(不是按相似度阈值) + 留一法**必须排除自身** + 可复算
+env = dict(base, DSH_SEMANTIC_AUDIT_STUB=os.path.join(T, "stub.json"))
+def run(args, e):
+    p = subprocess.run(["npx", "tsx", TOOL] + args, cwd=R, capture_output=True, text=True, timeout=600, env=e)
+    assert p.returncode == 0, "标定跑不通: %s" % ((p.stdout or "") + (p.stderr or ""))[-300:]
+    return p.stdout
+out1 = run(["--json"], env)
+d = json.loads(out1[out1.index("{"):])
+assert d["distribution"]["inDomain"]["n"] == 2 and d["distribution"]["outOfDomain"]["n"] == 1, \
+    "域内/域外分组错(应按 memberExpIds 判定): %s" % d["distribution"]
+loo = d["distribution"]["leaveOneOut"]
+assert loo["n"] == 2, "留一法样本数错: %s" % loo
+assert loo["p50"] is not None and loo["p50"] < 0.5, "留一法没排除自身(跨字段路; 含自身会得到 1.0): %s" % loo
+# **两条路都要断言**: 变异体只改其中一条时, 只查一条的断言会把"没测到"报成通过(探针第一版就是这么被放过的)
+loo_sit = d["distribution"]["fieldAlignment"]["relatedNew_situationVsSituation"]
+assert loo_sit["p50"] is not None and loo_sit["p50"] < 0.5, "留一法没排除自身(同字段路): %s" % loo_sit
+# 阈值边界: A 与 Q 的成员分是 1.0 与 0.904 ⇒ 门槛 0.95 时只应命中 2 对(>= 才计)
+out2 = run(["--json", "--thr", "0.95"], env)
+d2 = json.loads(out2[out2.index("{"):])
+assert d2["memberHitPairs"] == 2, "阈值边界错(>= 才计, 0.904 不该过 0.95): %s" % d2["memberHitPairs"]
+# 可复算: 同一份输入两次运行必须逐字一致(否则"重标定"没有意义)
+out3 = run(["--json"], env)
+assert out3 == out1, "两次运行结果不一致 ⇒ 测量不可复算"
+print("标定脚本: 缺 key fail-closed(rc 3 且无结论) / 分组按成员(2+1) / 留一法排除自身(p50=%.3f) / 阈值边界(0.95→2) / 可复算" % loo["p50"])
+'
+
+
 
 
 

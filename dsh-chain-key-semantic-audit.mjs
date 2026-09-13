@@ -21,11 +21,26 @@ import { cosine } from './packages/cognition/cognitive-pipeline/src/vectorizer.t
 
 const args = process.argv.slice(2)
 const asJson = args.includes('--json')
-const num = (flag, dflt) => Number((args.find(a => a.startsWith(flag)) ?? `${flag}=${dflt}`).split('=')[1] ?? dflt)
+// cl-366: 参数解析必须同时认 `--thr=0.95` 与 `--thr 0.95` —— 第一版只认前者, 于是 `--thr 0.95` **静默用了默认值**
+// (判据当场抓到: 门槛本该 0.95 却按 0.4 算, 命中 3 对而不是 2 对)。静默忽略参数比报错更危险。
+const num = (flag, dflt) => {
+  const i = args.findIndex(a => a === flag || a.startsWith(`${flag}=`))
+  if (i < 0) return dflt
+  const inline = args[i].includes('=') ? args[i].split('=')[1] : args[i + 1]
+  const v = Number(inline)
+  if (!Number.isFinite(v)) {
+    console.error(`[semantic-audit] 参数 ${flag} 的值读不出来(${inline}) ⇒ 环境不成立`)
+    process.exit(3)
+  }
+  return v
+}
 const SAMPLE = num('--sample', 30)
 const THRESHOLD = num('--thr', 0.4)
 const COG = join(homedir(), '.dsh', 'cognitive-pipeline')
-const CRED = join(homedir(), '.dsh', '.credentials.yaml')
+// 夹具注入点(cl-366): 判据要在**无网络/无 key**下也能测这个脚本 —— 否则它永远没有判据,
+// 而它的读数支撑着设计决定(cl-361/362/363)。注入点只替代**输入与传输**, 不改变判定逻辑。
+const CRED = process.env.DSH_SEMANTIC_AUDIT_CRED || join(homedir(), '.dsh', '.credentials.yaml')
+const STUB = process.env.DSH_SEMANTIC_AUDIT_STUB || ''
 
 function apiKey() {
   try {
@@ -37,15 +52,31 @@ function apiKey() {
   return null
 }
 
-const key = apiKey()
-if (key === null) {
-  console.error('[semantic-audit] 拿不到 SILICONFLOW_API_KEY ⇒ 环境不成立(不静默退回词面, 那会让结论失真)')
-  process.exit(3)
+let transport
+if (STUB !== '') {
+  // stub transport: 文本→向量 由夹具给定(缺向量的文本视为嵌入失败 ⇒ null, 与真实失败同一条路径)
+  let table
+  try {
+    table = JSON.parse(readFileSync(STUB, 'utf8'))
+  } catch (error) {
+    console.error(`[semantic-audit] stub 读不了(${STUB}): ${String(error).slice(0, 120)} ⇒ 环境不成立`)
+    process.exit(3)
+  }
+  transport = { embed: async text => table[text] ?? null }
+} else {
+  const key = apiKey()
+  if (key === null) {
+    // **fail-closed**: 拿不到 key 就必须退出 3, 绝不静默退回词面 —— 那会让"语义标定"的结论变成假的。
+    console.error('[semantic-audit] 拿不到 SILICONFLOW_API_KEY ⇒ 环境不成立(不静默退回词面, 那会让结论失真)')
+    process.exit(3)
+  }
+  transport = new HttpEmbeddingTransport('https://api.siliconflow.cn/v1', 'BAAI/bge-m3', key)
 }
-const transport = new HttpEmbeddingTransport('https://api.siliconflow.cn/v1', 'BAAI/bge-m3', key)
 
-const chains = JSON.parse(readFileSync(join(COG, 'chains.json'), 'utf8'))
-const exps = readFileSync(join(COG, 'experiences.jsonl'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+const chainsPath = process.env.DSH_SEMANTIC_AUDIT_CHAINS || join(COG, 'chains.json')
+const expsPath = process.env.DSH_SEMANTIC_AUDIT_EXPS || join(COG, 'experiences.jsonl')
+const chains = JSON.parse(readFileSync(chainsPath, 'utf8'))
+const exps = readFileSync(expsPath, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
 const byId = new Map(exps.map(e => [e.expId, e]))
 
 // 需要嵌入的文本集合: 链键 + 成员情境 + 抽样查询情境
