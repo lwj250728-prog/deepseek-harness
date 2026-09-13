@@ -36,6 +36,7 @@ import os
 import re
 import statistics
 import sys
+from collections import Counter
 
 D = os.environ.get('DSH_COG_DIR') or os.path.expanduser('~/.dsh/cognitive-pipeline')
 MIN_TURNS = 10
@@ -240,6 +241,23 @@ def main() -> int:
     else:
         print('      cl-278 的核心问句: "检索真没取到" %d 条(%s) —— 低于可按条排查的量级前不单独立项。'
               % (len(b_miss), share(b_miss).strip()))
+    # 2026-09-13 12:3x(cl-278 nextAction ③): 把「被注入前过滤器排除」与「检索真没取到」做成**常驻计数**。
+    # 动机: 这两个数此前只在我手算时出现(9 条), 没有落账 ⇒ 下一帧很容易把"没被注入"重新读成"检索失败"(已经发生过一次)。
+    # 落账口径: 每次运行追加一行(含 era 边界与窗口), 供阶段总结与后续帧直接引用, 不必重跑。
+    _row = {'ts': datetime.datetime.now(tz).isoformat(), 'era': fmt(era), 'usableSince': fmt(w0),
+            'windowEnd': fmt(w1), 'turns': sum(1 for r in tagged if (r.get('t') or 0) >= w0),
+            'library': len(lib), 'injectedInWindow': len(win_used), 'injectedPreEra': len(pre_used),
+            'batch': n, 'rankCut': len(b_rank), 'absorbed': len(b_absorb),
+            'belowGateOnly': len(b_gate), 'excludedByFilter': dict(Counter(w for _, w in b_excl)),
+            'notRetrieved': len(b_miss), 'reachableRate': round(reachable / max(len(lib), 1), 4)}
+    lp = os.path.join(D, 'coverage-attribution.jsonl')
+    if '--dry-run' not in sys.argv:
+        with open(lp, 'a', encoding='utf8') as fh:
+            fh.write(json.dumps(_row, ensure_ascii=False) + '\n')
+        print('\n已落常驻计数: %s(excludedByFilter=%s, notRetrieved=%d)'
+              % (lp, _row['excludedByFilter'], _row['notRetrieved']))
+    else:
+        print('\n(--dry-run: 未落常驻计数; 本行内容 %s)' % json.dumps(_row, ensure_ascii=False))
     if '--json' in sys.argv:
         print(json.dumps({'library': len(lib), 'window': [w0, w1], 'topK': topk, 'minSimilarity': minsim,
                           'injectedInWindow': len(win_used), 'injectedPreEra': len(pre_used),

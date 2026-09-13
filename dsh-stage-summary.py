@@ -93,6 +93,9 @@ def main() -> int:
             print('[stage-summary] 缺必需账本: %s ⇒ 不出数(不许静默少算)' % name, file=sys.stderr)
             return 3
         data[name] = v
+    # 2026-09-13 12:3x(cl-278 nextAction ③): 覆盖率归因的两个数("被注入前过滤器排除"/"检索真没取到")
+    # 落成常驻计数后, 阶段总结要把它们读出来 —— 否则"这期有多少条压根没被注入"又被读成检索失败。
+    cov = load('coverage-attribution.jsonl') or []
     prev = load('stage-summary.jsonl') or []
     now = datetime.datetime.now(TZ)
     if args.since:
@@ -242,6 +245,11 @@ def main() -> int:
         'eras': {'frameThreeWayCaliberEffectiveFrom': '2026-09-13T12:05:00+08:00',
                  'note': ('帧三分口径(投递/停泊/未投递)自 12:05 起生效; 本期 periodEnd 若早于该时刻, 读数属'
                           '**旧口径时代**, 不可与新口径直接比 —— 这条由外部评审 2026-09-13 抓出')},
+        'coverage': ({'ts': cov[-1].get('ts'), 'library': cov[-1].get('library'), 'batch': cov[-1].get('batch'),
+                      'rankCut': cov[-1].get('rankCut'), 'belowGateOnly': cov[-1].get('belowGateOnly'),
+                      'excludedByFilter': cov[-1].get('excludedByFilter'),
+                      'notRetrieved': cov[-1].get('notRetrieved'),
+                      'reachableRate': cov[-1].get('reachableRate')} if cov else None),
         'unproven': unproven,
         'caliber': PARKED_NOTE,
     }
@@ -274,6 +282,13 @@ def main() -> int:
         md.append('| %s | %d | %s |' % (gid, goal_adv[gid], goal_idle.get(gid)))
     md += ['', '- C 节口径: "本期推进" = dormant-goals.jsonl 里该目标 nextAction 的**文本变化次数**。'
            '它只说明"指令被改写", **不等于**世界状态前进了(外部评审 2026-09-13 指出该列原先没有口径注, 而它是本报告最吃重的一列)。',
+           '', '## C2 覆盖率归因(常驻计数; 源 coverage-attribution.jsonl)', '',
+           ('- 库 %s, 归因批次 %s: 排名出局 %s / 门限挡下 %s / **被注入前过滤器排除 %s** / **检索真没取到 %s**; 可及率 %s'
+            % (row['coverage']['library'], row['coverage']['batch'], row['coverage']['rankCut'],
+               row['coverage']['belowGateOnly'],
+               row['coverage']['excludedByFilter'], row['coverage']['notRetrieved'],
+               row['coverage']['reachableRate'])) if row.get('coverage') else '- (无 coverage-attribution 行)',
+           '- 口径提醒: 「被注入前过滤器排除」是**设计排除**(任务复述/自帧), 与「检索真没取到」是两件事 —— 不要混读。',
            '', '## D 成本', '', '- 帧消耗回合 %d; 每帧落地产物 %.3f 件' % (
         row['cost']['turnsConsumedByFrames'], row['cost']['artifactsPerFrame']),
         '- 口径: %s' % PARKED_NOTE,
