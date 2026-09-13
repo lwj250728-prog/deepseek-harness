@@ -188,8 +188,23 @@ def _mutation_lock(path: str):
         d = os.path.join(os.path.expanduser('~/.dsh/cognitive-pipeline'), '.mutation-locks')
         os.makedirs(d, exist_ok=True)
         fh = open(os.path.join(d, hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:16] + '.lock'), 'w')
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        # **必须有时限**(tp-204 实测发现: 原来是无界 `flock(LOCK_EX)` ⇒ 若别的机制持着该文件的锁, 见证会**永久挂住**
+        # 并把 T226 一起拖死)。超时即"拿不到锁就不锁"(见证自身的判据不依赖锁), 与"不阻塞"的约定一致。
+        import signal as _sig
+
+        def _on_alarm(_s, _f):
+            raise TimeoutError('等锁超时')
+
+        _sig.signal(_sig.SIGALRM, _on_alarm)
+        _sig.alarm(int(float(os.environ.get('DSH_WITNESS_LOCK_WAIT') or 60)))
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        finally:
+            _sig.alarm(0)
         return fh
+    except TimeoutError:
+        print('[witness] 等变异锁超时(别的机制在改同一个文件) ⇒ 本次不持锁(见证判据不依赖它)', file=sys.stderr)
+        return None
     except Exception:
         return None
 

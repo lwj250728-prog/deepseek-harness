@@ -55,7 +55,10 @@ def measurement_in_flight() -> bool:
     except Exception:
         return False
 COG = os.environ.get('DSH_COG_DIR') or os.path.expanduser('~/.dsh/cognitive-pipeline')
-LOCKDIR = os.path.join(COG, '.mutation-locks')
+# 锁目录必须与闸门(dsh-mutant-gate.py)用**同一个注入点**: 闸门早就认 DSH_MUTATION_LOCKS, 而本包装器原来只认 COG
+# ⇒ 两条路径指向不同目录时, 「在飞」与「持锁」互相看不见(2026-09-14 01:2x 实测: 包装器在真实目录加锁, 而对照实验
+# 在临时目录持锁 ⇒ 包装器照常拿到锁, 带外通道测不出来)。
+LOCKDIR = os.environ.get('DSH_MUTATION_LOCKS') or os.path.join(COG, '.mutation-locks')
 # 探针脚本里**已存在**的绝对路径 = 它可能改的目标(与 dsh-probe-binding.py 同一套解析: 它错不了就一起错)
 PATHISH = re.compile(r'["\']((?:/|\$HOME/)[^"\'`\n]*?)["\']')
 

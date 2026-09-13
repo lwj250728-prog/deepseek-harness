@@ -9707,6 +9707,124 @@ assert rc != 0 and "锚点绑定检查判红" in out, ("锚点漂移后 edit-che
                                             % (rc, out[-300:]))
 print("tp-203 接线: 集合取自登记簿(自动纳入) / 非目标不触发 / 目标触发且未漂移通过 / 漂移必红")
 '
+# ── T236 介入层的带外失败与「在飞」识别(tp-204) ──
+# 判据(确定性, 用 DSH_MUTATION_LOCKS/DSH_MUTATION_LOCK_WAIT 与临时 git 仓库, 不依赖时序运气):
+# ①无锁 ⇒ 泄漏并指名 / 持锁 ⇒ exit 0 且报「在飞的变异」; ②锁被持 ⇒ 包装器退带外码 7 且 arms 裁 infra;
+# ③覆盖见证的锁**有界**(持有者占锁时必须在时限内放弃 —— 无界 flock 会把 T226 一起拖死)。
+echo "[T236] 介入层的带外失败与在飞识别"
+t "介入层不许误读: 持锁⇒在飞不算泄漏 + 锁被持⇒带外码 7 且裁 infra + 见证锁有界" python3 -c '
+import hashlib, json, os, subprocess, sys, tempfile, time
+R = os.path.expanduser("~/dsh-fork")
+GATE = os.path.join(R, "dsh-mutant-gate.py")
+LOCK = os.path.join(R, "dsh-mutation-lock.py")
+ARMS = os.path.join(R, "dsh-probe-arms-check.py")
+WITNESS = os.path.join(R, "dsh-session-coverage-witness.py")
+AGENT = os.path.join(R, "packages/api/remotes/src/agent-lookup.ts")
+D1 = chr(34)
+T = tempfile.mkdtemp(prefix="t236-")
+REPO = os.path.join(T, "repo")
+os.makedirs(REPO)
+LOCKS = os.path.join(T, "locks")
+os.makedirs(LOCKS)
+ALLOW = os.path.join(T, "allow.json")
+with open(ALLOW, "w", encoding="utf8") as fh:
+    json.dump({"containers": []}, fh)
+
+
+REAL_LOCKS = os.path.expanduser("~/.dsh/cognitive-pipeline/.mutation-locks")
+
+
+def lock_name(path, locks_dir=None):
+    d = locks_dir or LOCKS
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:16] + ".lock")
+
+
+def hold(path, seconds, locks_dir=None):
+    """子进程持锁 seconds 秒(返回 Popen)。"""
+    lp = lock_name(path, locks_dir)
+    with open(lp, "a", encoding="utf8"):
+        pass                      # 先建文件: 子进程用默认模式打开即可(flock 不需要写模式)
+    code = ("import fcntl,time,sys\n"
+            "fh=open(sys.argv[1])\n"
+            "fcntl.flock(fh, fcntl.LOCK_EX)\n"
+            "print(chr(72)+chr(69)+chr(76)+chr(68), flush=True)\n"
+            "time.sleep(float(sys.argv[2]))\n")
+    pr = subprocess.Popen([sys.executable, "-c", code, lp, str(seconds)], stdout=subprocess.PIPE, text=True)
+    pr.stdout.readline()          # 等到真的持上锁再返回(免掉时序运气)
+    return pr
+
+
+def gate(repo):
+    r = subprocess.run([sys.executable, GATE, "--check", "--json", "--allow", ALLOW, "--repo", repo],
+                       capture_output=True, text=True, timeout=300,
+                       env=dict(os.environ, DSH_MUTATION_LOCKS=LOCKS))
+    out = (r.stdout or "") + (r.stderr or "")
+    payload = {}
+    for line in reversed([x for x in (r.stdout or "").strip().splitlines() if x.strip()]):
+        try:
+            payload = json.loads(line)
+            break
+        except Exception:
+            continue
+    return r.returncode, out, payload
+
+
+subprocess.run(["git", "init", "-q", REPO], check=True, timeout=120)
+victim = os.path.join(REPO, "victim.py")
+with open(victim, "w", encoding="utf8") as fh:
+    fh.write("# MUTANT: in-flight 对照\n")
+subprocess.run(["git", "-C", REPO, "add", "-A"], check=True, timeout=120)
+rc, out, payload = gate(REPO)
+assert rc == 1 and any("victim.py" in str(x.get("file")) for x in payload.get("leaks") or []), \
+    "无锁时应判泄漏并指名: rc=%d %s" % (rc, out[-200:])
+h = hold(victim, 12)
+time.sleep(1.0)
+rc2, out2, payload2 = gate(REPO)
+h.wait(timeout=60)
+assert rc2 == 0, "持锁时必须 exit 0(在飞, 不算泄漏), 实得 %d: %s" % (rc2, out2[-200:])
+assert payload2.get("inFlight") and any("victim.py" in str(x) for x in payload2["inFlight"]), \
+    "持锁时必须报 in-flight: %s" % json.dumps(payload2, ensure_ascii=False)[:200]
+assert "在飞的变异" in out2, "输出里没有「在飞的变异」字样: %s" % out2[-200:]
+rc3, out3 = 0, ""
+h2 = hold(os.path.join(R, "dsh-goal-pool-write.py"), 20)
+time.sleep(1.0)
+try:
+    r = subprocess.run([sys.executable, LOCK, "--files", os.path.join(R, "dsh-goal-pool-write.py"), "--", "true"],
+                       capture_output=True, text=True, timeout=120,
+                       env=dict(os.environ, DSH_MUTATION_LOCK_WAIT="2", DSH_MUTATION_LOCKS=LOCKS))
+    rc3, out3 = r.returncode, (r.stdout or "") + (r.stderr or "")
+    assert rc3 == 7, "锁被持有时包装器必须退带外码 7, 实得 %d: %s" % (rc3, out3[-200:])
+    assert "MUTATION_LOCK_FAILED" in out3, "带外标记缺失: %s" % out3[-200:]
+    r2 = subprocess.run([sys.executable, ARMS, "--only", "T233", "--json"], capture_output=True, text=True,
+                        timeout=900, env=dict(os.environ, DSH_MUTATION_LOCK_WAIT="2", DSH_MUTATION_LOCKS=LOCKS))
+    payload3 = {}
+    for line in reversed([x for x in (r2.stdout or "").strip().splitlines() if x.strip()]):
+        try:
+            payload3 = json.loads(line)
+            break
+        except Exception:
+            continue
+    verdicts = [v.get("verdict") for v in (payload3.get("results") or {}).values()]
+    assert "infra" in verdicts, "锁被持有时 arms 必须裁 infra(不算探针漂移), 实得 verdicts=%s" % verdicts
+finally:
+    h2.wait(timeout=60)
+os.environ["DSH_WITNESS_LOCK_WAIT"] = "2"
+import importlib.util
+spec = importlib.util.spec_from_file_location("witness_mod", WITNESS)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+h3 = hold(AGENT, 15, REAL_LOCKS)
+time.sleep(1.0)
+try:
+    t0 = time.time()
+    handle = mod._mutation_lock(AGENT)
+    took = time.time() - t0
+    assert handle is None and took < 8, "见证的锁必须**有界**: 返回 %r 耗时 %.1fs(无界等待会把 T226 一起拖死)" % (handle, took)
+finally:
+    h3.wait(timeout=60)
+print("T236: 无锁⇒泄漏 / 持锁⇒在飞(exit 0) / 锁被持⇒带外码 7 且 arms 裁 infra / 见证锁有界(%.1fs 放弃)" % took)
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
