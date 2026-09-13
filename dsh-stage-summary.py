@@ -246,17 +246,21 @@ def main() -> int:
             suite_fail_ids.append('[身份不全: 裁决 %s 条失败, 只取到 %d 条身份]'
                                   % (_m.group(1), len(suite_fail_ids) - 0))
         # 失败集的**换血**(评审: 12:21 的 5 红与 14:59 的 7 红之间消失 3 条、新增 5 条 ⇒ "6→7" 不是同一把尺子)
-        hist_ids = []
-        for v in verdicts[-6:]:
-            idx = lines.index(v) if v in lines else 0
-            seg = lines[max(0, idx - 600):idx]
-            cur_ids = {l.strip()[2:].strip() for l in seg if l.strip().startswith('✗')}
-            if cur_ids:
-                hist_ids.append(cur_ids)
+        # 2026-09-13 16:0x **T229 的合成世界把这里也抓出同一个坑**: 初版按"该裁决行之前 600 行"取失败集,
+        # 而相邻两轮之间可能不足 600 行 ⇒ 窗口**跨轮重叠**, 上一轮的 ✗ 混进这一轮 ⇒ "消失"恒为空集(实测 vanished=[])。
+        # 修法: 与身份同一口径 —— 每轮的失败集 = **上一裁决到本裁决**之间的 ✗。
         suite_fail_churn = None
-        if len(hist_ids) >= 2:
-            first, last = hist_ids[0], hist_ids[-1]
-            suite_fail_churn = {'appeared': sorted(last - first), 'vanished': sorted(first - last)}
+        if len(_marks) >= 2:
+            # 每一轮的失败集: 第一轮 = 文件头→首裁决; 第 k 轮 = 上一裁决→本裁决。
+            # (初版从 k=1 起算, 于是**只有两条裁决时只能得到一组** ⇒ 换血恒为 None —— 又是合成世界抓出来的。)
+            _blocks = [lines[0: _marks[0] + 1]]
+            for _k in range(1, len(_marks)):
+                _blocks.append(lines[_marks[_k - 1] + 1: _marks[_k] + 1])
+            _blocks = _blocks[-6:]
+            sets = [{l.strip()[2:].strip() for l in _b if l.strip().startswith('✗')} for _b in _blocks]
+            if len(sets) >= 2 and (sets[0] or sets[-1]):
+                suite_fail_churn = {'appeared': sorted(sets[-1] - sets[0]),
+                                    'vanished': sorted(sets[0] - sets[-1])}
     pid = ''
     try:
         pid = subprocess.run(['systemctl', '--user', 'show', 'dsh-web.service', '-p', 'MainPID',

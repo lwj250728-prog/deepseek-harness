@@ -9359,6 +9359,54 @@ else:
 assert not bad, "δ 门的基线键洞/CWD 不变性不成立: " + "; ".join(bad)
 print("①基线之后新增的 lib 可见 ②三处 CWD 判决逐字一致 ③变更/未变更两个方向都对")
 '
+# ── T229 阶段总结三个口径(身份完整性/新入账口径/换血披露)(tp-199) ──
+echo "[T229] 阶段总结的三个口径(身份完整性/新入账/换血)"
+t "阶段总结: 失败身份须与裁决一致 + 新入账按首次出现 + 换血须披露" python3 -c '
+import datetime, json, os, subprocess, sys, tempfile
+TOOL = os.path.expanduser("~/dsh-fork/dsh-stage-summary.py")
+tz = datetime.timezone(datetime.timedelta(hours=8))
+now = datetime.datetime.now(tz)
+since = (now - datetime.timedelta(hours=2)).replace(microsecond=0).isoformat()
+d = tempfile.mkdtemp(prefix="t229-world-")
+for f in ("quiet-driver-frames.jsonl", "dormant-goals.jsonl", "goal-trigger-log.jsonl", "test-pending.jsonl"):
+    open(os.path.join(d, f), "w", encoding="utf8").write("")
+old_ts = (now - datetime.timedelta(days=3)).isoformat()
+mid_ts = (now - datetime.timedelta(minutes=30)).isoformat()
+with open(os.path.join(d, "claims-ledger.jsonl"), "w", encoding="utf8") as fh:
+    fh.write(json.dumps({"id": "cl-old", "ts": old_ts, "status": "open", "claim": "旧账"}) + "\n")
+    fh.write(json.dumps({"id": "cl-old", "ts": mid_ts, "status": "open", "claim": "旧账(本期被重提)"}) + "\n")
+    fh.write(json.dumps({"id": "cl-new", "ts": mid_ts, "status": "open", "claim": "本期首次入账"}) + "\n")
+noise = lambda n: ["  噪声行 %d" % i for i in range(n)]
+log = []
+log.append("  ✗ 旧A 的旧失败")            # 第一轮的失败集(第二轮消失的那条)
+log.append("═══ 累计裁决: 10 通过 / 2 失败 (origin=manual 2026-09-13 09:00:00) ═══")
+log += ["失败项:"] + ["- 旧A 的旧失败", "- 旧B 的旧失败"]
+log += noise(500)                                  # 让"最后 400 行"窗口看不见下面那条 ✗
+log.append("  ✗ 失败X(在窗外那条)")
+log += noise(500)   # 关键: 让这条 ✗ 距文件尾 **超过 400 行** ⇒ 固定窗口看不见它(复现原缺陷)
+log.append("  ✗ 失败Y")
+log.append("  ✗ 失败Z")
+log.append("═══ 累计裁决: 5 通过 / 3 失败 (origin=deploy 2026-09-13 15:00:00) ═══")
+log += ["失败项:", "- 失败X(在窗外那条)", "- 失败Y", "- 失败Z"]
+open(os.path.join(d, ".cog-tests.log"), "w", encoding="utf8").write("\n".join(log) + "\n")
+r = subprocess.run([sys.executable, TOOL, "--dry-run", "--json", "--since", since],
+                   capture_output=True, text=True, timeout=600, env=dict(os.environ, DSH_COG_DIR=d))
+assert r.returncode == 0, "工具没跑通: %s" % (r.stderr or r.stdout)[-300:]
+payload = json.loads(r.stdout.strip().splitlines()[-1])
+ids = payload["externalAnchors"]["suiteFailureNames"]
+assert len(ids) == 3, "失败身份应 3 条(与裁决一致), 实得 %d: %s" % (len(ids), ids)
+assert any("失败X" in x for x in ids), "窗外那条 ✗ 被漏掉了(固定窗口的旧病复发): %s" % ids
+assert "身份不全" not in " ".join(ids), "身份没取全却只标了「身份不全」, 应取全"
+art = payload["artifacts"]
+assert art.get("claimsNewlyFirstSeen") == 1, "新入账应只数**首次出现**的 1 条, 实得 %r" % art.get("claimsNewlyFirstSeen")
+assert art.get("claimsRementionedThisPeriod") == 1, "旧账被重提应记 1 条, 实得 %r" % art.get("claimsRementionedThisPeriod")
+churn = payload["externalAnchors"].get("suiteFailureChurn")
+assert churn, "失败集换血未披露(两条裁决的失败集明显不同)"
+assert any("失败X" in x for x in (churn.get("appeared") or [])), "换血的「新增」里应有失败X: %r" % churn
+assert any("旧A" in x for x in (churn.get("vanished") or [])), "换血的「消失」里应有旧A: %r" % churn
+assert "失败集换血" in r.stdout, "md 里没渲染换血行"
+print("合成世界下: 身份 3 条(含窗外那条) / 新入账 1 与重提 1 同时给出 / 换血已披露")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

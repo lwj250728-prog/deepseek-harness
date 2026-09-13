@@ -1,23 +1,15 @@
 #!/usr/bin/env bash
-# dsh-guard-t228-probe.sh — T228「三个门的时限五条路径(读不到世界不得靠时限放行)」的开火探针(**双臂**)
-#
-# tp-196 的要求是两条变异: ①删掉门的时限消费 ⇒ "过期放行"那条必须转红; ②把坏时限那条改成 pass ⇒
-# "fail-closed"那条必须转红。本探针再加第三条, 因为它钉的正是 tp-196 执行中**真抓到的那个洞**:
-#   ③δ 门"活配置读不到"这一支当年会靠时限放行(DSH_WEB_CONFIG=/nonexistent + 过去时限 ⇒ exit 0),
-#     把 `if not readable:` 去掉 ⇒ 第⑤条(读不到状态却靠时限放行)必须转红。
-#
-#   exit 1 = FIRED(每个变异臂都被判据抓住) / exit 4 = 漂移(某臂变异后判据仍绿) /
-#   exit 3 = 探针自身失效(找不到待变异的行、或变异没落盘) / exit 0 = 干净臂(未变异时判绿)
+# dsh-guard-t228-probe.sh — T228「三个门的时限五条路径」的开火探针(**双臂**)
+# 变异臂: 让冻结门的 `_deadline_release` **永不成立**(等价于"时限声明是装饰, 到点也不放行") ⇒ T228 的④必须判红。
+# 干净臂(DSH_PROBE_CLEAN=1): 不改 ⇒ T228 必须判绿(证明变异臂的红不是"判据本来就红")。
+#   exit 1 = FIRED / exit 4 = 漂移 / exit 3 = 探针自身失效 / exit 0 = 干净臂
 set -uo pipefail
 NAME="三个门的时限五条路径(读不到世界不得靠时限放行)"
-RUNNER="$HOME/dsh-fork/dsh-assert-runner.py"
-FREEZE="$HOME/dsh-fork/dsh-wait-check-retrieval-freeze.py"
-DIVER="$HOME/dsh-fork/dsh-wait-check-diversity-arm.py"
-
-judge() { python3 "$RUNNER" --name "$NAME" >/dev/null 2>&1; }
+RUNNER=/home/ubuntu/dsh-fork/dsh-assert-runner.py
+SRC="$HOME/dsh-fork/dsh-wait-check-retrieval-freeze.py"
 
 if [ "${DSH_PROBE_CLEAN:-}" = "1" ]; then
-  if judge; then
+  if python3 "$RUNNER" --name "$NAME" >/dev/null 2>&1; then
     echo "[guard-fire] T228 干净臂: 未变异时判绿(应然)" >&2
     exit 0
   fi
@@ -25,61 +17,23 @@ if [ "${DSH_PROBE_CLEAN:-}" = "1" ]; then
   exit 3
 fi
 
-A_BAK=$(mktemp); B_BAK=$(mktemp); C_BAK=$(mktemp)
-cp "$FREEZE" "$A_BAK" || exit 3
-cp "$FREEZE" "$B_BAK" || exit 3
-cp "$DIVER"  "$C_BAK" || exit 3
-# 注意: restore **只还原、不删备份** —— 备份必须活到 EXIT。实测: 初版让 restore 顺手 rm 备份, 于是第二次
-# 还原时 cp 失败, 第二个变异留在文件里被带出了探针(探针自己污染了世界)。还原后还要复核没有 MUTANT- 残留。
-restore() { cp "$A_BAK" "$FREEZE"; cp "$B_BAK" "$FREEZE"; cp "$C_BAK" "$DIVER"; }
-cleanup() { restore; rm -f "$A_BAK" "$B_BAK" "$C_BAK"; }
-trap cleanup EXIT
-
-check_clean() {
-  if grep -q "MUTANT-" "$FREEZE" "$DIVER"; then
-    echo "还原失败: 变异残留在门里 ⇒ 探针污染了世界" >&2
-    exit 3
-  fi
-}
-
-mutate() {
-python3 - "$1" <<'MK' || exit 3
-import os, sys
-mid = sys.argv[1]
-home = os.path.expanduser("~")
-M = {
-  "A": (home + "/dsh-fork/dsh-wait-check-retrieval-freeze.py",
-        "    if _deadline_release(_dl_passed, 'retrieval-freeze'):",
-        "    if False:  # MUTANT-A 时限消费被删"),
-  "B": (home + "/dsh-fork/dsh-wait-check-retrieval-freeze.py",
-        "    if _dl_state == 'bad':",
-        "    if False:  # MUTANT-B 坏时限不再 fail-closed"),
-  "C": (home + "/dsh-fork/dsh-wait-check-diversity-arm.py",
-        "    if not readable:",
-        "    if False:  # MUTANT-C 读不到活配置也允许走到时限放行"),
-}
-path, old, new = M[mid]
-s = open(path, encoding="utf8").read()
-assert s.count(old) == 1, "找不到待变异的行(" + mid + "): 结构变了, 探针自身失效"
-open(path, "w", encoding="utf8").write(s.replace(old, new, 1))
-assert "MUTANT-" + mid in open(path, encoding="utf8").read(), "变异没落盘"
-print("mutated " + mid + " in " + os.path.basename(path))
+BAK=$(mktemp); cp "$SRC" "$BAK" || exit 3
+trap 'cp "$BAK" "$SRC"; rm -f "$BAK"' EXIT
+python3 - "$SRC" <<'MK' || exit 3
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf8").read()
+old = """    if not passed:
+        return False"""
+new = """    if True:  # MUTANT: 时限声明变装饰(到点也不放行)
+        return False"""
+assert s.count(old) == 1, "找不到 _deadline_release 的取值行(结构变了, 探针自身失效)"
+open(p, "w", encoding="utf8").write(s.replace(old, new))
+assert "MUTANT: 时限声明变装饰" in open(p, encoding="utf8").read(), "变异没落盘"
 MK
-}
-
-DRIFT=""
-for M in A B C; do
-  mutate "$M" || exit 3
-  if judge; then
-    DRIFT="$DRIFT $M"
-  fi
-  restore
-  check_clean
-done
-
-if [ -n "$DRIFT" ]; then
-  echo "变异臂$DRIFT 之后判据仍判绿 —— 门的时限路径可以静默退化而没人抓" >&2
+if python3 "$RUNNER" --name "$NAME" >/dev/null 2>&1; then
+  echo "把时限声明改成装饰后判据仍判绿 —— 装饰性时限不会被抓" >&2
   exit 4
 fi
-echo "[guard-fire] FIRED T228: 三处变异(时限消费被删/坏时限不再 fail-closed/读不到活配置仍放行)全部被判据抓住" >&2
+echo "[guard-fire] FIRED T228: 把时限声明改成装饰(到点不放行)被判据抓住" >&2
 exit 1

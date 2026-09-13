@@ -1,22 +1,16 @@
 #!/usr/bin/env bash
-# dsh-guard-t229-probe.sh — T229「δ 门: 基线之后新增的 lib 必须可见, 且三处 CWD 判决逐字一致」的开火探针(**双臂**)
-#
-# tp-198 要求的三条: ①键洞(基线之后新增的 lib 对门不可见) ②CWD(相对键按调用方 CWD 解析 ⇒ 换目录判决就变)
-# ③变异 `resolve_lib_key` 退回 `os.path.expanduser` ⇒ CWD 那条必须转红。本探针再加一条"假阳性"变异:
-# 把"内容变了的才算变更"改成"一律都报" ⇒ 第③条(未变更的键不许被算作变更)必须转红 —— 否则"全报"
-# 这种假修复也能通过 ①②。
-#
-#   exit 1 = FIRED(每个变异臂都被判据抓住) / exit 4 = 漂移(某臂变异后判据仍绿) /
-#   exit 3 = 探针自身失效(找不到待变异的行/变异没落盘/还原后仍有残留) / exit 0 = 干净臂
+# dsh-guard-t229-probe.sh — T229「阶段总结三个口径」的开火探针(**双臂**)
+# 变异臂: 把 dsh-stage-summary.py 的失败身份窗口改回**固定 400 行**、并去掉尾部"失败项:"块解析
+#   (= 复现外部评审抓到的那版缺陷) ⇒ T229 必须判红(合成日志里那条 ✗ 落在 400 行之外)。
+# 干净臂(DSH_PROBE_CLEAN=1): 不改 ⇒ T229 必须判绿(证明变异臂的红不是"判据本来就红")。
+#   exit 1 = FIRED / exit 4 = 漂移 / exit 3 = 探针自身失效 / exit 0 = 干净臂
 set -uo pipefail
-NAME="δ 门: 基线之后新增的 lib 必须可见, 且三处 CWD 判决逐字一致"
-RUNNER="$HOME/dsh-fork/dsh-assert-runner.py"
-SRC="$HOME/dsh-fork/dsh-wait-check-diversity-arm.py"
-
-judge() { python3 "$RUNNER" --name "$NAME" >/dev/null 2>&1; }
+NAME="阶段总结: 失败身份须与裁决一致 + 新入账按首次出现 + 换血须披露"
+RUNNER=/home/ubuntu/dsh-fork/dsh-assert-runner.py
+SRC="$HOME/dsh-fork/dsh-stage-summary.py"
 
 if [ "${DSH_PROBE_CLEAN:-}" = "1" ]; then
-  if judge; then
+  if python3 "$RUNNER" --name "$NAME" >/dev/null 2>&1; then
     echo "[guard-fire] T229 干净臂: 未变异时判绿(应然)" >&2
     exit 0
   fi
@@ -25,49 +19,25 @@ if [ "${DSH_PROBE_CLEAN:-}" = "1" ]; then
 fi
 
 BAK=$(mktemp); cp "$SRC" "$BAK" || exit 3
-# 备份活到 EXIT 才删(初版在 restore 里顺手 rm 备份 ⇒ 第二次还原 cp 失败、变异被带出探针)。
-restore() { cp "$BAK" "$SRC"; }
-cleanup() { restore; rm -f "$BAK"; }
-trap cleanup EXIT
-
-mutate() {
-python3 - "$1" <<'MK' || exit 3
-import os, sys
-mid = sys.argv[1]
-path = os.path.expanduser("~/dsh-fork/dsh-wait-check-diversity-arm.py")
-M = {
-  "A": ("        for path in current_lib_keys():",
-        "        for path in []:  # MUTANT-A 基线之后新增的 lib 不可见"),
-  "B": ("    return p if os.path.isabs(p) else os.path.join(REPO, p)",
-        "    return p  # MUTANT-B 退回按调用方 CWD 解析"),
-  "C": ("        if cur != want:",
-        "        if True:  # MUTANT-C 未变的键也被算作变更"),
-}
-old, new = M[mid]
-s = open(path, encoding="utf8").read()
-assert s.count(old) == 1, "找不到待变异的行(" + mid + "): 结构变了, 探针自身失效"
-open(path, "w", encoding="utf8").write(s.replace(old, new, 1))
-assert "MUTANT-" + mid in open(path, encoding="utf8").read(), "变异没落盘"
-print("mutated " + mid + " in " + os.path.basename(path))
+trap 'cp "$BAK" "$SRC"; rm -f "$BAK"' EXIT
+python3 - "$SRC" <<'MK' || exit 3
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf8").read()
+a_old = """        _blk_start = _marks[-2] if len(_marks) >= 2 else 0
+        tail = lines[_blk_start: (_marks[-1] + 1 if _marks else len(lines))]"""
+a_new = """        tail = lines[max(0, len(lines) - 400):]  # MUTANT: 回到固定 400 行窗口"""
+b_old = """        after = lines[_marks[-1]:] if _marks else []"""
+b_new = """        after = []  # MUTANT: 不再解析尾部失败项块"""
+assert s.count(a_old) == 1 and s.count(b_old) == 1, "结构变了, 探针自身失效"
+s = s.replace(a_old, a_new).replace(b_old, b_new)
+open(p, "w", encoding="utf8").write(s)
+back = open(p, encoding="utf8").read()
+assert "MUTANT: 回到固定 400 行窗口" in back and "MUTANT: 不再解析尾部失败项块" in back, "变异没落盘"
 MK
-}
-
-DRIFT=""
-for M in A B C; do
-  mutate "$M" || exit 3
-  if judge; then
-    DRIFT="$DRIFT $M"
-  fi
-  restore
-  if grep -q "MUTANT-" "$SRC"; then
-    echo "还原失败: 变异残留在门里 ⇒ 探针污染了世界" >&2
-    exit 3
-  fi
-done
-
-if [ -n "$DRIFT" ]; then
-  echo "变异臂$DRIFT 之后判据仍判绿 —— 键洞/CWD 依赖/假阳性可以静默回来而没人抓" >&2
+if python3 "$RUNNER" --name "$NAME" >/dev/null 2>&1; then
+  echo "回到固定窗口 + 不解析尾部块后判据仍判绿 —— 少列身份不会被抓" >&2
   exit 4
 fi
-echo "[guard-fire] FIRED T229: 三处变异(新增不可见/CWD 解析/未变也报)全部被判据抓住" >&2
+echo "[guard-fire] FIRED T229: 固定 400 行窗口(少列失败身份)被判据抓住" >&2
 exit 1
