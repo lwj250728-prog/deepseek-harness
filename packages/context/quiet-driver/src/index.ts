@@ -16,17 +16,34 @@
 import { execSync } from 'node:child_process'
 import { hostname } from 'node:os'
 import { appendFile, mkdir } from 'node:fs/promises'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import { findOpenAlertId, localDay } from './alert-ledger.ts'
+import { parsePersistedTarget, rebindTarget, serializeTarget } from './target-binding.ts'
 import { isWaitingNextAction } from './waiting.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import z from '@deepseek-ai/schemastery'
+
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /**
+     * One session handed its conversation to a fresh successor. Declared locally
+     * so this driver can follow its target without depending on the plugin that
+     * emits it; the two declarations share one shape.
+     */
+    'session/handover'(payload: {
+      readonly predecessorId: SessionId
+      readonly successorId: SessionId
+      readonly seedLength: number
+    }): void
+  }
+}
 
 export const name = 'quiet-driver'
 
@@ -41,6 +58,13 @@ export interface Config {
   enabled: boolean
   /** Target main session to wake when idle. */
   targetSessionId: string
+  /**
+   * Where the CURRENT target is remembered. The profile names the session the
+   * driver STARTED on; a handover moves the conversation to a successor, and a
+   * restart must not snap the driver back to a session nobody is in any more.
+   * Defaults to a file beside {@link thinkLogPath}.
+   */
+  targetStatePath: string
   /** Interval between quiet checks (ms). */
   intervalMs: number
   /** Skip direct wake when the target agent is not idle. */
@@ -84,6 +108,7 @@ export const Config: z<Config> = z.object({
   onlyWhenIdle: z.boolean().default(true),
   bypassMode: z.boolean().default(true),
   thinkLogPath: z.string().default('~/.dsh/cognitive-pipeline/quiet-driver-frames.jsonl'),
+  targetStatePath: z.string().default(''),
   model: z.string().default('default'),
   userActiveWindowMs: z.number().default(5 * 60 * 1000),
   persistToCognitive: z.boolean().default(true),
@@ -839,14 +864,65 @@ async function triggerReflectAfterExec(ctx: Context, reason: string, outputText:
   }
 }
 
+/**
+ * Read the persisted current target, if any (an absent file means the
+ * configured target wins). Synchronous by necessity: the driver binds its
+ * target while `apply` runs, and a driver that refused to start over a missing
+ * state file would be worse than one that wakes the session the profile names.
+ */
+function readPersistedTarget(path: string): SessionId | undefined {
+  try {
+    return parsePersistedTarget(readFileSync(expandHome(path), 'utf8'))
+  } catch {
+    return undefined
+  }
+}
+
+/** Persist the current target so a restart resumes the handover, not the profile value. */
+function writePersistedTarget(path: string, id: SessionId): void {
+  try {
+    const target = expandHome(path)
+    mkdirSync(dirname(target), { recursive: true })
+    writeFileSync(target, serializeTarget(id), 'utf8')
+  } catch (error: unknown) {
+    console.error('[quiet-driver] could not persist the re-bound target:', error)
+  }
+}
+
 export function apply(ctx: Context, config: Config): (() => void) | void {
   if (!config.enabled) return
   if (!config.targetSessionId) {
     ctx.logger.warn('[quiet-driver] enabled but targetSessionId empty — no-op')
     return
   }
-  const sessionId = SessionId(config.targetSessionId)
-  const targetAgent = (): Agent | undefined => ctx.agents.get(sessionId)
+  const targetStatePath = config.targetStatePath && config.targetStatePath.length > 0
+    ? config.targetStatePath
+    : join(dirname(expandHome(config.thinkLogPath)), 'quiet-driver-target.txt')
+  const persistedTarget = readPersistedTarget(targetStatePath)
+  /**
+   * The session this driver wakes. Mutable on purpose: when the conversation
+   * hands over to a successor (the `session-handover` plugin, at a compaction
+   * boundary), a fixed id would keep waking an archived predecessor forever.
+   */
+  let targetSessionId = persistedTarget ?? SessionId(config.targetSessionId)
+  const targetAgent = (): Agent | undefined => ctx.agents.get(targetSessionId)
+  // Console sink on purpose: this plugin's ctx.logger output does not reach the
+  // deployment journal, so "which session am I actually waking?" must be
+  // answerable from the journal after a restart.
+  console.log(
+    `[quiet-driver] armed: target=${targetSessionId} `
+    + `(${persistedTarget === undefined ? 'from profile' : 're-bound by an earlier handover'}) `
+    + `interval=${config.intervalMs}ms onlyWhenIdle=${String(config.onlyWhenIdle)}`,
+  )
+
+  // --- Conversation handover: follow the target into its successor session.
+  ctx.on('session/handover', (notice: { predecessorId: SessionId; successorId: SessionId }) => {
+    const next = rebindTarget(targetSessionId, notice)
+    if (next === undefined) return
+    ctx.logger.warn('[quiet-driver] target re-bound by handover: %s → %s', targetSessionId, next)
+    targetSessionId = next
+    writePersistedTarget(targetStatePath, next)
+  })
 
   // --- v20 自我锚定: 记录载体身份(重启后变化=载体迁移可识别)。
   const carrier: CarrierIdentity = {
@@ -1061,7 +1137,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     ctx.on('agent/pre-step', async ({ agent, messages: _messages }, next) => {
       const decision = await next()
       if (decision.kind === 'reject') return decision
-      if (agent.id !== sessionId) return decision
+      if (agent.id !== targetSessionId) return decision
       if (latestFinding === null) return decision
       const now = Date.now()
       if (now - lastInjectedAt < INJECT_COOLDOWN_MS) return decision
@@ -1216,7 +1292,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     let presetId: string | undefined
     if (persistence !== undefined) {
       try {
-        const inspected = await persistence.inspect(sessionId)
+        const inspected = await persistence.inspect(targetSessionId)
         for (let index = inspected.events.length - 1; index >= 0; index -= 1) {
           const event = inspected.events[index]
           if (event?.type === 'agent-preset/selected' && event.data?.agentPreset !== undefined) {
@@ -1226,7 +1302,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
         }
         presetId ??= inspected.meta.agentPreset
       } catch (error: unknown) {
-        ctx.logger.warn('[quiet-driver] preset resolution failed for %s: %s', sessionId, String(error).slice(0, 160))
+        ctx.logger.warn('[quiet-driver] preset resolution failed for %s: %s', targetSessionId, String(error).slice(0, 160))
       }
     }
     presetId ??= presets?.defaultId
@@ -1254,7 +1330,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
     } | undefined
     if (persistence === undefined) return undefined
     try {
-      const inspected = await persistence.inspect(sessionId)
+      const inspected = await persistence.inspect(targetSessionId)
       for (let index = inspected.events.length - 1; index >= 0; index -= 1) {
         const event = inspected.events[index]
         if (event?.type !== 'request/header') continue
@@ -1264,7 +1340,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
         }
       }
     } catch (error: unknown) {
-      ctx.logger.warn('[quiet-driver] model resolution failed for %s: %s', sessionId, String(error).slice(0, 160))
+      ctx.logger.warn('[quiet-driver] model resolution failed for %s: %s', targetSessionId, String(error).slice(0, 160))
     }
     return undefined
   }
@@ -1359,7 +1435,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
         installModelSelection(agentCtx, selection as never)
       }
       const handle = await ctx.agents.resume({
-        resumeSessionId: sessionId,
+        resumeSessionId: targetSessionId,
         ...storedModel === undefined ? {} : { agentOptions: storedModel },
         setup,
       })
@@ -1539,7 +1615,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
                 store?: { setChainAnchor(sessionId: string, chainId: string | null): void }
               } | undefined
               try {
-                pipelineSvc?.store?.setChainAnchor(String(sessionId), actionable.id)
+                pipelineSvc?.store?.setChainAnchor(String(targetSessionId), actionable.id)
               } catch (error: unknown) {
                 ctx.logger.warn('[quiet-driver] setChainAnchor failed: %s', String(error))
               }
@@ -1556,7 +1632,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
               await logFrame(config.thinkLogPath, {
                 ts: Date.now(), kind: 'action-frame', frameNo: frames,
                 goalId: actionable.id, goalTitle: actionable.title,
-                nextAction: actionable.nextAction, session: sessionId, output: responseText,
+                nextAction: actionable.nextAction, session: targetSessionId, output: responseText,
               })
               // P-A2 方向自省: 行动帧执行 = 目标被推进(空闲期 direct 路径的主触发点,
               // 补 v24 回写仅在 side-channel 触发的缺口)。节流在 helper 内。
@@ -1584,7 +1660,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
                 await logFrame(config.thinkLogPath, {
                   ts: Date.now(), kind: 'candidate-hatch', frameNo: frames,
                   goalId: pendingCand.id, goalTitle: pendingCand.title,
-                  nextAction: `孵化候选: ${pendingCand.title}`, session: sessionId, output: hatchResponse,
+                  nextAction: `孵化候选: ${pendingCand.title}`, session: targetSessionId, output: hatchResponse,
                 })
                 // 候选被执行 = 北极星方向被推进 → 触发方向自省(节流在 helper 内)
                 await triggerNorthStarReflect(ctx, 'candidate-hatch')
@@ -1610,7 +1686,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
                 await logFrame(config.thinkLogPath, {
                   ts: Date.now(), kind: 'test-plan-frame', frameNo: frames,
                   goalId: pendingTest.id, goalTitle: pendingTest.title,
-                  nextAction: `执行测试: ${pendingTest.title}`, session: sessionId, output: testResponse,
+                  nextAction: `执行测试: ${pendingTest.title}`, session: targetSessionId, output: testResponse,
                 })
                 return  // 本次 tick 已用于测试计划, 不再发评估帧
               }
@@ -1629,7 +1705,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
                 await logFrame(config.thinkLogPath, {
                   ts: Date.now(), kind: 'test-review-frame', frameNo: frames,
                   goalId: 'test-review', goalTitle: '审视近期机制改动是否需要新测试',
-                  nextAction: '审视→生成新测试或标注无需求', session: sessionId, output: reviewResponse,
+                  nextAction: '审视→生成新测试或标注无需求', session: targetSessionId, output: reviewResponse,
                 })
                 return  // 本次 tick 已用于测试审视
               }
@@ -1664,7 +1740,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
             content: [{ type: 'text', text: buildFrameText(carrier, frameCtx.output, escalated ? MAX_INCREMENTAL_FRAMES : 0, goals, inducement) }],
             source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const, summary: `三问帧 #${frames}` },
           })
-          ctx.logger.info('[quiet-driver] wake #%d: direct followup to %s (真正空闲, %s)', frames, sessionId, mode)
+          ctx.logger.info('[quiet-driver] wake #%d: direct followup to %s (真正空闲, %s)', frames, targetSessionId, mode)
           agent.followup(message)
           // 自主进化 #001: direct-frame 应答落盘——等主会话应答完, 提取最后 assistant 文本写入 output。
           // (原 output 恒空 = 空闲唤醒的认知产物全丢; 补上沉淀环, 不需主会话自律。)
@@ -1674,7 +1750,7 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
           // 记录直驱帧到 think-log（含协议模式+主会话应答产出），供 v18 下帧参考。
           await logFrame(config.thinkLogPath, {
             ts: Date.now(), kind: 'direct-frame', frameNo: frames, mode,
-            session: sessionId, output: responseText,  // 不再恒空——应答沉淀
+            session: targetSessionId, output: responseText,  // 不再恒空——应答沉淀
             consumed,
           })
           if (responseText.length > 0) {
