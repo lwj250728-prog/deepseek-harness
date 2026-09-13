@@ -28,6 +28,10 @@ import subprocess
 import sys
 
 TAG = '[mutation-lock]'
+# **带外失败码**(2026-09-14 00:3x): 介入层自己的失败绝不能冒充被包装物的裁决 —— 申报码实测只有 1(43 条)/2(2 条),
+# 故取 7 作"包装器基础设施失败"(原用 3, 与探针自身"自身失效"的 3 撞车, 会被记成 probe 漂移)。
+OOB_EXIT = 7
+OOB_MARK = 'MUTATION_LOCK_FAILED'
 COG = os.environ.get('DSH_COG_DIR') or os.path.expanduser('~/.dsh/cognitive-pipeline')
 LOCKDIR = os.path.join(COG, '.mutation-locks')
 # 探针脚本里**已存在**的绝对路径 = 它可能改的目标(与 dsh-probe-binding.py 同一套解析: 它错不了就一起错)
@@ -75,7 +79,8 @@ def acquire(paths: list, timeout: float):
             fh.flush()
             handles.append(fh)
     except (TimeoutError, OSError) as exc:
-        print('%s 取锁失败(%s) ⇒ 不做任何变异/执行(exit 3, 不等于命令失败)' % (TAG, exc), file=sys.stderr)
+        print('%s 取锁失败(%s) ⇒ 不做任何变异/执行(带外退出码 %d, 不等于命令失败也不要当成探针漂移)'
+              % (TAG, exc, OOB_EXIT), file=sys.stderr)
         return None
     return handles
 
@@ -84,7 +89,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--files', nargs='*', default=[])
     ap.add_argument('--probe', default=None)
-    ap.add_argument('--timeout', type=float, default=180.0)
+    ap.add_argument('--timeout', type=float,
+                    default=float(os.environ.get('DSH_MUTATION_LOCK_WAIT') or 180.0))
     ap.add_argument('--show', action='store_true')
     # `--shell <整串>`: 用 `bash -lc` 执行**一个** argv —— 修复实测到的回归(2026-09-14 00:1x):
     # 早先的 REMAINDER 形态要求调用方把命令当 argv 传, 但 arms 检查是把**包装后的整串**交给 `bash -lc` 的,
@@ -112,7 +118,8 @@ def main() -> int:
     if targets:
         handles = acquire(targets, args.timeout)
         if handles is None:
-            return 3
+            print(OOB_MARK, file=sys.stderr)
+            return OOB_EXIT
         print('%s 已按文件加锁 %d 个: %s' % (TAG, len(targets), ', '.join(os.path.basename(t) for t in targets)),
               file=sys.stderr)
 
@@ -121,7 +128,7 @@ def main() -> int:
             return subprocess.run(['bash', '-lc', args.shell]).returncode
         except Exception as exc:
             print('%s --shell 执行失败: %s' % (TAG, exc), file=sys.stderr)
-            return 3
+            return OOB_EXIT
     cmd = [c for c in args.cmd if c != '--']
     if not cmd:
         return 0
@@ -129,7 +136,7 @@ def main() -> int:
         return subprocess.run(cmd).returncode
     except FileNotFoundError as exc:
         print('%s 命令不存在: %s' % (TAG, exc), file=sys.stderr)
-        return 3
+        return OOB_EXIT
 
 
 if __name__ == '__main__':

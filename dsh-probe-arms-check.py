@@ -39,6 +39,9 @@ def load(path: str):
         return json.load(fh)
 
 
+OOB_MARK = 'MUTATION_LOCK_FAILED'
+
+
 def measure(cmd: str, timeout: float) -> tuple[int | None, int | None, str]:
     """→ (变异臂码, 干净臂码, 说明)。干净臂 = 带 DSH_PROBE_CLEAN=1 再跑一次同一命令。"""
     # 变异臂必须**显式剥掉** DSH_PROBE_CLEAN: 否则当本脚本自己被 DSH_PROBE_CLEAN=1 包着跑时(套件里就是这样),
@@ -46,6 +49,9 @@ def measure(cmd: str, timeout: float) -> tuple[int | None, int | None, str]:
     env_m = {k: v for k, v in os.environ.items() if k != 'DSH_PROBE_CLEAN'}
     try:
         m = subprocess.run(['bash', '-lc', cmd], capture_output=True, text=True, timeout=timeout, env=env_m)
+        if OOB_MARK in ((m.stdout or '') + (m.stderr or '')):
+            # 介入层(变异锁包装)自己失败 ⇒ 这不是探针的裁决, 必须走带外状态; 记成 mutant-mismatch 就是造假异常。
+            return m.returncode, None, 'oob-lock-failed'
     except subprocess.TimeoutExpired:
         return None, None, '变异臂超时'
     try:
@@ -56,7 +62,9 @@ def measure(cmd: str, timeout: float) -> tuple[int | None, int | None, str]:
     return m.returncode, c.returncode, ''
 
 
-def verdict(mutant: int | None, clean: int | None, expected: int) -> str:
+def verdict(mutant: int | None, clean: int | None, expected: int, note: str = '') -> str:
+    if note == 'oob-lock-failed':
+        return 'infra'                  # 带外: 包装器基础设施失败, 计入 infra 而不计入探针漂移
     if mutant is None or clean is None:
         return 'error'
     if mutant != expected:
@@ -126,7 +134,7 @@ def main() -> int:
         expected = int(mf.get('expectedExit', 1))
         # 变异互斥已移到 `dsh-mutation-lock.py --probe` 包装里(cl-322: 按文件上锁, 不再用一把全局锁)
         m, c, note = measure(_wrapped(str(mf['command'])), args.timeout)
-        v = verdict(m, c, expected)
+        v = verdict(m, c, expected, note)
         results[key] = {'guard': gid, 'mutant': m, 'clean': c, 'expected': expected, 'verdict': v, 'note': note}
         if args.write_arms:
             mf['arms'] = {'mutant': m, 'clean': c}
@@ -196,6 +204,9 @@ def main() -> int:
                         % (g, results[g]['note'] or results[g]['verdict'], results[g]['mutant'],
                            results[g]['clean'], results[g]['expected']))
 
+    infra = sorted(g for g, r in results.items() if r['verdict'] == 'infra')
+    if infra:
+        print('[arms] 带外失败(包装器/变异锁, 不算探针漂移): %s' % ', '.join(infra), file=sys.stderr)
     print('[arms] 带命令探针 %d: 双臂 %d / 单臂 %d / 异常 %d%s'
           % (len(results), len(two_arm), len(single), len(other),
              '(冻结基线: 单臂 %d, 双臂 %d)' % (len(frozen), frozen_two_arm) if base else ''))
