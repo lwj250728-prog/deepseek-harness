@@ -215,10 +215,22 @@ def main() -> int:
                 suite_trend.append({'ts': t.strftime('%m-%d %H:%M'), 'pass': int(m.group(1)), 'fail': int(m.group(2))})
         # 2026-09-13 15:1x **外部评审抓出**: 报"7 失败"却只列 6 条身份 —— 逐条 ✗ 只在末尾 400 行内找, 而套件
         # 自己还会打印一个"失败项:"尾块。两处合并去重, 并把"身份数 < 失败数"这件事**显式打出来**(不许静默少列)。
-        tail = lines[max(0, len(lines) - 400):]
+        # 2026-09-13 15:2x **外部评审给了代码级定位, 已复核确认**: 原实现取"最后 400 行"当运行体,
+        # 而套件一轮的输出**长于 400 行**, 排在早期的组(如 T28)的 ✗ 行落在窗口之外 ⇒ 报 7 失败只列 6 条身份。
+        # 实测: 日志 119265 行, 尾块里的 ✗ 只有 6 条, `24h改动文件均有断言覆盖` 的 ✗ 不在其中(计数=0)。
+        # 修法: 窗口改成**整轮运行块**(上一条 `累计裁决` 之后到最后一条), 而不是固定 400 行。
+        _marks = [i for i, l in enumerate(lines) if '累计裁决' in l]
+        _blk_start = _marks[-2] if len(_marks) >= 2 else 0
+        tail = lines[_blk_start: (_marks[-1] + 1 if _marks else len(lines))]
+        if len(tail) < 40:             # 兜底: 块异常短(套件被掐断)时并上末尾 40 行, 并靠下面的"身份不全"标注暴露
+            tail = lines[max(0, len(lines) - 40):] + tail
         ids = {l.strip()[2:].strip() for l in tail if l.strip().startswith('✗')}
+        # 尾块属于**上一轮**: 套件把"失败项:"打印在自己的裁决行**之后** ⇒ 它落在"上一裁决 → 本裁决"的块窗里。
+        # (2026-09-13 15:2x 实测: 用整轮块解析 ✗ 得**恰好 7 条**与裁决一致, 而把块内"失败项:"也并进来会多出 3 条
+        # 上一轮的残留 ⇒ 并集 10 条 > 裁决 7 条。) 故"失败项:"只取**最后一条裁决之后**那段。
+        after = lines[_marks[-1]:] if _marks else []
         in_block = False
-        for l in tail:
+        for l in after:
             s2 = l.strip()
             if s2.startswith('失败项:'):
                 in_block = True
