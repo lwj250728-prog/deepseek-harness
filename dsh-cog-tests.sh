@@ -10202,6 +10202,22 @@ assert not bad, "写回没把两臂数值落到**带命令的条目**上(落到�
 print("写回路径走通且字段落盘; 真登记簿未被触碰(%s)" % before[:12])
 '
 
+# T247: **树边的唯一入口**必须有覆盖(cl-347) —— 210 条经验里 parentNodeId/sequence 出现 0 次, 7 条链 childChainIds 全空:
+# 解析端完备而编码端没有入口, 是"看起来有机制、实际永远长不出树"。这条判据跑真 spec, 走 工具→store→合成→渲染 全程。
+echo "[T247] 目标树编码端(委派回执 ⇒ 子链)"
+t "目标树: 委派回执经工具写入后真的长出子链(编码端)" python3 -c '
+import os, subprocess
+R = os.path.expanduser("~/dsh-fork")
+SPEC = os.path.join(R, "packages/cognition/cognitive-pipeline/tests/tree-edges.spec.ts")
+assert os.path.exists(SPEC), "spec 不在: %s" % SPEC
+r = subprocess.run(["npx", "vitest", "run", SPEC], cwd=R, capture_output=True, text=True, timeout=900)
+out = (r.stdout or "") + (r.stderr or "")
+assert r.returncode == 0, "目标树编码端 spec 判红: %s" % out[-400:]
+assert "3 passed" in out, "spec 没跑满 3 条(可能被 skip): %s" % out[-400:]
+print("目标树编码端 3/3: 工具写入回执 ⇒ childChainIds 长出子链 + 无 @ 不算委派 + 门仍然有效")
+'
+
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

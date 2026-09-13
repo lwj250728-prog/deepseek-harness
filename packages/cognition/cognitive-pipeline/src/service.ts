@@ -879,6 +879,10 @@ export class CognitivePipelineService extends Service {
       kind: 'task',
       rawText: input.rawText,
       ...input.chainId === undefined ? {} : { chainId: input.chainId },
+      // cl-347: 委派边与序 —— 树结构(childChainIds)的**唯一原料**。此前没有任何入口能写这两个字段,
+      // 于是 210 条经验里 parentNodeId/sequence 都是 0, 7 条链的 childChainIds 全空, 树只能是平铺的根。
+      ...input.parentNodeId === undefined ? {} : { parentNodeId: input.parentNodeId },
+      ...input.sequence === undefined ? {} : { sequence: input.sequence },
     }
     this.store.addExperience(exp)
     await this.store.flush()

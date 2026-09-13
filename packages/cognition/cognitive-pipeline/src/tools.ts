@@ -131,7 +131,10 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
       + 'goal trace id of the goal execution it belongs to) so the offline consolidation can assemble the '
       + 'goal-anchored chain from its members. When omitted, the anchor is resolved automatically: the live goal '
       + 'id if a goal round is running, otherwise this session\'s sticky anchor (set by an earlier explicit '
-      + 'chain_id). Pass an empty chain_id to clear the sticky anchor.',
+      + 'chain_id). Pass an empty chain_id to clear the sticky anchor. Two optional parameters record the '
+      + 'GOAL TREE: parent_node_id marks this experience as delegated from a parent node — the only way a chain '
+      + 'can grow a child (chains are a tree, not a flat list); sequence orders members within a chain (the '
+      + 'lowest sequence becomes the chain root).',
     parameters: {
       raw_text: {
         type: 'string',
@@ -142,6 +145,20 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
         type: 'string',
         description: 'Optional goal trace id (chainId) this experience belongs to; consolidates into a '
           + 'goal-anchored chain when at least chainMinMembers tagged experiences accumulate.',
+      },
+      parent_node_id: {
+        type: 'string',
+        description: 'Optional delegation receipt: the parent node this experience was delegated FROM. '
+          + 'Consolidation only treats a member as a delegation edge when the value contains "@", so write it '
+          + 'as "<parentNodeId>@<delegatingChainId>" (e.g. "exp_212@goal-digital-life-incubation"). Set it on '
+          + 'the entry member of a delegated sub-goal\'s chain: the child chain then hangs under the parent and '
+          + 'chainTreeExpose can walk from a parent hit down into sub-goal outcomes. Without it every chain '
+          + 'stays a flat root forever.',
+      },
+      sequence: {
+        type: 'number',
+        description: 'Optional order of this experience within its chain. Consolidation picks the LOWEST '
+          + 'sequence as the chain root when deriving parent/child edges; omit it and store order decides.',
       },
     },
     output: {
@@ -165,6 +182,8 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           },
           chain_id: { type: 'string' },
           chain_source: { type: 'string', required: true },
+          parent_node_id: { type: 'string' },
+          sequence: { type: 'number' },
         },
       },
       render: renderJson,
@@ -174,6 +193,9 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
       const { expId, sar } = await service.remember({
         rawText: args.raw_text,
         ...anchor.chainId === undefined ? {} : { chainId: anchor.chainId },
+        // cl-347: 树边的唯一入口 —— 不传就永远是平铺的根。
+        ...args.parent_node_id === undefined ? {} : { parentNodeId: args.parent_node_id },
+        ...args.sequence === undefined ? {} : { sequence: args.sequence },
       }, {
         ...callContext(exec),
         signal: exec.signal,
@@ -189,6 +211,8 @@ export function registerPipelineTools(ctx: Context, service: CognitivePipelineSe
           energy_cost: sar.outcomeUtility.energyCost,
         },
         ...anchor.chainId === undefined ? {} : { chain_id: anchor.chainId },
+        ...args.parent_node_id === undefined ? {} : { parent_node_id: args.parent_node_id },
+        ...args.sequence === undefined ? {} : { sequence: args.sequence },
         chain_source: anchor.source,
       }
     },

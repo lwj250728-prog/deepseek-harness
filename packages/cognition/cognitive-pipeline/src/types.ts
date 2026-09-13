@@ -1109,6 +1109,17 @@ export interface RememberInput {
    * given chain (the goal-anchored chain the orchestrator or caller is
    * executing), so the offline consolidation can assemble it. */
   readonly chainId?: string
+  /** Optional delegation receipt: the parent node this experience was
+   * delegated from. Chain consolidation treats a member as a delegation edge
+   * only when this value **contains `@`** (see `isDelegation` in
+   * cognition-objects.ts), so write a receipt as
+   * `<parentNodeId>@<delegatingChainId>`. This is the ONLY input that can make
+   * `childChainIds` non-empty — without it every chain stays a flat root. */
+  readonly parentNodeId?: string
+  /** Optional ordering within the chain: consolidation picks the LOWEST
+   * sequence as a chain's root member when deriving parent/child edges.
+   * Omitted ⇒ the member's order in the store decides. */
+  readonly sequence?: number
 }
 
 /** One simulated-experience request: a hypothetical situation and proposed action. */
