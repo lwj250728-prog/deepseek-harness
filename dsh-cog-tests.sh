@@ -10331,6 +10331,25 @@ for pkg in ("packages/context/cognitive-inject", "packages/cognition/cognitive-p
 print("部署滞后四档判定正确; 真实态: 扫描 %d 包 / 滞后 %d 个" % (len(d3["rows"]), d3["stale"]))
 '
 
+# T250 (cl-353): spec 跑 **src**(vitest alias 把包名指向 src), 而载体加载 **lib** —— 源码绿了不等于产物绿。
+# 这条判据只碰产物: 链能被找到 + 链树被注入 + 注入记录带 chainId + 引用折回 hitCount/citedCount。
+echo "[T250] 构建产物层端到端(链检索/服务/回填)"
+t "构建产物层端到端: 链能被找到+被注入+引用折回链账本" python3 -c '
+import json, os, subprocess
+R = os.path.expanduser("~/dsh-fork")
+ART = os.path.join(R, "packages/context/cognitive-inject/lib/index.js")
+VER = os.path.join(R, "packages/context/cognitive-inject/scripts/verify-deployed-chain.mjs")
+assert os.path.exists(ART), "产物不在(先构建): %s" % ART
+assert os.path.exists(VER), "校验器不在: %s" % VER
+r = subprocess.run(["node", VER, "--json"], capture_output=True, text=True, timeout=600)
+out = (r.stdout or "") + (r.stderr or "")
+assert r.returncode == 0, "产物层校验判红: %s" % out[-400:]
+data = json.loads(r.stdout[r.stdout.index("{"):])
+assert data["total"] >= 6 and data["passed"] == data["total"], "断言没跑满: %s" % out[-300:]
+print("产物层 %d/%d: 链被找到 + 树被注入 + chainId 入账 + 引用折回链账本" % (data["passed"], data["total"]))
+'
+
+
 
 
 
