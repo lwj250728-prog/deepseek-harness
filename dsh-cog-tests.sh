@@ -9035,6 +9035,33 @@ if skipped:
 else:
     print("边界校验: " + msg + "; " + tail)
 '
+
+# ── T224 时代声明必须绑定**采集代码指纹**(tp-191) ──
+# cl-274 的取证写着"引用率的采集方式在 09-10 变了", 但那是**一段叙述**: 若采集方式再变一次(契约措辞/结算判据/
+# 结算 TTL 改一行), 时代文件不变、消费方照常出数 —— "跨时代平均"会以更隐蔽的方式回来, 这次连"缺时代"都不亮。
+# 故把采集语义的三块片段取 sha256 写进 era(dsh-collection-fingerprint.py --write), 判据重算比对:
+# 不一致 ⇒ 红(要么回退, 要么更新 era 并追认新起点); 标记抽不到 ⇒ fail-closed(那本身就是代码变了)。
+echo "[T224] 时代声明绑定采集代码指纹(契约文本 / 结算判据 / 结算 TTL)"
+t "时代声明必须绑定采集代码指纹(三块片段; 不符即红)" python3 -c '
+import json, os, subprocess, sys
+D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+FP = os.environ.get("DSH_FP_TOOL") or os.path.expanduser("~/dsh-fork/dsh-collection-fingerprint.py")
+era = os.path.join(D, "citation-era.json")
+assert os.path.exists(era), "缺时代声明(判据前提不成立): " + era
+assert os.path.exists(FP), "缺指纹工具(判据前提不成立): " + FP
+r = subprocess.run([sys.executable, FP, "--check"], capture_output=True, text=True, timeout=300)
+assert r.returncode == 0, ("采集指纹核对未通过(采集方式变了却没人报警): "
+                           + (r.stderr or r.stdout).strip()[-300:])
+obj = json.load(open(era, encoding="utf8"))
+fpv = obj.get("collectionFingerprint")
+assert isinstance(fpv, str) and len(fpv) == 64, "era 里的 collectionFingerprint 不是 64 位 sha256: %r" % fpv
+assert str(obj.get("fingerprintAt") or "").strip(), "era 缺 fingerprintAt(不知道这枚指纹是什么时候记的)"
+frags = obj.get("fingerprintFragments") or {}
+assert len(frags) >= 3, "指纹片段少于 3 块(采集语义的三块: 契约文本/结算判据/结算 TTL): %s" % sorted(frags)
+bad = [k for k, v in frags.items() if not str((v or {}).get("sha256") or "").strip()]
+assert not bad, "这些片段没有 sha256: %s" % bad
+print("采集指纹 %s…(片段: %s), 记于 %s" % (fpv[:12], ",".join(sorted(frags)), str(obj.get("fingerprintAt"))[:19]))
+'
 # ── T220 "停驱"必须是被行为消费的状态, 而不是一句口头停止 ──
 # 起因(2026-09-13 11:2x, 用户指令"停止这个会话的驱动"): 驱动器(quiet-driver)一次只驱动**一个**目标会话
 # (`targetSessionId` + 运行时绑定文件), 所以"停驱"在实现上=**目标不是它** + **此后没有帧派给它**。
