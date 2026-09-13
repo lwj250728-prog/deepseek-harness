@@ -10349,6 +10349,52 @@ assert data["total"] >= 6 and data["passed"] == data["total"], "断言没跑满:
 print("产物层 %d/%d: 链被找到 + 树被注入 + chainId 入账 + 引用折回链账本" % (data["passed"], data["total"]))
 '
 
+# T251 (cl-354): 预登记判据必须在**数据到来之前**就存在, 否则事后挑口径就是自证。
+# 仪表的关键纪律: ①quiet-frame-* 的注入没有下一个回合能提及它(结算侧按设计立刻判未引用) ⇒ 不能计入"可引用样本",
+# 否则"不可判"会被算成"不通过"且引用率被压低; ②chainChars 缺失时成本判据是"未测"而不是"通过";
+# ③三态退出码: 0 通过 / 1 不通过(指名判据) / 2 不可判。夹具五例全部实测。
+echo "[T251] 链注入判定仪表(三态 + 一次性会话隔离)"
+t "链注入判定仪表: 不可判/通过/不通过三态必须分开(含一次性会话不污染)" python3 -c '
+import json, os, subprocess, sys, tempfile, time
+R = os.path.expanduser("~/dsh-fork")
+TOOL = os.path.join(R, "dsh-chain-inject-report.py")
+assert os.path.exists(TOOL), "仪表不在: %s" % TOOL
+T = tempfile.mkdtemp(prefix="t251-")
+now = int(time.time() * 1000)
+def rec(i, chain, cited, session="session-normal"):
+    return {"injectionId": "inject_%d" % i, "createdAt": now - 1000 * i, "expIds": ["exp_%d" % i],
+            "triggerSource": "static:测试", "jumpWords": [], "chainId": chain, "strategyId": None,
+            "sessionId": session, "cited": cited}
+def write(name, rows):
+    p = os.path.join(T, name)
+    with open(p, "w", encoding="utf8") as fh:
+        for r in rows: fh.write(json.dumps(r, ensure_ascii=False) + chr(10))
+    return p
+base = [rec(10 + i, None, i % 3 == 0) for i in range(6)]
+obs = [rec(20 + i, None, i % 3 == 0) for i in range(6)]
+write("f1.jsonl", [rec(1, None, False), rec(2, None, True)])
+write("f2.jsonl", base + [rec(30 + i, "chain-x", i == 0) for i in range(3)] + obs)
+write("f3.jsonl", base + [rec(40 + i, "chain-x", False) for i in range(3)] + obs)
+write("f4.jsonl", base + [rec(50 + i, "chain-x", False, session="quiet-frame-abc") for i in range(3)])
+write("f5.jsonl", base + [rec(60 + i, "chain-x", i == 0) for i in range(3)] + [rec(70 + i, "chain-x", False, session="quiet-frame-abc") for i in range(5)])
+audit = os.path.join(T, "audit.jsonl")
+with open(audit, "w", encoding="utf8") as fh:
+    for c in (700, 800, 750): fh.write(json.dumps({"stage": "injected", "chainChars": c}) + chr(10))
+def run(fixture):
+    env = dict(os.environ, DSH_CHAIN_REPORT_LEDGER=os.path.join(T, fixture), DSH_CHAIN_REPORT_AUDIT=audit, DSH_CHAIN_REPORT_MIN_N="3")
+    return subprocess.run([sys.executable, TOOL, "--json"], capture_output=True, text=True, timeout=300, env=env)
+expect = [("f1.jsonl", 2, "not-yet"), ("f2.jsonl", 0, "pass"), ("f3.jsonl", 1, "fail"), ("f4.jsonl", 2, "insufficient"), ("f5.jsonl", 0, "pass")]
+for fixture, rc, outcome in expect:
+    r = run(fixture)
+    assert r.returncode in (0, 1, 2), "仪表跑不通(%s): %s" % (fixture, ((r.stdout or "") + (r.stderr or ""))[-300:])
+    data = json.loads(r.stdout)
+    assert data["outcome"] == outcome and r.returncode == rc, "%s: 期望 %s/rc=%d, 实得 %s/rc=%d" % (fixture, outcome, rc, data["outcome"], r.returncode)
+d4 = json.loads(run("f4.jsonl").stdout)
+assert d4["failing"] == [] and d4["notYet"], "不可判时不许带 failing(待判 ≠ 不通过): %s" % d4
+print("链注入仪表五档全对: 不可判(无链/仅一次性会话) / 通过(含一次性会话不污染) / 不通过(指名判据)")
+'
+
+
 
 
 
