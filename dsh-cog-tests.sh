@@ -10088,6 +10088,46 @@ assert isinstance(base.get("noSpecCount"), int), "棘轮后 noSpecCount 必须�
 print("债基线棘轮: 棘轮+判定绿 / 不变式成立 / 盘点 %d 条全部有分类与理由 / change-coverage.noSpecCount=%s"
       % (len(rows), base.get("noSpecCount")))
 '
+# ── T243 子目标申请联锁(用户 2026-09-14 指令) ──
+# 指令: 「目标孵化池增加子目标审核功能, 帧产生的子目标要向目标孵化池申请」。
+# 判据: ①申请通道的不变式必须绿(accepted 须有理由+存在的 serves 边 / deferred 须有重开条件 / rejected 须有理由 /
+#   在飞 ≤12 且 24h 内被裁决); ②**联锁**: 新增判据必须被某条 accepted 申请提到, 存量由 subgoal-legacy.json 冻结豁免。
+echo "[T243] 子目标申请联锁"
+t "子目标必须先向目标孵化池申请: 新判据必须在 accepted 申请里被提到(存量冻结)" python3 -c '
+import json, os, re, subprocess, sys
+R = os.path.expanduser("~/dsh-fork")
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+TOOL = os.path.join(R, "dsh-subgoal-apply.py")
+r = subprocess.run([sys.executable, TOOL, "--check", "--json"], capture_output=True, text=True, timeout=300)
+out = (r.stdout or "") + (r.stderr or "")
+assert r.returncode == 0, "**子目标申请通道的不变式判红**: %s" % out[-300:]
+payload = json.loads([l for l in (r.stdout or "").strip().splitlines() if l.strip().startswith("{")][-1])
+assert int(payload.get("total") or 0) > 0, "申请账本为空 ⇒ 前提不成立(机制在但没数据 ⇒ 不得空过)"
+legacy = set(json.load(open(os.path.join(D, "subgoal-legacy.json"), encoding="utf8")).get("judgements") or [])
+suite = open(os.path.join(R, "dsh-cog-tests.sh"), encoding="utf8").read()
+Q = chr(34)
+judges = {m for m in re.findall(r"^echo " + Q + r"\[(T[0-9]{3})\]", suite, re.M)}
+assert judges, "套件里扫不到判据组 ⇒ 前提不成立"
+apps = {}
+for line in open(os.path.join(D, "subgoal-applications.jsonl"), encoding="utf8"):
+    if line.strip():
+        a = json.loads(line)
+        if a.get("id"):
+            apps[a["id"]] = a
+accepted = [a for a in apps.values() if a.get("status") == "accepted"]
+covered = set()
+for a in accepted:
+    for m in re.findall(r"T[0-9]{3}", json.dumps(a, ensure_ascii=False)):
+        covered.add(m)
+new_judges = sorted(j for j in judges if j not in legacy)
+missing = [j for j in new_judges if j not in covered]
+assert not missing, ("**新判据没有申请归属 ⇒ 子目标必须先向目标孵化池申请**: %s —— 正解: "
+                     "dsh-subgoal-apply.py --apply … 再 --adjudicate accepted(带理由与 serves 边)" % missing[:6])
+assert accepted, "一条 accepted 申请都没有 ⇒ 通道没被真正使用(空转)"
+assert any(str(a.get("serves") or "") for a in accepted), "accepted 申请必须钉服务边"
+print("子目标申请联锁: 通道不变式绿 / 申请 %d 条(accepted %d, 在飞 %d) / 新判据 %d 条全部有 accepted 归属"
+      % (len(apps), len(accepted), int(payload.get("pending") or 0), len(new_judges)))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
