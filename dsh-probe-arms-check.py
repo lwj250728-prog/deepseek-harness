@@ -129,6 +129,28 @@ def main() -> int:
         import shlex
         return 'python3 %s --probe %s --shell %s' % (WRAP, shlex.quote(m.group(1)), shlex.quote(cmd))
 
+    # **测量租约**(cl-322 同族): 测量期间临时变异会把证据毒掉。起租约文件 + 让本进程派生的探针带
+    # DSH_MEASUREMENT=1(它们是"受测量的变异", 不算外部干扰); 其它临时变异会被 dsh-mutation-lock.py 拒绝。
+    LEASE = os.path.join(os.path.expanduser('~/.dsh/cognitive-pipeline'), '.measurement.lease')
+    _lease_stop = {'v': False}
+    import threading, time as _time
+
+    def _lease_loop():
+        while not _lease_stop['v']:
+            try:
+                with open(LEASE, 'w', encoding='utf8') as fh:
+                    json.dump({'pid': os.getpid(), 'ts': _time.time(),
+                               'by': 'dsh-probe-arms-check.py'}, fh)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+            except Exception:
+                pass
+            _time.sleep(20)
+
+    _lt = threading.Thread(target=_lease_loop, daemon=True)
+    _lt.start()
+    os.environ['DSH_MEASUREMENT'] = '1'
+
     results = {}
     for key, gid, mf in entries:
         expected = int(mf.get('expectedExit', 1))
@@ -204,6 +226,11 @@ def main() -> int:
                         % (g, results[g]['note'] or results[g]['verdict'], results[g]['mutant'],
                            results[g]['clean'], results[g]['expected']))
 
+    _lease_stop['v'] = True
+    try:
+        os.remove(LEASE)
+    except Exception:
+        pass
     infra = sorted(g for g, r in results.items() if r['verdict'] == 'infra')
     if infra:
         print('[arms] 带外失败(包装器/变异锁, 不算探针漂移): %s' % ', '.join(infra), file=sys.stderr)

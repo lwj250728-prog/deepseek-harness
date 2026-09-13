@@ -32,6 +32,28 @@ TAG = '[mutation-lock]'
 # 故取 7 作"包装器基础设施失败"(原用 3, 与探针自身"自身失效"的 3 撞车, 会被记成 probe 漂移)。
 OOB_EXIT = 7
 OOB_MARK = 'MUTATION_LOCK_FAILED'
+# **测量租约**(2026-09-14 00:5x 立): 连续三轮 arms 测量都被我自己的并行实验毒到(T231 clean=3 / T232 mutant=3),
+# 因为"测量"与"临时变异"共用同一批文件。租约文件由测量方刷新(带 pid+ts), 变异方发现**新鲜的租约且自己不是测量方**
+# (DSH_MEASUREMENT 未置位) 就拒绝 —— 免得我拿被污染的测量当证据。
+LEASE_TTL = 300.0
+
+
+def lease_path() -> str:
+    """惰性求值: COG 在本文件里定义在下面那几行, 早绑定会 NameError(第一次实现就这样炸了)。"""
+    return os.path.join(COG, '.measurement.lease')
+
+
+def measurement_in_flight() -> bool:
+    try:
+        d = json.load(open(lease_path(), encoding='utf8'))
+        pid = int(d.get('pid') or 0)
+        age = __import__('time').time() - float(d.get('ts') or 0)
+        if age > LEASE_TTL:
+            return False
+        os.kill(pid, 0)               # 进程还在?
+        return True
+    except Exception:
+        return False
 COG = os.environ.get('DSH_COG_DIR') or os.path.expanduser('~/.dsh/cognitive-pipeline')
 LOCKDIR = os.path.join(COG, '.mutation-locks')
 # 探针脚本里**已存在**的绝对路径 = 它可能改的目标(与 dsh-probe-binding.py 同一套解析: 它错不了就一起错)
@@ -107,6 +129,11 @@ def main() -> int:
                 print('  %s' % n)
         return 0
 
+    if measurement_in_flight() and not os.environ.get('DSH_MEASUREMENT'):
+        print('%s 有测量在进行中(租约 %s) ⇒ 拒绝临时变异(带外码 %d): 免得污染正在采集的证据'
+              % (TAG, lease_path(), OOB_EXIT), file=sys.stderr)
+        print(OOB_MARK, file=sys.stderr)
+        return OOB_EXIT
     targets = list(args.files or [])
     if args.probe:
         found = probe_targets(args.probe)
