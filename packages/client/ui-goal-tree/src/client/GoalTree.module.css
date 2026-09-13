@@ -437,3 +437,55 @@
   max-height: 132px;
   overflow: auto;
 }
+
+/* ── phone ─────────────────────────────────────────────────────────────────
+   The desktop anchor (sidebar width + 10px) with a fixed 344px width does not
+   fit a phone: measured at a 390x844 viewport the panel ran 226px past the
+   right edge, 65% of it off-screen. It cannot simply be re-anchored against the
+   viewport either — on phone the sidebar becomes a drawer carrying its own
+   `transform`, which makes a fixed panel resolve against THAT box instead.
+
+   So the panel stops depending on any column geometry: it becomes a sheet along
+   the bottom of whatever box contains it. Both phone sub-cases end up readable —
+   inside the drawer it spans the drawer, in-flow it spans the viewport — and it
+   clears the home indicator and covers no conversation on a short screen.
+   Breakpoint matches PHONE_BREAKPOINT (640) in ui-layout/columns.ts. */
+@media (max-width: 639px) {
+  .panel {
+    left: 6px;
+    right: 6px;
+    top: auto;
+    bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+    width: auto;
+    max-height: min(72vh, 560px);
+    max-height: min(72dvh, 560px);
+  }
+
+  /* Thumb-sized targets: the desktop paddings are tuned for a mouse. */
+  .iconButton {
+    padding: 5px 9px;
+    font-size: 14px;
+  }
+
+  .goalHead,
+  .stepHead {
+    padding: 5px 4px;
+  }
+
+  .goalTitle {
+    font-size: 12.5px;
+  }
+
+  .nextAction,
+  .stepClaim,
+  .stepClaimFull,
+  .evidence {
+    font-size: 11.5px;
+  }
+
+  .laneBadge,
+  .statusBadge,
+  .waitingBadge {
+    font-size: 10.5px;
+  }
+}
