@@ -394,6 +394,29 @@ describe('cognitive-inject priming', () => {
     }
   })
 
+  it('serves a chain whose GOAL matches even when no member text does (链的目标表述也是检索键)', async () => {
+    const { ctx, teardown } = await mount()
+    try {
+      // 成员文本与当前情境**不**相似, 但链的目标表述与情境一致 —— 现在的准入只看成员, 于是这条链找不到。
+      // 检索键必须包含链自己的语义(目标/蒸馏原则), 否则"记得这个目标怎么做的"在换个说法后就失效。
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', '旧事一', '执行甲', '结果甲', undefined, undefined, 'chain-goal')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_2', '旧事二', '执行乙', '结果乙', undefined, undefined, 'chain-goal')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_3', '旧事三', '执行丙', '结果丙', undefined, undefined, 'chain-goal')
+      // 另有一条与情境匹配的经验负责打开闸门(确保"链没被服务"不是因为整条注入没发生)。
+      seedExperience(ctx.cognitivePipeline.store, 'exp_9', '服务重启后需要验证恢复', '重启服务并验证', '恢复成功')
+      await ctx.cognitivePipeline.consolidateChain('chain-goal', '服务重启后需要验证恢复')
+
+      const { agent, session } = stubAgent('chain-goal-key')
+      session.append('turn/start', { turn: 1 })
+      const injected = await fire(ctx, agent, 1, 1, '服务重启后需要验证恢复')
+      expect(injected.some(text => text.includes('【经验链参考】'))).toBe(true)
+      const chainText = injected.find(text => text.includes('【经验链参考】'))
+      expect(chainText).toContain('chain-goal')
+    } finally {
+      await teardown()
+    }
+  })
+
   it('does NOT serve a chain whose members are unrelated to the situation', async () => {
     const { ctx, teardown } = await mount()
     try {

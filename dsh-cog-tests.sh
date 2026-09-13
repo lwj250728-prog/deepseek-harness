@@ -10287,7 +10287,7 @@ assert os.path.exists(SPEC), "spec 不在: %s" % SPEC
 r = subprocess.run(["npx", "vitest", "run", SPEC], cwd=R, capture_output=True, text=True, timeout=900)
 out = (r.stdout or "") + (r.stderr or "")
 assert r.returncode == 0, "注入 spec 判红: %s" % out[-400:]
-assert "34 passed" in out, "spec 没跑满 34 条(加了用例就同步这个数, 但不许删断言): %s" % out[-400:]
+assert "35 passed" in out, "spec 没跑满 35 条(加了用例就同步这个数, 但不许删断言): %s" % out[-400:]
 print("经验链 4/4: 命中即服务链树 + 不相关不服务 + 同会话只服务一次 + 引用回填 hitCount/citedCount")
 '
 

@@ -801,7 +801,15 @@ function retrieveChain(
   let best: { chainId: string, similarity: number } | null = null
   for (const chain of chains) {
     if (served.has(chain.chainId)) continue
-    let score = 0
+    // cl-355: 链**自己的语义**也是检索键 —— 只看成员文本时, "换个说法问同一件事"会让这条链彻底找不到
+    // (实测用例: 成员文本与情境无关、而链的目标表述与情境一致 ⇒ 修复前判红)。目标与蒸馏原则都是链自己
+    // 沉淀下来的说法, 与成员文本互补; 三者取最大(命中任一个即算找到), 仍是同一个阈值口径。
+    let score = Math.max(
+      cosine(situationQuery, situationVector(chain.goal)),
+      ...(chain.distilledPrinciple === undefined
+        ? []
+        : [cosine(situationQuery, situationVector(chain.distilledPrinciple))]),
+    )
     for (const memberId of chain.memberExpIds) {
       const exp = byId.get(memberId)
       if (exp === undefined) continue
