@@ -129,7 +129,7 @@ class BM25:
         return {'targets': len(targets), 'hit': hit, 'rate': hit / len(targets)}
 
 
-def stale_tests(rows, ns=(0, 50, 100, 200, 400), cap=150):
+def stale_tests(rows, ns=(0, 50, 100, 200, 400), cap=150, mode='idf'):
     """cl-053 §3b/3c **陈旧元素污染**复算(2026-09-13 12:4x, 由 cl-296.nextAction ① 驱动)。
 
     原实验(09-09, 130 条库)的两张表:
@@ -147,6 +147,23 @@ def stale_tests(rows, ns=(0, 50, 100, 200, 400), cap=150):
     bm = BM25(docs, chars)
     elems = [chars(d) for d in docs]
     chains = [r.get('chainId') for r in rows]
+
+    # 2026-09-13 13:2x **考古所得(cl-053 §3b 的原始构造)**: 旧实验的脚本(逐字取自 09-09 备份的会话日志,
+    # turn 966)用的是 **随机抽一行、取它的前 5 个元素**(random.seed(0)) —— 不是按 IDF 取异链罕见元素。
+    # 两者测的不是同一个强度: 原版 ≈ "随手掺进旧元素"(句首多为常见词, 区分度低), 本脚本默认 ≈ 最坏情况
+    # (IDF 最高的异链元素)。故支持两种构造, 让"旧数字能否复现"成为可判的问题而不是猜测。
+    import random as _r
+
+    def legacy_stale(i, noise):
+        _r.seed(0)
+        out = []
+        others = [j for j in range(len(rows)) if j != i]
+        guard = 0
+        while len(out) < noise and guard < noise * 50:
+            j = _r.choice(others)
+            out.extend(elems[j][:5])
+            guard += 1
+        return out[:noise]
 
     def foreign_pool(i):
         acc = set()
@@ -169,7 +186,12 @@ def stale_tests(rows, ns=(0, 50, 100, 200, 400), cap=150):
             targets += 1
             own = list(dict.fromkeys(elems[i]))
             own_top = sorted(own, key=lambda w: (-bm.idf(w), w))[:cap]
-            stale = foreign_pool(i)[:n] if n else []
+            if n == 0:
+                stale = []
+            elif mode == 'legacy-random':
+                stale = legacy_stale(i, n)
+            else:
+                stale = foreign_pool(i)[:n]
             # (b) 本情境 IDF 前150 + N 个陈旧元素(总量可超过 cap)
             b = _top1_is_same_chain(bm, rows, i, set(own_top) | set(stale))
             if b is not None:
@@ -329,8 +351,11 @@ def main() -> int:
         ns = (0, 50, 100, 200, 400)
         if '--stale-ns' in sys.argv:
             ns = tuple(int(x) for x in sys.argv[sys.argv.index('--stale-ns') + 1].split(','))
-        st, note = stale_tests(rows, ns=ns)
-        print('\n=== cl-053 §3b/3c 陈旧元素污染复算(%s) ===' % note)
+        mode = 'idf'
+        if '--stale-mode' in sys.argv:
+            mode = sys.argv[sys.argv.index('--stale-mode') + 1]
+        st, note = stale_tests(rows, ns=ns, mode=mode)
+        print('\n=== cl-053 §3b/3c 陈旧元素污染复算(%s; 构造=%s) ===' % (note, mode))
         print('(b) 本情境 IDF 前150 + N 个异链陈旧元素:')
         base_b = None
         for n, rate, tot in st['b']:
