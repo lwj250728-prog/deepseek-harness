@@ -10172,6 +10172,36 @@ if os.path.exists(rr):
 print("活跃度模型: 不变式绿 / 库 %d 条 / 孤立 %d / 长尾 %d(孤立 %d + 有联系 %d) / 权重与复习通道齐备"
       % (len(rows), pay.get("isolated"), pay["starved"], pay["starvedIsolated"], pay["starvedConnected"]))
 '
+
+# T245: **工具自己的写回路径**也要有覆盖(cl-346) —— 全库对 --write-arms 只跑过持锁的带外路径,
+# 于是 cl-334 把残留扫描插在写回之后造成的 UnboundLocalError 对 457 条断言完全隐形。
+echo "[T245] 测量写回路径自检(隔离登记簿)"
+t "测量写回路径必须真的走通: 隔离登记簿下 --only 写回 rc=0 且字段落盘" python3 -c '
+import hashlib, json, os, shutil, subprocess, sys, tempfile
+R = os.path.expanduser("~/dsh-fork")
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+CHK = os.environ.get("DSH_ARMS_CHECK") or os.path.join(R, "dsh-probe-arms-check.py")
+REAL = os.path.join(D, "guard-fire.json")
+T = tempfile.mkdtemp(prefix="t245-")
+shutil.copy2(REAL, os.path.join(T, "guard-fire.json"))
+digest = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
+before = digest(REAL)
+env = dict(os.environ, DSH_COG_DIR=T)
+r = subprocess.run([sys.executable, CHK, "--only", "T132", "--write-arms"],
+                   capture_output=True, text=True, timeout=600, env=env)
+out = (r.stdout or "") + (r.stderr or "")
+assert r.returncode == 0, "写回路径非零退出(UnboundLocalError 这一类就是这条抓的): %s" % out[-300:]
+assert digest(REAL) == before, "隔离失败: 真登记簿被写回动了(DSH_COG_DIR 注入没生效)"
+reg = json.load(open(os.path.join(T, "guard-fire.json"), encoding="utf8"))
+assert str(reg.get("armsMeasuredAt") or "").strip(), "写回没盖 armsMeasuredAt"
+assert "leakAfterMeasurement" in reg, "写回缺 leakAfterMeasurement ⇒ 残留扫描没在写回前算完"
+hit = [mf for g in reg["guards"] if g["guard"] == "T132" for mf in g.get("mustFire", []) if str(mf.get("command") or "").strip()]
+assert len(hit) >= 1, "被选中的判据在临时登记簿里没有带命令的条目"
+bad = [mf.get("arms") for mf in hit if not (isinstance(mf.get("arms"), dict) and "mutant" in mf["arms"] and "clean" in mf["arms"])]
+assert not bad, "写回没把两臂数值落到**带命令的条目**上(落到别的条目=登记簿说了假话): %s" % bad[:3]
+print("写回路径走通且字段落盘; 真登记簿未被触碰(%s)" % before[:12])
+'
+
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

@@ -13,7 +13,9 @@ mustFire, 而 `dsh-guard-fire-check.py` 只看出场码 —— 只要探针退�
   ③ **新增门槛**: 不在冻结清单里、又只有单臂的探针 ⇒ 判红(等价于"登记时就要求双臂")。
 
 用法: dsh-probe-arms-check.py [--write-arms] [--freeze] [--only T217] [--json]
-退出码: 0 合规; 1 有新单臂/冻结清单腐烂/双臂数下降; 3 读数失败。
+退出码: 0 合规; 1 有新单臂/冻结清单腐烂/双臂数下降; 3 读数失败(含"无对象可测")。
+**--only <G> 是子集运行**: 不与冻基线比对(缺的探针不是"消失"), 因此选中的判据测量成功后 rc=0 —— cl-346 之前
+它照样跑基线比对, 于是"注册 arms 成功"和"检查器崩了"在退出码上长得一样。
 """
 from __future__ import annotations
 
@@ -230,7 +232,12 @@ def main() -> int:
 
     problems = []
     new_single: list[str] = []
-    if not base:
+    if args.only:
+        # **--only 是子集运行, 与冻基线不可比**(cl-346): 第一版照样跑基线比对 ⇒ 明明测量成功却因为
+        # 「双臂数 4→1 / 冻结清单腐烂」报红、rc=1, 于是"注册 arms 成功"和"检查器崩了"在退出码上长得一样
+        # —— 我今晚用它注册 T244 时就没发现 rc≠0。子集运行只报"这次真测到的东西", 不报"没测的东西"。
+        print('[arms] --only %s: 子集运行 ⇒ 不与冻结基线比对(未测到的判据不是"消失")' % args.only)
+    elif not base:
         problems.append('缺冻基线(先跑 --freeze): %s' % base_path)
     else:
         # ② 冻结清单不得腐烂
