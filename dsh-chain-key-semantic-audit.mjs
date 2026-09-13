@@ -58,7 +58,9 @@ for (const c of chains) {
   for (const t of keyTexts.get(c.chainId)) needed.add(t)
   for (const id of c.memberExpIds ?? []) {
     const e = byId.get(id)
-    if (e) needed.add(String(e.sar?.situation ?? ''))
+    if (!e) continue
+    needed.add(String(e.sar?.situation ?? ''))   // 作为查询(留一法的问)
+    needed.add(String(e.sar?.action ?? ''))      // 作为成员(生产口径比的是成员 **action** 的嵌入)
   }
 }
 const queries = exps.slice(-SAMPLE)
@@ -135,6 +137,46 @@ for (const m of margins) {
     addedSamples: added.sort((a, b) => b.key - a.key).slice(0, 4).map(p => ({ chain: p.chainId.slice(0, 28), member: Number(p.member.toFixed(3)), key: Number(p.key.toFixed(3)) })) }
 }
 
+// cl-362: **留一法**造"相关但新"的样本 —— 同一条链内, 用成员 m 的情境当查询, 只比**其它**成员的 action 嵌入
+// (与生产打分公式完全一致: 情境查询 vs 成员 action 嵌入)。它回答上一轮缺的那个问题: 真相关但文本不同的对, 分数落在哪里?
+const loo = []
+for (const c of chains) {
+  const members = (c.memberExpIds ?? []).map(id => byId.get(id)).filter(Boolean)
+  for (const m of members) {
+    const q = vec(String(m.sar?.situation ?? ''))
+    if (q === null) continue
+    let best = 0
+    for (const other of members) {
+      if (other.expId === m.expId) continue
+      const v = vec(String(other.sar?.action ?? ''))
+      if (v !== null && v !== undefined) best = Math.max(best, cosine(q, v))
+    }
+    // 对照 arm: **同字段**比较(情境 vs 情境) —— 用来判断"情境 vs 成员 action"这种跨字段比较是不是分离度差的真因。
+    let bestSit = 0
+    for (const other of members) {
+      if (other.expId === m.expId) continue
+      const v = vec(String(other.sar?.situation ?? ''))
+      if (v !== null && v !== undefined) bestSit = Math.max(bestSit, cosine(q, v))
+    }
+    if (best > 0) loo.push({ chainId: c.chainId, expId: m.expId, score: best, scoreSituation: bestSit })
+  }
+}
+const looSit = loo.map(x => x.scoreSituation).filter(v => v > 0).sort((a, b) => a - b)
+// 域外对照也用同字段算一遍: 别的链成员的**情境**对当前查询
+const outDomSit = []
+for (const c of chains) {
+  const memberSituations = (c.memberExpIds ?? []).map(id => byId.get(id)).filter(Boolean).map(e => String(e.sar?.situation ?? ''))
+  for (const q of queries) {
+    const memberIds = new Set(c.memberExpIds ?? [])
+    if (memberIds.has(q.expId)) continue
+    const qv = vec(String(q.sar?.situation ?? ''))
+    if (qv === null) continue
+    outDomSit.push(maxCos(qv, memberSituations))
+  }
+}
+outDomSit.sort((a, b) => a - b)
+const looSorted = loo.map(x => x.score).sort((a, b) => a - b)
+
 const keyOnlyScores = pairs.filter(p => !p.oldHit).map(p => p.key).sort((a, b) => a - b)
 const pct = (arr, p) => (arr.length === 0 ? null : Number(arr[Math.min(arr.length - 1, Math.floor(p * arr.length))].toFixed(3)))
 const inDom = pairs.filter(p => p.inDomain).map(p => p.member).sort((a, b) => a - b)
@@ -158,6 +200,20 @@ const report = {
     outOfDomain: { n: outDom.length, p50: pct(outDom, 0.5), p90: pct(outDom, 0.9), p99: pct(outDom, 0.99) },
     bestMinusSecond: { p50: pct(best2, 0.5), p90: pct(best2, 0.9) },
     pairsClearingAt: admitters,
+    // 留一法(相关但新): 与域外分布对照即可看出"门槛能不能抬"
+    leaveOneOut: { n: looSorted.length, p01: pct(looSorted, 0.01), p10: pct(looSorted, 0.1), p50: pct(looSorted, 0.5), min: looSorted[0] === undefined ? null : Number(looSorted[0].toFixed(3)) },
+    // 字段对齐对照(cl-362): 生产口径=情境查询 vs 成员 **action** 嵌入(跨字段); 同字段=情境 vs 情境
+    fieldAlignment: {
+      relatedNew_situationVsAction: { n: looSorted.length, min: pct(looSorted, 0), p10: pct(looSorted, 0.1), p50: pct(looSorted, 0.5) },
+      relatedNew_situationVsSituation: { n: looSit.length, min: pct(looSit, 0), p10: pct(looSit, 0.1), p50: pct(looSit, 0.5) },
+      unrelated_situationVsSituation: { n: outDomSit.length, p50: pct(outDomSit, 0.5), p90: pct(outDomSit, 0.9), p99: pct(outDomSit, 0.99) },
+    },
+    separation: {
+      // 域外 p99 与留一法 p10/min 之间的关系: p99 < min(LOO) ⇒ 存在能"全收相关、几乎不收不相关"的门槛
+      outOfDomainP99: pct(outDom, 0.99),
+      looMin: looSorted[0] === undefined ? null : Number(looSorted[0].toFixed(3)),
+      looP10: pct(looSorted, 0.1),
+    },
   },
   chains: chains.length, embeddedTexts: calls, pairs: pairs.length,
   memberHitPairs: pairs.filter(p => p.oldHit).length,
@@ -174,6 +230,14 @@ else {
   console.log(`  域内成员分(真是这条链的情境) n=${d.inDomain.n}: p10=${d.inDomain.p10} p50=${d.inDomain.p50} p90=${d.inDomain.p90}`)
   console.log(`  域外成员分(不是这条链的)     n=${d.outOfDomain.n}: p50=${d.outOfDomain.p50} p90=${d.outOfDomain.p90} p99=${d.outOfDomain.p99}`)
   console.log(`  每查询"最佳-次佳"差: p50=${d.bestMinusSecond.p50} p90=${d.bestMinusSecond.p90} | 各阈值下的过阈对数: ${JSON.stringify(d.pairsClearingAt)}`)
+  const fa = d.fieldAlignment
+  console.log(`  字段对拍照: 相关但新 情境vs成员action → min ${fa.relatedNew_situationVsAction.min} p50 ${fa.relatedNew_situationVsAction.p50}` +
+    ` | 相关但新 情境vs情境 → min ${fa.relatedNew_situationVsSituation.min} p50 ${fa.relatedNew_situationVsSituation.p50}` +
+    ` | 域外 情境vs情境 → p50 ${fa.unrelated_situationVsSituation.p50} p99 ${fa.unrelated_situationVsSituation.p99}`)
+  const l = d.leaveOneOut
+  console.log(`  **相关但新**(留一法) n=${l.n}: min=${l.min} p01=${l.p01} p10=${l.p10} p50=${l.p50}`)
+  console.log(`  分离度: 域外 p99=${d.separation.outOfDomainP99} vs 留一法 min=${d.separation.looMin} p10=${d.separation.looP10}` +
+    (d.separation.outOfDomainP99 !== null && d.separation.looMin !== null && d.separation.looMin > d.separation.outOfDomainP99 ? ' ⇒ **存在把两者分开的门槛**' : ' ⇒ 分布有重叠, 单一门槛无法完全分开'))
   console.log(`  成员不达标时键分的分布: p50=${report.keyScoreWhenMemberBelowThreshold.p50} p90=${report.keyScoreWhenMemberBelowThreshold.p90} max=${report.keyScoreWhenMemberBelowThreshold.max}`)
   for (const m of margins) {
     const b = byMargin[m]

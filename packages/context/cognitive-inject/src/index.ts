@@ -857,8 +857,16 @@ async function retrieveChain(
         cosine(actionQuery, exp.actionVector),
         cosine(situationQuery, situationVector(exp.sar.situation)),
       )
-      if (queryEmbedding !== null && exp.embedding !== undefined) {
-        semanticScore = Math.max(semanticScore, cosine(queryEmbedding, exp.embedding))
+      if (queryEmbedding !== null) {
+        // cl-362: **同字段比较**。此前用 `exp.embedding`(成员 **action** 的嵌入)比情境查询 ⇒ 跨字段。
+        // 真数据对照(留一法造"相关但新"的样本): 情境vs成员action 相关群中位 0.645 / 域外 p99 0.697 ⇒ 两群**重叠**、门槛无从设;
+        // 换成情境vs情境后相关群中位升到 **0.716** 而域外不变(p99 0.697) ⇒ 分离度明显变好。
+        // 代价: 每个成员的情境要嵌一次(EmbeddingScorer 按文本缓存 ⇒ 每进程一次性, 之后免费); 嵌入失败则退回 action 嵌入。
+        const situationVectorOfMember = await service.embedder?.embed(String(exp.sar.situation))
+        const aligned = situationVectorOfMember === undefined || situationVectorOfMember === null
+          ? exp.embedding
+          : situationVectorOfMember
+        if (aligned !== undefined) semanticScore = Math.max(semanticScore, cosine(queryEmbedding, aligned))
       }
     }
     // cl-361: 语义分与词面分**各自过各自的门槛** —— 语义空间的分布整体更高(域外 p99=0.697), 用 0.4 当门槛等于不设门槛。

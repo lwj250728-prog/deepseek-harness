@@ -6,6 +6,7 @@
 #   C 忽略会话级条数上限(链是大块头)          ⇒ 同一会话把多条链都塞进上下文 ⇒ 预算被吃
 #   D 关掉语义键(查询向量传 null)             ⇒ 换个说法问同一件事又找不到了
 #   E 忽略语义空间门槛(置 0)                  ⇒ 语义门槛失效, 不相关的链也会被服务
+#   F 语义分退回跨字段(情境 vs 成员 action)      ⇒ 成员情境对齐失效(cl-362 的对照就白做了)
 # 干净臂(DSH_PROBE_CLEAN=1): 不改 ⇒ T248 必绿。
 set -uo pipefail
 NAME="经验链进入注入: 能被找到 + 被渲染 + 引用回填到链账本"
@@ -27,7 +28,7 @@ restore() { cp -p "$BAK" "$SRC"; }
 trap 'restore; rm -f "$BAK"' EXIT
 
 survived=""
-for M in A B C D E; do
+for M in A B C D E F; do
   python3 - "$SRC" "$M" <<'MK' || exit 3
 import sys
 p, which = sys.argv[1], sys.argv[2]
@@ -43,6 +44,8 @@ REPL = {
            "      ? await retrieveChain(ctx.cognitivePipeline, situation, agent.session.id, resolved.chain, null)  /* MUTANT D: 关掉语义键 */")],
     "E": [("    const semanticFloor = config.minSimilarity + config.semanticMargin",
            "    const semanticFloor = 0  /* MUTANT E: 忽略语义空间门槛 */")],
+    "F": [("        const situationVectorOfMember = await service.embedder?.embed(String(exp.sar.situation))",
+           "        const situationVectorOfMember = exp.embedding  /* MUTANT F: 退回跨字段(情境 vs 成员 action) */")],
 }[which]
 for old, new in REPL:
     assert s.count(old) == 1, "结构变了, 探针自身失效(%s): %r" % (which, old[:50])
@@ -58,5 +61,5 @@ MK
 done
 
 if [ -n "$survived" ]; then echo "变异体$survived 存活 ⇒ 判据对这些缺陷无区分力" >&2; exit 4; fi
-echo "[guard-fire] FIRED T248: 关链检索 / 丢 chainId / 忽略会话上限 / 关语义键 / 忽略语义门槛 都被判据抓住" >&2
+echo "[guard-fire] FIRED T248: 关链检索 / 丢 chainId / 忽略会话上限 / 关语义键 / 忽略语义门槛 / 跨字段打分 都被判据抓住" >&2
 exit 1

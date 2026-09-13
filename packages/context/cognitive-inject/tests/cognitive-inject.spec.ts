@@ -529,6 +529,37 @@ describe('cognitive-inject priming', () => {
     }
   })
 
+  it('scores chain members in the SAME field (情境 vs 情境), not situation-vs-action (cl-362)', async () => {
+    // 真数据对照: 情境vs成员action 的相关群中位 0.645 而域外 p99 0.697(重叠); 情境vs情境把相关群抬到 0.716。
+    // 这条用例只可能由"成员**情境**对齐"命中: 成员的 action/词面都与情境无关, 目标键也不命中。
+    const { ctx, teardown } = await mount()
+    try {
+      const SIT = '服务重启后需要验证恢复'
+      const MEMBER_SITS = ['旧事一', '旧事二', '旧事三']
+      seedExperience(ctx.cognitivePipeline.store, 'exp_1', MEMBER_SITS[0], '执行甲', '结果甲', undefined, undefined, 'chain-mem-sem')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_2', MEMBER_SITS[1], '执行乙', '结果乙', undefined, undefined, 'chain-mem-sem')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_3', MEMBER_SITS[2], '执行丙', '结果丙', undefined, undefined, 'chain-mem-sem')
+      seedExperience(ctx.cognitivePipeline.store, 'exp_9', SIT, '重启服务并验证', '恢复成功')   // 开闸
+      await ctx.cognitivePipeline.consolidateChain('chain-mem-sem', '与环境无关的目标表述')
+      const fake = {
+        embed: async (text: string) => {
+          if (text === SIT) return [1, 0]
+          if (MEMBER_SITS.includes(text)) return [0.98, 0.02]   // 成员**情境**语义很近
+          return null                                            // 其它一律嵌不出(含目标键与所有 action)
+        },
+      }
+      Object.defineProperty(ctx.cognitivePipeline, 'embedder', { value: fake, configurable: true })
+      const { agent, session } = stubAgent('chain-mem-sem')
+      session.append('turn/start', { turn: 1 })
+      const injected = await fire(ctx, agent, 1, 1, SIT)
+      const chainText = injected.find(text => text.includes('【经验链参考】'))
+      expect(chainText).toBeDefined()
+      expect(chainText).toContain('chain-mem-sem')
+    } finally {
+      await teardown()
+    }
+  })
+
   it('keeps the lexical fallback when the embedder cannot embed (退化不许变成不服务; cl-360)', async () => {
     const { ctx, teardown } = await mount()
     try {
