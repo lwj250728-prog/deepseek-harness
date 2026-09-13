@@ -10291,6 +10291,47 @@ assert "34 passed" in out, "spec 没跑满 34 条(加了用例就同步这个数
 print("经验链 4/4: 命中即服务链树 + 不相关不服务 + 同会话只服务一次 + 引用回填 hitCount/citedCount")
 '
 
+# T249 (cl-352): 今晚三次踩同一个坑 —— "我改了源码"≠"产物更新了"≠"载体加载了"。三者任一不一致, 结论静默失真
+# (实测: 我的两个包产物 04:43, 而载体 22:08 启动; 另有 ui-goal-tree 01:48 构建后从未被加载, api/remotes 与 session-persistence-jsonl
+# 源码 03:39 改过但产物仍是 22:07)。判据用注入状态测四档判定(不伪造真实载体), 并确认真实态能被扫出来。
+echo "[T249] 部署滞后见证(源码/产物/载体)"
+t "部署滞后见证: 源码/产物/载体三者任一旧了都必须可见" python3 -c '
+import json, os, subprocess, sys, tempfile, time
+R = os.path.expanduser("~/dsh-fork")
+TOOL = os.path.join(R, "dsh-deploy-lag.py")
+assert os.path.exists(TOOL), "工具不在: %s" % TOOL
+now = time.time()
+T = tempfile.mkdtemp(prefix="t249-")
+def run(state):
+    path = os.path.join(T, "state.json")
+    with open(path, "w", encoding="utf8") as fh:
+        json.dump(state, fh)
+    env = dict(os.environ, DSH_DEPLOY_LAG_STATE=path)
+    return subprocess.run([sys.executable, TOOL, "--json"], capture_output=True, text=True, timeout=300, env=env)
+state = {"carrierStart": now - 3600, "packages": {
+    "pkg-live": {"libMtime": now - 7200, "srcMtime": now - 8000},
+    "pkg-build-stale": {"libMtime": now - 7200, "srcMtime": now - 60},
+    "pkg-carrier-stale": {"libMtime": now - 60, "srcMtime": now - 120},
+    "pkg-missing": {"libMtime": None, "srcMtime": now - 100}}}
+r = run(state)
+assert r.returncode == 1, "有滞后时必须非零退出: %s" % ((r.stdout or "") + (r.stderr or ""))[-200:]
+got = {x["package"]: x["verdict"] for x in json.loads(r.stdout.strip().splitlines()[-1])["rows"]}
+want = {"pkg-live": "live", "pkg-build-stale": "build-stale", "pkg-carrier-stale": "carrier-stale", "pkg-missing": "missing"}
+assert got == want, "四档判定错(源码旧/产物旧/生效/缺产物必须各不相同): %s" % got
+r2 = run({"carrierStart": now - 60, "packages": {"pkg-live": {"libMtime": now - 7200, "srcMtime": now - 8000}}})
+assert r2.returncode == 0, "全部生效时应退出 0: %s" % ((r2.stdout or "") + (r2.stderr or ""))[-200:]
+# 真实态: 必须能拿到载体启动时间并扫到今晚改的两个包(取"是否被扫到"而不锁死判定, 因为载体加载后它们会翻成 live)
+r3 = subprocess.run([sys.executable, TOOL, "--json"], capture_output=True, text=True, timeout=600)
+assert r3.returncode in (0, 1), "真实态跑不通: %s" % ((r3.stdout or "") + (r3.stderr or ""))[-200:]
+d3 = json.loads(r3.stdout.strip().splitlines()[-1])
+assert d3["carrierStart"] is not None, "拿不到载体启动时间(判据会退化成 unknown)"
+scanned = {x["package"] for x in d3["rows"]}
+for pkg in ("packages/context/cognitive-inject", "packages/cognition/cognitive-pipeline"):
+    assert pkg in scanned, "没扫到 %s" % pkg
+print("部署滞后四档判定正确; 真实态: 扫描 %d 包 / 滞后 %d 个" % (len(d3["rows"]), d3["stale"]))
+'
+
+
 
 
 
