@@ -9285,6 +9285,80 @@ if r.returncode == 0:
 assert not bad, "门的时限路径不成立: " + "; ".join(bad)
 print("3 个门 × 5 条路径 + δ 门反向对照全部成立(含 fail-closed 优先于时限)")
 '
+# ── T229 δ 门的基线键洞 + CWD 不变性(tp-198) ──
+# 由来(cl-311 / cl-313): `changed_libs()` 只遍历**基线里已有的键** ⇒ 基线之后**新增**的 lib(新包/新入口)
+# 对门完全不可见, 而"变更集 ⊆ 已声明集"这条判断正是靠这个集做的; 另一半是 CWD: 基线键是**相对**路径, 解析
+# 若按调用方 CWD ⇒ 同一世界在 repo 根报"继续等待"、在 /tmp 报"231 个键全缺"(dsh-web 的 CWD 恰是仓库所以蒙对,
+# 而 cron 的默认 CWD 是 $HOME ⇒ 门会被永久卡住, 冻结的重开条件(b)永不触发)。本判据直接调用 changed_libs()
+# 钉这两件事: 门的 main 还有两处读**真实世界**(process_start 走 systemd、产物 lib 的 mtime)不可替换,
+# 走全跑路径读数会漂, 钉不住"键洞"本身。
+echo "[T229] δ 门的基线键洞与 CWD 不变性(新增 lib 必须可见)"
+t "δ 门: 基线之后新增的 lib 必须可见, 且三处 CWD 判决逐字一致" python3 -c '
+import hashlib, json, os, subprocess, sys, tempfile
+REPO = os.path.expanduser("~/dsh-fork")
+TOOL = os.path.join(REPO, "dsh-wait-check-diversity-arm.py")
+HELPER = """
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("dv", os.environ["TP198_TOOL"])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+print(json.dumps(m.changed_libs(), ensure_ascii=False))
+"""
+def sha(p):
+    return hashlib.sha256(open(p, "rb").read()).hexdigest()
+def build(keys_wanted):
+    repo = tempfile.mkdtemp(prefix="tp198-repo-")
+    cog = tempfile.mkdtemp(prefix="tp198-cog-")
+    for pkg in ("one/p", "two/q"):
+        d = os.path.join(repo, "packages", pkg, "lib")
+        os.makedirs(d, exist_ok=True)
+        open(os.path.join(d, "index.js"), "w", encoding="utf8").write("// " + pkg + chr(10))
+    json.dump({"at": "2026-09-13T14:56:21+08:00",
+               "hashes": {k: sha(os.path.join(repo, k)) for k in keys_wanted},
+               "declaredIntent": ["packages/one/p", "packages/two/q"], "windowLabel": "synth"},
+              open(os.path.join(cog, "diversity-arm-baseline.json"), "w", encoding="utf8"))
+    h = os.path.join(tempfile.mkdtemp(prefix="tp198-h-"), "probe.py")
+    open(h, "w", encoding="utf8").write(HELPER)
+    return repo, cog, h
+def run(repo, cog, h, cwd):
+    env = dict(os.environ, DSH_REPO=repo, DSH_COG_DIR=cog, TP198_TOOL=TOOL)
+    return subprocess.run([sys.executable, h], capture_output=True, text=True, cwd=cwd, env=env, timeout=120)
+bad = []
+# ①基线**只**记 one ⇒ two 是"基线之后新增的 lib", 必须出现在变更集里
+repo, cog, h = build(["packages/one/p/lib/index.js"])
+r = run(repo, cog, h, repo)
+if r.returncode != 0:
+    bad.append("①调用 changed_libs 失败: " + (r.stderr or "")[-200:])
+else:
+    changed, why = json.loads(r.stdout.strip().splitlines()[-1])
+    if changed is None:
+        bad.append("①合成世界应当可判, 却返回不可判: " + why)
+    elif not any("two/q" in str(c) for c in changed):
+        bad.append("①基线之后**新增**的 lib 对门不可见(返回 " + str(changed) + ")")
+# ②同一世界, 三处 CWD 的判决必须逐字一致(相对键按 REPO 解析, 不按调用方 CWD)
+outs = []
+for cwd in (repo, "/tmp", os.path.expanduser("~")):
+    r = run(repo, cog, h, cwd)
+    outs.append(str(r.returncode) + "|" + (r.stdout.strip().splitlines()[-1] if r.stdout.strip() else (r.stderr or "").strip()[-160:]))
+if len(set(outs)) != 1:
+    bad.append("②三处 CWD 判决不一致: " + str(outs))
+# ③两个方向都要对: 基线键里改过的必须报, 没改的不许报(防"一律全报"的假修复)
+repo2, cog2, h2 = build(["packages/one/p/lib/index.js", "packages/two/q/lib/index.js"])
+open(os.path.join(repo2, "packages/two/q/lib/index.js"), "a", encoding="utf8").write("// changed" + chr(10))
+r = run(repo2, cog2, h2, repo2)
+if r.returncode != 0:
+    bad.append("③调用 changed_libs 失败: " + (r.stderr or "")[-200:])
+else:
+    changed2 = json.loads(r.stdout.strip().splitlines()[-1])[0] or []
+    hit_two = [c for c in changed2 if "two/q" in str(c)]
+    hit_one = [c for c in changed2 if "one/p" in str(c)]
+    if not hit_two:
+        bad.append("③内容变了的基线键没被算作变更: " + str(changed2))
+    if hit_one:
+        bad.append("③内容没变的键被算作变更(假阳性): " + str(changed2))
+assert not bad, "δ 门的基线键洞/CWD 不变性不成立: " + "; ".join(bad)
+print("①基线之后新增的 lib 可见 ②三处 CWD 判决逐字一致 ③变更/未变更两个方向都对")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。

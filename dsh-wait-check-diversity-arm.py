@@ -124,6 +124,13 @@ def resolve_lib_key(path: str) -> str:
     return p if os.path.isabs(p) else os.path.join(REPO, p)
 
 
+def current_lib_keys() -> list[str]:
+    """当前磁盘上的 lib 键集 —— 与 `--rebaseline` 写基线时**同一口径**(相对 REPO 的 glob)。"""
+    out = subprocess.run(['bash', '-lc', 'cd %s && ls -d packages/*/*/lib/index.js 2>/dev/null' % REPO],
+                         capture_output=True, text=True, timeout=120).stdout.split()
+    return out
+
+
 def changed_libs() -> tuple[list[str] | None, str]:
     """自 δ 基线以来**内容真变**的 lib 集 → (集合, 说明)。
 
@@ -131,6 +138,10 @@ def changed_libs() -> tuple[list[str] | None, str]:
     重启还带上了别的包"**。实测 14:09 那次全量重建刷新 183 个 lib、内容真变 9 个(含 quiet-driver), 而门照旧
     报"B 臂已跑 0.3h" ⇒ **读数不可识别**(A/B 差别不止 δ)。故改成看**变更 lib 集**: 集 ⊆ {cognitive-inject} 才算
     δ 可识别; 基线用 --rebaseline 记(干净的构建+重启之后记一次)。
+
+    2026-09-13 21:4x(tp-198, cl-311/cl-313 的结构型洞): 初版**只遍历基线里的键** ⇒ 基线之后**新增**的 lib
+    (新包、新 lib 入口)对门完全不可见 —— 而"变更集 ⊆ 已声明集"这条判断正是靠这个集做的, 于是新增包会被
+    静默当成"本窗口只有 δ"。修法: 两侧比对(基线键 ∪ 当前 glob), 当前有而基线没有的记为 `(新增)`。
     """
     base_p = os.path.join(D, 'diversity-arm-baseline.json')
     if not os.path.exists(base_p):
@@ -152,6 +163,15 @@ def changed_libs() -> tuple[list[str] | None, str]:
         cur = hashlib.sha256(open(fp, 'rb').read()).hexdigest()
         if cur != want:
             changed.append(str(path))
+    # 反向: 基线里没有、磁盘上现在有的 lib = 基线之后新增(旧口径看不见它们)。
+    try:
+        known = {os.path.realpath(resolve_lib_key(k)) for k in hashes}
+        for path in current_lib_keys():
+            if os.path.realpath(resolve_lib_key(path)) in known:
+                continue
+            changed.append(str(path) + '(新增: 基线之后才有这个 lib)')
+    except Exception as exc:  # noqa: BLE001
+        return None, '当前 lib 集读不了(%s) ⇒ fail-closed 判不了"只有 δ 变了没"' % exc
     return changed, '基线记于 %s(%d 个 lib)' % (str(base.get('at'))[:19], len(hashes))
 
 
