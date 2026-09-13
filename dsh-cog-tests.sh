@@ -9463,6 +9463,30 @@ rc, out = chk()
 assert rc == 1 and "探针无效" in out, "干净臂红应计探针无效, 实得 exit=%d: %s" % (rc, out[-200:])
 print("合成世界: 基线绿 / 锚点漂移红 / 体变未重验红 / 重验回绿 / 干净臂红计无效")
 '
+# ── T231 合成世界的**非退化自证**(tp-201) ──
+# 由来: 1 小时内两次同形**假绿** —— T229 第一版合成日志那条 ✗ 距尾不足 400 行(变异等价于没变);
+# T230 第一版合成世界探针 NAME 用单引号 ⇒ name='' ⇒ 体哈希 None ⇒ 过期检查被静默跳过却报绿。
+# 判据: 每条登记的退化变异必须让对应判据**变红**(行为, 非文本引用); 新增的合成世界判据必须登记;
+# 判别量非零且等于期望(登记数/抓住数/种类数)。存量 65 个合成世界判据冻结为债(只减不增)。
+echo "[T231] 合成世界的非退化自证"
+t "合成世界判据必须自证非退化: 退化变异须翻红 + 新增须登记 + 判别量非零" python3 -c '
+import json, os, subprocess, sys
+TOOL = os.path.expanduser("~/dsh-fork/dsh-degeneracy-check.py")
+r = subprocess.run([sys.executable, TOOL, "--check", "--json"], capture_output=True, text=True, timeout=1800)
+out = (r.stdout or "") + (r.stderr or "")
+assert r.returncode == 0, "退化自证检查判红(exit=%d): %s" % (r.returncode, out[-400:])
+payload = json.loads(r.stdout.strip().splitlines()[-1])
+synthetic, entries = payload.get("synthetic") or [], int(payload.get("entries") or 0)
+caught = payload.get("caught") or []
+assert entries >= 3, "登记的退化变异只有 %d 条(期望 >=3) —— 判别量不得为 0/空" % entries
+assert len(caught) == entries, "抓住 %d 条 != 登记 %d 条 ⇒ 有变异没被抓住" % (len(caught), entries)
+assert payload.get("red") == [], "存在判红项: %s" % payload.get("red")
+assert len(synthetic) > 0, "一个合成世界判据都没扫到 ⇒ 判据自身在世界为空时假绿"
+assert "新增缺变异 0" in out, "输出里没有「新增缺变异 0」(覆盖口径没生效): %s" % out[-200:]
+kinds = sorted({c.get("kind") for c in caught})
+assert len(kinds) >= 3, "退化种类只有 %d 种(期望 >=3: 判别量为空/世界未绑定/注入点被忽略)" % len(kinds)
+print("退化自证: 合成世界判据 %d 个 / 登记 %d 条 / 抓住 %d 条 / 种类 %s" % (len(synthetic), entries, len(caught), kinds))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
