@@ -29,6 +29,18 @@ import sys
 D = os.environ.get('DSH_COG_DIR') or os.path.expanduser('~/.dsh/cognitive-pipeline')
 PROFILE = os.environ.get('DSH_WEB_CONFIG') or os.path.expanduser('~/.dsh/profiles/web/cordis.patch.yml')
 TZ = datetime.timezone(datetime.timedelta(hours=8))
+REPO = os.environ.get('DSH_REPO') or os.path.expanduser('~/dsh-fork')
+
+
+def pkg_of(path: str) -> str:
+    """从绝对路径取出包名(如 packages/context/cognitive-inject)。
+    2026-09-13 14:5x 自查: 初版写 `'/'.join(p.split('/')[1:3])` —— 对**绝对路径**会切出 'home/ubuntu'
+    (自测时当场暴露), 于是"声明集 vs 实际集"的比较永远不相等 ⇒ 前置形同虚设。"""
+    parts = [x for x in path.split('/') if x]
+    if 'packages' in parts:
+        i = parts.index('packages')
+        return '/'.join(parts[i:i + 3])
+    return path
 
 
 def arm_enabled() -> tuple[bool, str]:
@@ -93,8 +105,15 @@ def changed_libs() -> tuple[list[str] | None, str]:
     return changed, '基线记于 %s(%d 个 lib)' % (str(base.get('at'))[:19], len(hashes))
 
 
-def write_rebaseline() -> int:
-    """把当前 lib 集哈希记为 δ 窗口的基线(只在**干净构建+重启之后**跑一次)。"""
+def write_rebaseline(intent: list[str]) -> int:
+    """把当前 lib 集哈希记为 δ 窗口的基线 —— 但**必须声明这个窗口里都有什么**。
+
+    2026-09-13 14:4x **cl-310 的更正成立**: 初版 `--rebaseline` **没有干净性前置** —— 在任何状态下跑,
+    它都会把当时那套 lib 冻成"基线", 于是门之后必然报"变革集 ⊆ {cognitive-inject} ⇒ 可识别", 而窗口里其实
+    还夹着别的包(实测: 相对 `deploy-lib-hashes` 基线变更有 **10 个** lib)。那等于**把污染冻成假干净**。
+    修法: 必须显式声明 `--intent <包列表>`, 且**实际变更集要与之逐字相等**(相等而非包含: 声明子集会把未声明的包
+    悄悄带进窗口); 基线里同时记下 intent 与实际变更清单, 让**每一次读数都带着"本窗口是 δ + 哪些包"这个标签**。
+    """
     import hashlib, subprocess as sp
     out = sp.run(['bash', '-lc',
                   'cd %s && ls -d packages/*/*/lib/index.js 2>/dev/null' % REPO],
@@ -102,12 +121,45 @@ def write_rebaseline() -> int:
     if not out:
         print('[wait-diversity] 找不到任何 lib/index.js ⇒ 不记基线', file=sys.stderr)
         return 3
+    if not intent:
+        print('[wait-diversity] 拒绝记基线: 必须用 --intent 声明这个窗口里都变更了哪些包(空窗口就写 none)。'
+              '没有声明就记基线 = 把当时的污染冻成"干净基线"(cl-310)。', file=sys.stderr)
+        return 3
+    # 参照必须是**A 臂时代的** lib 快照, 而不是 `deploy-lib-hashes.json` —— 后者每次部署都会被自己刷新
+    # (2026-09-13 14:5x 实测: 14:52 那次部署一跑, 它立刻变成"当前状态", 差集归零 ⇒ 前置形同虚设)。
+    # 故用一份**只读的** A 臂参照 `diversity-arm-aref.json`(从当日 03:30 备份里取出, 见 --set-aref)。
+    base_p = os.path.join(D, 'diversity-arm-aref.json')
+    try:
+        old = json.load(open(base_p, encoding='utf8')).get('hashes') or {}
+    except Exception as exc:  # noqa: BLE001
+        print('[wait-diversity] 读不到 A 臂参照(%s) ⇒ 判不了"实际变更集" ⇒ 拒记。'
+              '缺少它请用 --set-aref <某次备份里的 deploy-lib-hashes.json>' % exc, file=sys.stderr)
+        return 3
+    actual = []
+    for path, want in old.items():
+        fp = os.path.expanduser(path)
+        if not os.path.exists(fp):
+            actual.append(path); continue
+        if hashlib.sha256(open(fp, 'rb').read()).hexdigest() != want:
+            actual.append(path)
+    act_pkgs = sorted({pkg_of(p) for p in actual})
+    want_pkgs = sorted(set(intent))
+    if act_pkgs != want_pkgs:
+        print('[wait-diversity] **拒绝记基线: 声明的意图集与实际变更集不相等**\n'
+              '  实际变更: %s\n  声明意图: %s\n'
+              '  (相等要求是刻意的: 声明子集会把未声明的包悄悄带进窗口 ⇒ 之后门报"可识别"是假的)'
+              % (act_pkgs, want_pkgs), file=sys.stderr)
+        return 3
     hashes = {p: hashlib.sha256(open(p, 'rb').read()).hexdigest() for p in out}
     start = process_start()
     payload = {'at': datetime.datetime.now(TZ).isoformat(),
                'processStart': start.isoformat() if start else None,
                'hashes': hashes,
-               'rule': 'δ 可识别的条件: 自此基线以来**变更的 lib 集 ⊆ {cognitive-inject}**; 其它包一变 ⇒ 报不可识别'}
+               'declaredIntent': want_pkgs,
+               'changedAtBaseline': act_pkgs,
+               'windowLabel': 'δ + ' + (', '.join(act_pkgs) if act_pkgs else '(无其它包)'),
+               'rule': 'δ 可识别的条件: 自此基线以来**变更的 lib 集必须 ⊆ declaredIntent**(不是"⊆{cognitive-inject}"), '
+                       '因为本窗口本身就带着声明过的那些包; 出现声明外的变更 ⇒ 报不可识别'}
     p = os.path.join(D, 'diversity-arm-baseline.json')
     tmp = p + '.tmp'
     with open(tmp, 'w', encoding='utf8') as fh:
@@ -149,9 +201,28 @@ def main() -> int:
     ap.add_argument('--min-turns', type=int, default=20)
     ap.add_argument('--json', action='store_true')
     ap.add_argument('--rebaseline', action='store_true', help='把当前 lib 集记为 δ 基线(干净构建+重启之后跑一次)')
+    ap.add_argument('--intent', default='', help='声明本窗口里变更了哪些包(逗号分隔; 无则 none)')
+    ap.add_argument('--set-aref', default='', help='把某份(备份里的) deploy-lib-hashes.json 记为**只读的 A 臂参照**')
     args = ap.parse_args()
+    if args.set_aref:
+        import shutil
+        src = os.path.expanduser(args.set_aref)
+        if not os.path.exists(src):
+            print('[wait-diversity] 找不到 %s' % src, file=sys.stderr)
+            return 3
+        dst = os.path.join(D, 'diversity-arm-aref.json')
+        data = json.load(open(src, encoding='utf8'))
+        data['note'] = ('δ 实验的 **A 臂参照**: 这份 lib 哈希来自 A 臂测量时代(部署前)。'
+                        '--rebaseline 会拿当前 lib 与它比对, 并要求 --intent 与之**逐字相等** —— '
+                        '这样"本窗口里都有什么"是被声明且可审计的, 而不是把污染冻成假干净(cl-310)。')
+        tmp = dst + '.tmp'
+        json.dump(data, open(tmp, 'w', encoding='utf8'), ensure_ascii=False, indent=1)
+        os.replace(tmp, dst)
+        print('[wait-diversity] 已记 A 臂参照: %d 个 lib → %s' % (len(data.get('hashes') or {}), dst))
+        return 0
     if args.rebaseline:
-        return write_rebaseline()
+        intent = [] if args.intent.strip().lower() in ('', 'none', '无') else [x.strip() for x in args.intent.split(',') if x.strip()]
+        return write_rebaseline(intent)
 
     on, why = arm_enabled()
     if not on:
@@ -184,11 +255,22 @@ def main() -> int:
     if changed is None:
         print('[wait-diversity] %s' % why_changed)
         return 1
-    foreign = sorted({c for c in changed if 'context/cognitive-inject' not in c})
+    base_p = os.path.join(D, 'diversity-arm-baseline.json')
+    intent = []
+    label = ''
+    if os.path.exists(base_p):
+        try:
+            b = json.load(open(base_p, encoding='utf8'))
+            intent = list(b.get('declaredIntent') or [])
+            label = str(b.get('windowLabel') or '')
+        except Exception:  # noqa: BLE001
+            intent, label = [], ''
+    changed_pkgs = sorted({pkg_of(c) for c in (changed or [])})
+    foreign = [c for c in changed_pkgs if c not in intent]
     if foreign:
-        print('[wait-diversity] **B 臂不可识别**: 自 δ 基线以来这些包也变了 %s ⇒ A/B 差别不止 δ '
-              '(门此前只钉 cognitive-inject 一个 lib, 看不见同批的其它包) ⇒ 本窗口的读数不可用作 δ 归因'
-              % foreign[:5])
+        print('[wait-diversity] **B 臂不可识别**: 自 δ 基线以来出现**声明外**的包变更 %s ⇒ A/B 差别不止 δ '
+              '(基线声明本窗口只含 %s) ⇒ 本窗口读数不可用作 δ 归因'
+              % (foreign[:5], intent or ['(空)']))
         return 1
     elapsed_h = (datetime.datetime.now(TZ) - start).total_seconds() / 3600.0
     turns = readable_turns(start)
