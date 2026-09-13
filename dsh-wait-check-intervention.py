@@ -27,6 +27,23 @@ IV = os.path.join(D, 'wake-interventions.jsonl')
 READOUT = os.path.join(D, 'wake-intervention-readout.jsonl')
 
 
+
+def _deadline_state(raw):
+    """-> (是否已过, 'none'|'passed'|'bad')。空串=未声明时限(none)。
+
+    自包含: 不依赖模块级 TZ(某个门里没有定义它 —— 2026-09-13 15:1x 实测 NameError)。
+    """
+    tz = datetime.timezone(datetime.timedelta(hours=8))
+    raw = (raw or '').strip()
+    if not raw:
+        return False, 'none'
+    try:
+        d = datetime.datetime.fromisoformat(raw)
+    except Exception:
+        return False, 'bad'
+    d = d if d.tzinfo else d.replace(tzinfo=tz)
+    return (datetime.datetime.now(tz) >= d), 'passed'
+
 def ms_of(v) -> float | None:
     if isinstance(v, (int, float)):
         return float(v)
@@ -56,7 +73,20 @@ def main() -> int:
     ap.add_argument('--target', default='goal-experience-library')
     ap.add_argument('--min-hours', type=float, default=0.0,
                     help='窗口至少要走完这么多小时才放行(默认 0 = 只看恢复记录/计划时长)')
+    ap.add_argument('--deadline', default='', help='声明式时限(ISO): 到点仍不满足 => 放行并标注证据不足; 写错 => fail-closed')
     args = ap.parse_args()
+
+    # 2026-09-13 15:1x: 池内门活性判据实测**三个 active 目标的门全部无界** => 系统可能永久静默。
+    # 故把"时限"声明在命令行上(活性判据看得见), 并**行为消费**它: 坏时限 fail-closed; 到点仍不满足 => 放行
+    # 但必须显式标注"放行理由=deadline(证据不足)"(时限放行 != 条件已满足, cl-266/T201 先例)。
+    _dl_passed, _dl_state = _deadline_state(args.deadline)
+    if _dl_state == 'bad':
+        print('[wait-check-intervention] 时限写错(%r) => fail-closed 不放行' % (args.deadline,))
+        return 1
+    if _dl_passed:
+        print('[wait-check-intervention] 时限已到而条件仍未满足 => 按**时限放行**, 放行理由=deadline(证据不足, '
+              '不得当作条件已满足)')
+        return 0
 
     recs = load(IV)
     # 2026-09-13 12:5x(行动帧执行时抓出): 本门**不认识预登记的窗口** —— 我 12:34 用 plan-disable 把窗口改期到

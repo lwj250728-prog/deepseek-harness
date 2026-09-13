@@ -32,6 +32,23 @@ TZ = datetime.timezone(datetime.timedelta(hours=8))
 REPO = os.environ.get('DSH_REPO') or os.path.expanduser('~/dsh-fork')
 
 
+
+def _deadline_state(raw):
+    """-> (是否已过, 'none'|'passed'|'bad')。空串=未声明时限(none)。
+
+    自包含: 不依赖模块级 TZ(某个门里没有定义它 —— 2026-09-13 15:1x 实测 NameError)。
+    """
+    tz = datetime.timezone(datetime.timedelta(hours=8))
+    raw = (raw or '').strip()
+    if not raw:
+        return False, 'none'
+    try:
+        d = datetime.datetime.fromisoformat(raw)
+    except Exception:
+        return False, 'bad'
+    d = d if d.tzinfo else d.replace(tzinfo=tz)
+    return (datetime.datetime.now(tz) >= d), 'passed'
+
 def pkg_of(path: str) -> str:
     """从绝对路径取出包名(如 packages/context/cognitive-inject)。
     2026-09-13 14:5x 自查: 初版写 `'/'.join(p.split('/')[1:3])` —— 对**绝对路径**会切出 'home/ubuntu'
@@ -214,10 +231,24 @@ def main() -> int:
     ap.add_argument('--min-hours', type=float, default=12.0)
     ap.add_argument('--min-turns', type=int, default=20)
     ap.add_argument('--json', action='store_true')
+    ap.add_argument('--deadline', default='', help='声明式时限(ISO): 到点仍不满足 => 放行并标注证据不足; 写错 => fail-closed')
     ap.add_argument('--rebaseline', action='store_true', help='把当前 lib 集记为 δ 基线(干净构建+重启之后跑一次)')
     ap.add_argument('--intent', default='', help='声明本窗口里变更了哪些包(逗号分隔; 无则 none)')
     ap.add_argument('--set-aref', default='', help='把某份(备份里的) deploy-lib-hashes.json 记为**只读的 A 臂参照**')
     args = ap.parse_args()
+
+    # 2026-09-13 15:1x: 池内门活性判据(dsh-goal-gate-liveness.py)实测**三个 active 目标的门全部无界**
+    # => 系统可能永久静默(没有任何一条能靠时间解冻)。根因之一是这几个门没有把"时限"声明在**命令行**上,
+    # 于是活性判据看不见它、也无法核验它是否被行为消费。此处按 cl-266/T201 的先例统一补上:
+    #   · 时限解析不了 => fail-closed 不放行(绝不因为"写了个坏时限"而放行);
+    #   · 到点仍不满足 => 放行, 但**必须显式标注**"放行理由=deadline / 证据不足"(时限放行 != 条件已满足)。
+    _dl_passed, _dl_state = _deadline_state(args.deadline)
+    if _dl_state == 'bad':
+        print('[diversity-arm] 时限写错(' + repr('%r') + ' 无法解析) => fail-closed 不放行')
+        return 1
+    if _dl_passed:
+        print('[diversity-arm] 时限已到而条件仍未满足 => 按**时限放行**并标注放行理由=deadline(证据不足, 不得当作条件已满足)')
+        return 0
     if args.set_aref:
         import shutil
         src = os.path.expanduser(args.set_aref)

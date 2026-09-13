@@ -26,6 +26,23 @@ import sys
 TZ = datetime.timezone(datetime.timedelta(hours=8))
 
 
+
+def _deadline_state(raw):
+    """-> (是否已过, 'none'|'passed'|'bad')。空串=未声明时限(none)。
+
+    自包含: 不依赖模块级 TZ(某个门里没有定义它 —— 2026-09-13 15:1x 实测 NameError)。
+    """
+    tz = datetime.timezone(datetime.timedelta(hours=8))
+    raw = (raw or '').strip()
+    if not raw:
+        return False, 'none'
+    try:
+        d = datetime.datetime.fromisoformat(raw)
+    except Exception:
+        return False, 'bad'
+    d = d if d.tzinfo else d.replace(tzinfo=tz)
+    return (datetime.datetime.now(tz) >= d), 'passed'
+
 def freeze_path() -> str:
     d = os.environ.get('DSH_COG_DIR') or os.path.expanduser('~/.dsh/cognitive-pipeline')
     return os.path.join(d, 'retrieval-freeze.json')
@@ -34,7 +51,21 @@ def freeze_path() -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--json', action='store_true')
+    ap.add_argument('--deadline', default='', help='声明式时限(ISO): 到点仍不满足 => 放行并标注证据不足; 写错 => fail-closed')
     args = ap.parse_args()
+
+    # 2026-09-13 15:1x: 池内门活性判据(dsh-goal-gate-liveness.py)实测**三个 active 目标的门全部无界**
+    # => 系统可能永久静默(没有任何一条能靠时间解冻)。根因之一是这几个门没有把"时限"声明在**命令行**上,
+    # 于是活性判据看不见它、也无法核验它是否被行为消费。此处按 cl-266/T201 的先例统一补上:
+    #   · 时限解析不了 => fail-closed 不放行(绝不因为"写了个坏时限"而放行);
+    #   · 到点仍不满足 => 放行, 但**必须显式标注**"放行理由=deadline / 证据不足"(时限放行 != 条件已满足)。
+    _dl_passed, _dl_state = _deadline_state(args.deadline)
+    if _dl_state == 'bad':
+        print('[retrieval-freeze] 时限写错(' + repr('%r') + ' 无法解析) => fail-closed 不放行')
+        return 1
+    if _dl_passed:
+        print('[retrieval-freeze] 时限已到而条件仍未满足 => 按**时限放行**并标注放行理由=deadline(证据不足, 不得当作条件已满足)')
+        return 0
     p = freeze_path()
     if not os.path.exists(p):
         print('[freeze] 未声明冻结(缺 %s) ⇒ 放行' % p)

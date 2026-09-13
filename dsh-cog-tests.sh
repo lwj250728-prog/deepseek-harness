@@ -862,7 +862,7 @@ files = [f for f in sorted(set(out.split())) if f.endswith(".ts") and "/src/" in
 assert files, "24h 内无 src 改动(元测试前提不成立)"
 missing = [f for f in files
            if "/".join(f.split("/")[:3]) not in suite and f.split("/")[-1] not in suite]
-assert not missing, ("改动但无断言引用 %d 个(只列前 5): %s —— 注意别用'加一句注释'骗过本条: "
+assert not missing, ("改动但无断言引用 %d 个(只列前 5): %s —— 注意别用「加一句注释」骗过本条: "
                       "正解是给它**在改动之后跑过**的覆盖见证(见 T226 与 dsh-session-coverage-witness.py)"
                       % (len(missing), missing[:5]))
 '

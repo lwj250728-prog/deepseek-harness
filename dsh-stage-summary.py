@@ -145,19 +145,29 @@ def main() -> int:
                    for l in git('show', '--name-only', '--pretty=format:', sha).splitlines())
     prod_commits = [l for l in commits if touches_packages(l.split('|')[0])]
     cl = data['claims-ledger.jsonl']
-    cl_latest = {}
+    cl_latest, cl_first = {}, {}
     for r in cl:
-        if r.get('id'):
-            cl_latest[r['id']] = r
-    cl_new, cl_closed = [], []
+        k = r.get('id')
+        if not k:
+            continue
+        cl_latest[k] = r
+        t = dt(r.get('ts'))
+        if t and (k not in cl_first or t < cl_first[k]):
+            cl_first[k] = t
+    # 2026-09-13 15:1x **外部评审抓出"注释声明了口径、实现没落地"**: 上面那段注释说"按首次出现时刻判新",
+    # 但 claims 账本这一支仍按**末行 ts** 判窗口 ⇒ 一个老 id 只要本期被更新过就被算成"新入账"(评审独立复算:
+    # 期内 68 行 / 48 个 id, 而真正首次入账的只有 12 个, 另 27 个是旧账重提)。这正是本工具**本用来抓的那类病**。
+    # 修法: claims 与 test-pending 用同一口径(首次出现), 并把"新入账 / 旧账重提"两个数**都印出来**。
+    cl_touched, cl_new, cl_closed = [], [], []
     for k, v in cl_latest.items():
         t = dt(v.get('ts'))
-        if not t or not (start <= t <= now):
-            continue
-        (cl_closed if str(v.get('status')) in ('done', 'closed', 'retired') else cl_new).append(k)
-    # 2026-09-13 12:0x 自查修正: 原实现按"最新行的 ts 落在本期"计数 ⇒ 一个 id 只要被更新过就算"新入账"
-    # (实测虚报 127 条)。测试账本是追加式且同 id 多行, 必须按**首次出现时刻**判"新"(exp_256 的教训: 读追加式
-    # 账本自带 last-wins 语义, 否则把历史行读成当前状态)。故先求每个 id 的最早 ts, 再与窗口比。
+        if t and (start <= t <= now):
+            cl_touched.append(k)
+        f = cl_first.get(k)
+        if f and (start <= f <= now):
+            cl_new.append(k)
+        if t and (start <= t <= now) and str(v.get('status')) in ('done', 'closed', 'retired'):
+            cl_closed.append(k)
     tp = data['test-pending.jsonl']
     tp_first = {}
     for r in tp:
@@ -203,8 +213,38 @@ def main() -> int:
             t = dt(m.group(3))
             if t and start <= t <= now:
                 suite_trend.append({'ts': t.strftime('%m-%d %H:%M'), 'pass': int(m.group(1)), 'fail': int(m.group(2))})
+        # 2026-09-13 15:1x **外部评审抓出**: 报"7 失败"却只列 6 条身份 —— 逐条 ✗ 只在末尾 400 行内找, 而套件
+        # 自己还会打印一个"失败项:"尾块。两处合并去重, 并把"身份数 < 失败数"这件事**显式打出来**(不许静默少列)。
         tail = lines[max(0, len(lines) - 400):]
-        suite_fail_ids = sorted({l.strip()[2:].strip() for l in tail if l.strip().startswith('✗')})
+        ids = {l.strip()[2:].strip() for l in tail if l.strip().startswith('✗')}
+        in_block = False
+        for l in tail:
+            s2 = l.strip()
+            if s2.startswith('失败项:'):
+                in_block = True
+                continue
+            if in_block:
+                if s2.startswith('- '):
+                    ids.add(s2[2:].strip())
+                elif s2 and not s2.startswith('- '):
+                    in_block = False
+        suite_fail_ids = sorted(x for x in ids if x)
+        _m = re.search(r'(\d+) 失败', verdicts[-1]) if verdicts else None
+        if _m is not None and len(suite_fail_ids) < int(_m.group(1)):
+            suite_fail_ids.append('[身份不全: 裁决 %s 条失败, 只取到 %d 条身份]'
+                                  % (_m.group(1), len(suite_fail_ids) - 0))
+        # 失败集的**换血**(评审: 12:21 的 5 红与 14:59 的 7 红之间消失 3 条、新增 5 条 ⇒ "6→7" 不是同一把尺子)
+        hist_ids = []
+        for v in verdicts[-6:]:
+            idx = lines.index(v) if v in lines else 0
+            seg = lines[max(0, idx - 600):idx]
+            cur_ids = {l.strip()[2:].strip() for l in seg if l.strip().startswith('✗')}
+            if cur_ids:
+                hist_ids.append(cur_ids)
+        suite_fail_churn = None
+        if len(hist_ids) >= 2:
+            first, last = hist_ids[0], hist_ids[-1]
+            suite_fail_churn = {'appeared': sorted(last - first), 'vanished': sorted(first - last)}
     pid = ''
     try:
         pid = subprocess.run(['systemctl', '--user', 'show', 'dsh-web.service', '-p', 'MainPID',
@@ -236,12 +276,20 @@ def main() -> int:
                      'parkedAnyTime': len(parked_trig)},
         'artifacts': {'commits': len(commits), 'productCommits': len(prod_commits),
                       'claimsOpenedOrTouched': sorted(cl_new), 'claimsClosed': sorted(cl_closed),
-                      'testEntriesNew': sorted(tp_new)},
+                      'testEntriesNew': sorted(tp_new),
+                      # 2026-09-13 15:1x: 结单数是**裸计数**, 必须带口径注(评审指出结单里混着"重写分母后关掉的告警")
+                      'claimsTouchedAnyRow': sorted(cl_touched),
+                      'claimsNewlyFirstSeen': len(cl_new),
+                      'claimsRementionedThisPeriod': len(set(cl_touched) - set(cl_new)),
+                      'countCaliber': ('计数口径: "新入账"=该 id 的**首次出现时刻**落在本期(不是末行 ts); '
+                                       '"结单"=末行 status ∈ {done,closed,retired} 且末行 ts 落在本期 —— '
+                                       '**裸计数不区分原因**: 其中可能含"改了读数口径后关掉"的条目, 不可当"问题已解决"的证据')},
         'goals': {'advances': goal_adv, 'idleHours': goal_idle},
         'cost': {'turnsConsumedByFrames': len(frames),
                  'artifactsPerFrame': round((len(commits) + len(cl_new) + len(cl_closed)) / max(len(frames), 1), 3)},
         'externalAnchors': {'gitHead': head, 'suiteVerdict': suite, 'mainPid': pid,
-                            'suiteTrendInPeriod': suite_trend, 'suiteFailureNames': suite_fail_ids},
+                            'suiteTrendInPeriod': suite_trend, 'suiteFailureNames': suite_fail_ids,
+                            'suiteFailureChurn': suite_fail_churn},
         'eras': {'frameThreeWayCaliberEffectiveFrom': '2026-09-13T12:05:00+08:00',
                  'note': ('帧三分口径(投递/停泊/未投递)自 12:05 起生效; 本期 periodEnd 若早于该时刻, 读数属'
                           '**旧口径时代**, 不可与新口径直接比 —— 这条由外部评审 2026-09-13 抓出')},
@@ -273,8 +321,9 @@ def main() -> int:
            '', '## B 落地产物', '',
            '| 项 | 值 |', '|---|---|',
            '| 提交 | %d(其中触及 packages/ %d) |' % (len(commits), len(prod_commits)),
-           '| 账本新开/变动 | %d |' % len(cl_new),
-           '| 账本结单 | %d |' % len(cl_closed),
+           '| 账本新入账(首次出现) | %d |' % len(cl_new),
+           '| 账本本期被重提(旧账) | %d |' % len(set(cl_touched) - set(cl_new)),
+           '| 账本结单(裸计数) | %d |' % len(cl_closed),
            '| 测试入账 | %d |' % len(tp_new),
            '', '## C 目标推进', '',
            '| 目标 | 本期推进 | 停滞(h) |', '|---|---|---|']
@@ -296,6 +345,11 @@ def main() -> int:
         '- git HEAD: %s' % head, '- 套件最近裁决: %s' % (suite or '(无)'), '- dsh-web MainPID: %s' % (pid or '(未知)'),
         '- 套件期内趋势: %s' % ('; '.join('%s %d通过/%d失败' % (x['ts'], x['pass'], x['fail']) for x in suite_trend) or '(本窗口内无裁决)'),
         '- 失败项身份(%d 条): %s' % (len(suite_fail_ids), '; '.join(suite_fail_ids) or '(无)'),
+        ('- **失败集换血**(不是同一把尺子): 新增 %s ｜ 消失 %s'
+         % ('; '.join((suite_fail_churn or {}).get('appeared') or []) or '(无)',
+            '; '.join((suite_fail_churn or {}).get('vanished') or []) or '(无)')) if suite_fail_churn else '',
+        '- 结单 %d 条是**裸计数**: 含"改了读数口径后关掉"的条目(如孵化空转告警), 不可当"问题已解决"的证据'
+        % len(cl_closed),
         '', '## F 本期**未证**项(不得被上面的计数盖掉)', '']
     md += ['- %s' % u for u in unproven]
     text = '\n'.join(md) + '\n'
