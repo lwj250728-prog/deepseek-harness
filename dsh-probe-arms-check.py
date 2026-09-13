@@ -126,6 +126,15 @@ def main() -> int:
             os.chmod(tmp, os.stat(reg_path).st_mode & 0o7777)
         os.replace(tmp, reg_path)
 
+    # 测完 arms 顺手把**绑定登记**刷新(tp-200): verifiedAt 跟着这次实测走 —— 语义就是"这些探针**刚被重验过**",
+    # 于是判据体后来变了而无人重验时, T230 的过期检查才有意义。best-effort, 失败不影响 arms 结论。
+    _bind = os.path.join(os.path.expanduser('~/dsh-fork'), 'dsh-probe-binding.py')
+    if args.write_arms and os.path.exists(_bind):
+        try:
+            subprocess.run([sys.executable, _bind, '--record'], capture_output=True, text=True, timeout=300)
+        except Exception as exc:
+            print('[arms] 绑定登记刷新失败(不影响本次结论): %s' % exc, file=sys.stderr)
+
     two_arm = sorted(g for g, r in results.items() if r['verdict'] == 'two-arm')
     single = sorted(g for g, r in results.items() if r['verdict'] == 'single-arm')
     other = sorted(g for g, r in results.items() if r['verdict'] not in ('two-arm', 'single-arm'))

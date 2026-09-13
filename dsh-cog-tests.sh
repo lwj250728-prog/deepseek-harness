@@ -9407,6 +9407,62 @@ assert any("旧A" in x for x in (churn.get("vanished") or [])), "换血的「消
 assert "失败集换血" in r.stdout, "md 里没渲染换血行"
 print("合成世界下: 身份 3 条(含窗外那条) / 新入账 1 与重提 1 同时给出 / 换血已披露")
 '
+# ── T230 双臂探针的有效性绑定(锚点/判据体/干净臂)(tp-200) ──
+# 由来: 探针的有效性只绑**命令**(probe-arms-baseline.json 顶层只有 at/twoArmCount), 不记录它变异了哪个片段、
+# 验证的是哪一版判据体 ⇒ 源码一改(尤其并发会话改同一批文件)就退化成「自身失效」而无人知。
+# 本组用**合成世界**(合成目标文件/探针/套件/登记簿, 全部注入临时目录)判五步: 基线绿 → 锚点漂移红 →
+# 判据体变了未重验红 → 重验回绿 → 干净臂红必须计「探针无效」。
+echo "[T230] 双臂探针的有效性绑定(锚点/判据体/干净臂)"
+t "双臂探针的有效性绑定: 锚点漂移/判据体过期/干净臂红 必须判红" python3 -c '
+import json, os, subprocess, sys, tempfile
+TOOL = os.path.expanduser("~/dsh-fork/dsh-probe-binding.py")
+Q, D1, D3 = chr(39), chr(34), chr(34) * 3
+TMP = tempfile.mkdtemp(prefix="t230-")
+TGT, PROBE, SUITE = (os.path.join(TMP, x) for x in ("target.py", "probe.sh", "suite.sh"))
+GF, BN = os.path.join(TMP, "guard-fire.json"), os.path.join(TMP, "bindings.json")
+FRAG = "def only_once():\n    return 42\n"
+NAME = "合成判据"
+B1 = "import os\nprint(os.environ.get(" + Q + "DSH_X" + Q + "))\n"
+B2 = "import os\nprint(" + Q + "changed" + Q + ")\n"
+TWO, BAD = {"mutant": 1, "clean": 0}, {"mutant": 1, "clean": 3}
+def w(path, text):
+    with open(path, "w", encoding="utf8") as fh:
+        fh.write(text)
+def world(body_text, arms):
+    w(TGT, "import sys\n" + FRAG + "\n")
+    w(PROBE, "#! /usr/bin/env bash\nNAME=" + D1 + NAME + D1 + "\nSRC=" + D1 + TGT + D1
+      + "\npython3 - \"$SRC\" <<" + Q + "MK" + Q + "\nold = " + D3 + FRAG + D3 + "\nMK\n")
+    suite_text(body_text)
+    w(GF, json.dumps({"guards": [{"guard": "TX", "mustFire": [{"assertion": NAME,
+        "command": "bash " + PROBE, "expectedExit": 1, "arms": arms}]}]}, ensure_ascii=False))
+    rec()
+def suite_text(body_text):
+    w(SUITE, "t " + D1 + NAME + D1 + " python3 -c " + Q + "\n" + body_text + Q + "\n")
+def rec():
+    subprocess.run([sys.executable, TOOL, "--record", "--guard-fire", GF, "--bindings", BN, "--suite", SUITE],
+                   capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=TMP), timeout=180)
+def chk():
+    r = subprocess.run([sys.executable, TOOL, "--check", "--guard-fire", GF, "--bindings", BN, "--suite", SUITE],
+                       capture_output=True, text=True, env=dict(os.environ, DSH_COG_DIR=TMP), timeout=300)
+    return r.returncode, (r.stdout + r.stderr)
+world(B1, TWO)
+rc, out = chk()
+assert rc == 0, "合成世界基线应绿, 实得 exit=%d: %s" % (rc, out[-200:])
+w(TGT, "import sys\n")
+rc, out = chk()
+assert rc == 1 and "锚点漂移" in out, "锚点漂移应判红, 实得 exit=%d: %s" % (rc, out[-200:])
+world(B1, TWO)
+suite_text(B2)
+rc, out = chk()
+assert rc == 1 and "探针过期" in out, "判据体变了未重验应判红, 实得 exit=%d: %s" % (rc, out[-200:])
+rec()
+rc, out = chk()
+assert rc == 0, "重验后应回绿, 实得 exit=%d: %s" % (rc, out[-200:])
+world(B2, BAD)
+rc, out = chk()
+assert rc == 1 and "探针无效" in out, "干净臂红应计探针无效, 实得 exit=%d: %s" % (rc, out[-200:])
+print("合成世界: 基线绿 / 锚点漂移红 / 体变未重验红 / 重验回绿 / 干净臂红计无效")
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
