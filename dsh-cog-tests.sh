@@ -8799,6 +8799,32 @@ r4 = run(build(True, True))
 assert r4.returncode == 2, "只登记了 restore 而池子没恢复, 判据没红(登记被当成了恢复)"
 print("恢复腿判据: 池仍干预⇒红 / 已恢复⇒绿 / 无记录⇒红 / 只登记未恢复⇒红")
 '
+# 2026-09-13 11:3x: 上面那条判据只**发现**缺口(每小时一次), 而腿的**排程**当年只活在瞬态 systemd-run 上
+# —— 崩溃把它带走后 27 小时里没有任何东西在执行恢复。故补一条: 腿必须由**持久 tick** 驱动, 且驱动器自己
+# 要有见证(日志)与台账登记(排程调用的脚本必须登记, 见 dsh-mechanism-inventory-check.py)。
+t "干预实验的腿必须由持久 tick 驱动(不得只靠瞬态定时器)" python3 -c '
+import json, os, subprocess, sys
+D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+REPO = os.path.expanduser("~/dsh-fork")
+LEGS = os.path.join(REPO, "dsh-intervention-legs.py")
+assert os.path.exists(LEGS), "腿驱动器不存在: " + LEGS
+ct = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30).stdout
+assert "dsh-intervention-legs.py" in ct, "腿驱动器未挂持久排程(cron) —— 崩溃会静默取消实验腿(cl-265 事故形态)"
+inv = os.path.join(D, "mechanism-inventory.json")
+assert os.path.exists(inv), "读不到机制台账(判据前提不成立): " + inv
+mech = json.load(open(inv, encoding="utf8")).get("mechanisms") or []
+assert any(str(x.get("script") or "").endswith("dsh-intervention-legs.py") for x in mech), "腿驱动器未在机制台账登记"
+log = os.path.join(D, "intervention-legs.log")
+assert os.path.exists(log), "腿驱动器日志不存在(从未产出过痕迹): " + log
+lines = [l for l in open(log, encoding="utf8", errors="replace").read().splitlines() if "[legs]" in l]
+assert lines, "腿驱动器日志里没有 footer 行(跑了但没留痕)"
+cron_lines = [l for l in lines if "origin=cron" in l]
+print("cron 行 %d 条; 最新: %s" % (len(cron_lines), (cron_lines[-1] if cron_lines else lines[-1])[:90]))
+r = subprocess.run([sys.executable, LEGS, "--dry-run"], capture_output=True, text=True, timeout=300)
+assert r.returncode == 0, "腿驱动器 dry-run 跑不动: " + (r.stderr or r.stdout)[-200:]
+assert "本轮执行 0" in r.stdout, "dry-run 竟然执行了腿(应当只报不跑): " + r.stdout[:200]
+print(r.stdout.strip().splitlines()[-1][:120])
+'
 # ── T220 "停驱"必须是被行为消费的状态, 而不是一句口头停止 ──
 # 起因(2026-09-13 11:2x, 用户指令"停止这个会话的驱动"): 驱动器(quiet-driver)一次只驱动**一个**目标会话
 # (`targetSessionId` + 运行时绑定文件), 所以"停驱"在实现上=**目标不是它** + **此后没有帧派给它**。
