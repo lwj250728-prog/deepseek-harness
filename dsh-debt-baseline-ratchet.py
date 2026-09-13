@@ -47,11 +47,17 @@ def load(path: str):
 
 
 def write_atomic(path: str, payload) -> None:
+    """原子写 + **保留权限位**(cl-332): 临时文件 + os.replace 会让新文件带上 umask 默认权限(常见 0600),
+    于是"可执行位丢了 / 别人读不了"这类**元数据破坏**会静默发生 —— 今晚实测三个脚本从 100755 变成 100644(-rw-------)。"""
     tmp = path + '.tmp'
     with open(tmp, 'w', encoding='utf8') as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=1)
         fh.flush()
         os.fsync(fh.fileno())
+    try:
+        os.chmod(tmp, os.stat(path).st_mode & 0o7777)     # 先继承原文件的权限
+    except Exception:
+        pass
     os.replace(tmp, path)
 
 

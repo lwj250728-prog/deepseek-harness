@@ -9908,6 +9908,10 @@ if _measured and set(failing) < set(known_f):
             json.dump(_b, _fh, ensure_ascii=False, indent=1)
             _fh.flush()
             os.fsync(_fh.fileno())
+        try:
+            os.chmod(_tmp, os.stat(BASE).st_mode & 0o7777)   # cl-332: 覆写必须保留权限位
+        except Exception:
+            pass
         os.replace(_tmp, BASE)
         known_f = set(failing)
         print("棘轮: failingSpecs %d → %d(已写回基线)" % (len(_b.get("failingSpecs") or []) or 0, len(failing)))
