@@ -162,6 +162,47 @@ for (const c of chains) {
   }
 }
 const looSit = loo.map(x => x.scoreSituation).filter(v => v > 0).sort((a, b) => a - b)
+
+// cl-363: **相对排名口径**的经验依据 —— 对"相关但新"的查询(留一法), 它的**真身链**是否明显领先次佳?
+// 若领先足够大 ⇒ "要求最佳链领先次佳 minLead"这道闸门能在保住真相关的同时拒掉"选谁都差不多"的情境。
+const looLead = []
+for (const item of loo) {
+  const qExp = byId.get(item.expId)
+  if (!qExp) continue
+  const qv = vec(String(qExp.sar?.situation ?? ''))
+  if (qv === null) continue
+  const perChain = []
+  for (const c of chains) {
+    const sits = (c.memberExpIds ?? []).map(id => byId.get(id)).filter(Boolean).map(e => String(e.sar?.situation ?? ''))
+    // 排除自身那条, 否则"真身链"必然拿满分(那是自我匹配, 不是检索能力)
+    const others = (c.memberExpIds ?? []).filter(id => id !== item.expId).map(id => byId.get(id)).filter(Boolean).map(e => String(e.sar?.situation ?? ''))
+    perChain.push({ chainId: c.chainId, self: sits.includes(String(qExp.sar?.situation ?? '')), score: maxCos(qv, others) })
+  }
+  perChain.sort((a, b) => b.score - a.score)
+  const mine = perChain.find(x => x.self)
+  const rival = perChain.find(x => !x.self)?.score ?? 0
+  looLead.push({ chainId: item.chainId, ownScore: mine?.score ?? 0, rivalScore: rival, lead: (mine?.score ?? 0) - rival,
+    ownWins: (mine?.score ?? 0) > rival })
+}
+// cl-363b: 排名信号对照 —— 成员文本(同字段) vs 链键(目标+蒸馏原则)。哪个更能认出"自己的链"?
+const looKeyLead = []
+for (const item of loo) {
+  const qExp = byId.get(item.expId)
+  if (!qExp) continue
+  const qv = vec(String(qExp.sar?.situation ?? ''))
+  if (qv === null) continue
+  const perChain = chains.map(c => ({
+    chainId: c.chainId,
+    self: (c.memberExpIds ?? []).includes(item.expId),
+    key: maxCos(qv, keyTexts.get(c.chainId) ?? []),
+  })).sort((a, b) => b.key - a.key)
+  const mine = perChain.find(x => x.self)
+  const rival = perChain.find(x => !x.self)?.key ?? 0
+  looKeyLead.push({ own: mine?.key ?? 0, rival, wins: (mine?.key ?? 0) > rival })
+}
+const keyWinRate = looKeyLead.length === 0 ? null : looKeyLead.filter(x => x.wins).length / looKeyLead.length
+const leadSorted = looLead.map(x => x.lead).sort((a, b) => a - b)
+const ownWinRate = looLead.length === 0 ? null : looLead.filter(x => x.ownWins).length / looLead.length
 // 域外对照也用同字段算一遍: 别的链成员的**情境**对当前查询
 const outDomSit = []
 for (const c of chains) {
@@ -208,6 +249,15 @@ const report = {
       relatedNew_situationVsSituation: { n: looSit.length, min: pct(looSit, 0), p10: pct(looSit, 0.1), p50: pct(looSit, 0.5) },
       unrelated_situationVsSituation: { n: outDomSit.length, p50: pct(outDomSit, 0.5), p90: pct(outDomSit, 0.9), p99: pct(outDomSit, 0.99) },
     },
+    relativeRanking: {
+      n: leadSorted.length,
+      ownChainWins: ownWinRate,
+      leadP10: pct(leadSorted, 0.1), leadP25: pct(leadSorted, 0.25), leadP50: pct(leadSorted, 0.5), leadP90: pct(leadSorted, 0.9),
+      // 各 minLead 门槛下: 真相关查询还能过闸的比例(召回) —— 用它判断"要求领先"是否安全
+      keepRateAt: Object.fromEntries([0, 0.02, 0.05, 0.1, 0.15].map(t => [t, leadSorted.length === 0 ? null : Number((leadSorted.filter(v => v >= t).length / leadSorted.length).toFixed(3))])),
+      // 排名信号对照: 用**链键(目标+蒸馏原则)**排名时, 真身链胜率是多少(与成员路 0.714 对比)
+      ownChainWinsByKey: keyWinRate,
+    },
     separation: {
       // 域外 p99 与留一法 p10/min 之间的关系: p99 < min(LOO) ⇒ 存在能"全收相关、几乎不收不相关"的门槛
       outOfDomainP99: pct(outDom, 0.99),
@@ -230,6 +280,10 @@ else {
   console.log(`  域内成员分(真是这条链的情境) n=${d.inDomain.n}: p10=${d.inDomain.p10} p50=${d.inDomain.p50} p90=${d.inDomain.p90}`)
   console.log(`  域外成员分(不是这条链的)     n=${d.outOfDomain.n}: p50=${d.outOfDomain.p50} p90=${d.outOfDomain.p90} p99=${d.outOfDomain.p99}`)
   console.log(`  每查询"最佳-次佳"差: p50=${d.bestMinusSecond.p50} p90=${d.bestMinusSecond.p90} | 各阈值下的过阈对数: ${JSON.stringify(d.pairsClearingAt)}`)
+  const rr = d.relativeRanking
+  console.log(`  **相对排名**(相关但新的查询, 真身链 vs 次佳): 真身链胜率 ${rr.ownChainWins} | 领先量 p10=${rr.leadP10} p25=${rr.leadP25} p50=${rr.leadP50} p90=${rr.leadP90}`)
+  console.log(`  各 minLead 下真相关查询的保留率(召回): ${JSON.stringify(rr.keepRateAt)}`)
+  console.log(`  排名信号对照: 成员路真身胜率 ${rr.ownChainWins} vs **链键(目标+原则)路** ${rr.ownChainWinsByKey}`)
   const fa = d.fieldAlignment
   console.log(`  字段对拍照: 相关但新 情境vs成员action → min ${fa.relatedNew_situationVsAction.min} p50 ${fa.relatedNew_situationVsAction.p50}` +
     ` | 相关但新 情境vs情境 → min ${fa.relatedNew_situationVsSituation.min} p50 ${fa.relatedNew_situationVsSituation.p50}` +
