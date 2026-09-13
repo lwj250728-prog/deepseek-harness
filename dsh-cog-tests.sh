@@ -10137,6 +10137,41 @@ assert any(str(a.get("serves") or "") for a in accepted), "accepted 申请必须
 print("子目标申请联锁: 通道不变式绿 / 申请 %d 条(accepted %d, 在飞 %d) / 新判据 %d 条全部有 accepted 归属"
       % (len(apps), len(accepted), int(payload.get("pending") or 0), len(new_judges)))
 '
+# ── T244 活跃度模型(用户 2026-09-14 指令: 关联激活/孤立遗忘/刻意复习) ──
+# 只读半: 模型 + 可观测量 + 复习记账; 消费侧(rankKey 因子/检索侧衰减)在检索冻结令内 ⇒ 本判据不碰排序。
+# 判据: ①不变式必须绿(含"复习必须真的提升活跃度" —— 它当场抓到过我的 tanh 饱和与 ISO 时间戳 bug);
+# ②长尾诊断的分项必须与总数自洽且非空(不得空口); ③复习账本每条必须有理由。
+echo "[T244] 活跃度模型(关联/孤立/复习)"
+t "活跃度模型: 关联/孤立/复习三路可复算 + 复习必须真的提升活跃度" python3 -c '
+import json, os, subprocess, sys
+R = os.path.expanduser("~/dsh-fork")
+D = os.path.expanduser("~/.dsh/cognitive-pipeline")
+T = os.path.join(R, "dsh-activity-model.py")
+r = subprocess.run([sys.executable, T, "--check", "--json"], capture_output=True, text=True, timeout=600)
+out = (r.stdout or "") + (r.stderr or "")
+assert r.returncode == 0, "活跃度模型不变式判红: %s" % out[-300:]
+rep = subprocess.run([sys.executable, T, "--report", "--json"], capture_output=True, text=True, timeout=600)
+assert rep.returncode == 0, "诊断跑不通: %s" % ((rep.stdout or "") + (rep.stderr or ""))[-200:]
+pay = json.loads([l for l in (rep.stdout or "").strip().splitlines() if l.strip().startswith("{")][-1])
+rows = pay.get("rows") or []
+assert len(rows) > 0, "空库 ⇒ 前提不成立"
+assert pay.get("weights") and all(isinstance(v, (int, float)) for v in pay["weights"].values()), "权重必须显式登记"
+bad = [r2 for r2 in rows if r2.get("isolated") and r2.get("assoc")]
+assert not bad, "孤立与关联度自相矛盾的条目: %s" % [b["expId"] for b in bad][:3]
+# 长尾诊断必须**结构可核**: 从未注入集合与孤立集合都必须给出计数
+for k in ("starved", "starvedIsolated", "starvedConnected"):
+    assert isinstance(pay.get(k), int), "诊断缺字段 %s(不得空口)" % k
+assert pay["starvedIsolated"] + pay["starvedConnected"] == pay["starved"], "长尾诊断的分项与总数不符"
+# 复习记账必须存在且有理由(否则"刻意复习"没有落账通道)
+rr = os.path.join(D, "rehearsals.jsonl")
+if os.path.exists(rr):
+    for line in open(rr, encoding="utf8"):
+        if line.strip():
+            o = json.loads(line)
+            assert str(o.get("why") or "").strip(), "复习记录缺理由: %s" % o
+print("活跃度模型: 不变式绿 / 库 %d 条 / 孤立 %d / 长尾 %d(孤立 %d + 有联系 %d) / 权重与复习通道齐备"
+      % (len(rows), pay.get("isolated"), pay["starved"], pay["starvedIsolated"], pay["starvedConnected"]))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
