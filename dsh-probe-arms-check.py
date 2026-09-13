@@ -105,6 +105,17 @@ def main() -> int:
     frozen = set(base.get('frozenSingleArm') or [])
     frozen_two_arm = int(base.get('twoArmCount') or 0)
 
+    # **共享变异锁**(cl-316 ②): 探针会把**变异标记**写进受版本控制的源码; 退化检查(T231)也会改同一批文件
+    # (`dsh-probe-binding.py`/`dsh-stage-summary.py` 两边都动) ⇒ 并发会互相踩出**假红**(像"变异锚点失效")。
+    # 锁按"变异"这件事本身共享, 而不是每个机制一把。取不到就等(阻塞), 因为 arms 是排程作业, 等一会儿比报错好。
+    _lock = None
+    try:
+        import fcntl as _fcntl
+        _lock = open(os.path.join(os.path.expanduser('~/.dsh/cognitive-pipeline'), '.mutation.lock'), 'w')
+        _fcntl.flock(_lock, _fcntl.LOCK_EX)
+    except Exception as exc:
+        print('[arms] 共享变异锁取不到(不阻塞测量): %s' % exc, file=sys.stderr)
+
     results = {}
     for key, gid, mf in entries:
         expected = int(mf.get('expectedExit', 1))

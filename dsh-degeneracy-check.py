@@ -98,10 +98,11 @@ def check(args) -> int:
     lock = None
     if fcntl is not None:
         try:
-            lock = open(os.path.join(cog_dir(), '.degeneracy-check.lock'), 'w')
+            # **共享**变异锁: 与 arms 检查用同一把(cl-316 ②) —— 变异是按**文件**冲突的, 不是按机制。
+            lock = open(os.path.join(cog_dir(), '.mutation.lock'), 'w')
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            print('%s 已有另一个退化检查在跑(取不到锁) ⇒ 本次不重复施加变异' % TAG, file=sys.stderr)
+            print('%s 取不到共享变异锁(另一个变异机制在跑) ⇒ 本次不施加变异' % TAG, file=sys.stderr)
             return 3
         except Exception:
             lock = None

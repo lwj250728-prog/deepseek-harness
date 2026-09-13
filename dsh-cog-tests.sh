@@ -9487,6 +9487,63 @@ kinds = sorted({c.get("kind") for c in caught})
 assert len(kinds) >= 3, "退化种类只有 %d 种(期望 >=3: 判别量为空/世界未绑定/注入点被忽略)" % len(kinds)
 print("退化自证: 合成世界判据 %d 个 / 登记 %d 条 / 抓住 %d 条 / 种类 %s" % (len(synthetic), entries, len(caught), kinds))
 '
+# ── T232 变异体泄漏闸门(cl-316) ──
+# 由来: 我的两套验证机制(14 条双臂探针 + T231 退化检查)都会**临时把 MUTANT 标记写进受版本控制的源码**再复原,
+# 而仓库里没有任何"不得提交变异体"的闸门, 另一会话又握着 604 个删除随时可能 git add -A && commit ⇒
+# 一次变异窗口撞上提交就会把变异体当代码提交/部署, 而产物看上去完全正常。
+# 判据: 干净树必须放行; **空合法容器清单必须把探针脚本报成泄漏**(证明清单被消费而非硬编码);
+# 植入标记必须判泄漏并指名该文件; 复原后必须回到干净(哈希比对)。
+echo "[T232] 变异体泄漏闸门"
+t "变异体不得被提交: 干净放行 + 清单确被消费 + 植入即判泄漏并指名" python3 -c '
+import hashlib, json, os, subprocess, sys, tempfile
+GATE = os.path.expanduser("~/dsh-fork/dsh-mutant-gate.py")
+TARGET = os.path.expanduser("~/dsh-fork/dsh-stage-summary.py")
+def run(allow=None):
+    cmd = [sys.executable, GATE, "--check", "--json"]
+    if allow:
+        cmd += ["--allow", allow]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    payload = {}
+    for x in reversed([y for y in (r.stdout or "").strip().splitlines() if y.strip()]):
+        try:
+            payload = json.loads(x)
+            break
+        except Exception:
+            continue
+    return r.returncode, payload, (r.stdout or "") + (r.stderr or "")
+rc, payload, out = run()
+assert rc == 0, "干净树上闸门应放行, 实得 exit=%d: %s" % (rc, out[-300:])
+containers = int(payload.get("containers") or 0)
+scanned = int(payload.get("scanned") or 0)
+assert containers >= 3, "合法容器只有 %d 条 ⇒ 清单没被消费(0 条时探针脚本会被误报)" % containers
+assert scanned > 1000, "只扫了 %d 个文件 ⇒ 扫描口径坏了(不得用小数假装通过)" % scanned
+empty = os.path.join(tempfile.mkdtemp(prefix="t232-"), "allow.json")
+open(empty, "w", encoding="utf8").write(json.dumps({"containers": []}))
+rc2, payload2, out2 = run(empty)
+n_leak2 = len(payload2.get("leaks") or [])
+assert rc2 == 1 and n_leak2 >= 5, "空清单下必须把探针脚本报成泄漏(证明清单被消费), 实得 exit=%d leaks=%d" % (rc2, n_leak2)
+original = open(TARGET, encoding="utf8").read()
+base = hashlib.sha256(original.encode("utf8")).hexdigest()
+try:
+    with open(TARGET, "a", encoding="utf8") as fh:
+        fh.write("\n# MUTANT: 泄漏自检\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    rc3, payload3, out3 = run()
+    leaked = [x.get("file") for x in (payload3.get("leaks") or [])]
+    assert rc3 == 1, "植入 MUTANT 标记后闸门仍放行(exit=%d) ⇒ 泄漏不会被抓" % rc3
+    assert any("dsh-stage-summary.py" in str(x) for x in leaked), "泄漏清单没指名目标文件: %s" % leaked
+finally:
+    with open(TARGET, "w", encoding="utf8") as fh:
+        fh.write(original)
+        fh.flush()
+        os.fsync(fh.fileno())
+now = hashlib.sha256(open(TARGET, "rb").read()).hexdigest()
+assert now == base, "复原失败: 目标文件哈希变了 —— 必须先修好这个再谈判据"
+rc4, _, _ = run()
+assert rc4 == 0, "复原后闸门仍判泄漏(exit=%d) ⇒ 残留" % rc4
+print("MUTANT 闸门: 干净放行 / 空清单报泄漏 %d 条(证明清单被消费) / 植入即判泄漏并指名 / 复原后回干净" % n_leak2)
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
