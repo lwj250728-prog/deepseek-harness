@@ -175,8 +175,12 @@ def raise_env_alert(n: int) -> None:
     rows = []
     if os.path.exists(p):
         rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
-    existing = next((r for r in reversed(rows)
-                     if r.get("id") == "cl-deploy-intent-env" and r.get("status") not in TERMINAL), None)
+    # cl-343(2026-09-14 04:1x): 末行 last-wins。旧写法扫"任意一条非终态行", 账本 append-only
+    # ⇒ 一条早已被 done 覆盖的旧 open 行会被反复"重新打开/关闭", 每轮追加一行(同文件 last_row_for
+    # 的文档里已写死这条教训, 只是没传播到这两个 closer)。
+    existing = last_row_for(rows, "cl-deploy-intent-env")
+    if existing is not None and existing.get("status") in TERMINAL:
+        existing = None                     # 末行已终态 ⇒ 本次是**新**告警, 不复用旧行残留字段
     row = dict(existing or {})
     row.update({
         "id": "cl-deploy-intent-env", "status": "open",
@@ -194,10 +198,10 @@ def close_env_alert() -> None:
     if not os.path.exists(p):
         return
     rows = [json.loads(l) for l in open(p, encoding="utf8") if l.strip()]
-    open_row = next((r for r in reversed(rows)
-                     if r.get("id") == "cl-deploy-intent-env" and r.get("status") not in TERMINAL), None)
-    if open_row is None:
-        return
+    # cl-343: 同上 —— 判据必须是"末行非终态", 不是"历史里存在非终态行"。
+    open_row = last_row_for(rows, "cl-deploy-intent-env")
+    if open_row is None or open_row.get("status") in TERMINAL:
+        return                              # 已是终态(或无记录): 关闭幂等, 不得再追加一行
     row = dict(open_row)
     row.update({"status": "done", "doneNote": "自检已恢复(能读到服务时间戳)", "ts": now_iso()})
     with open(p, "a", encoding="utf8") as f:

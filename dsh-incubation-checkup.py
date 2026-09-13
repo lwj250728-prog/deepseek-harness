@@ -4,8 +4,11 @@
 由来(cl-211): 这项体检原先是"每次唤醒跑一次", 但它连续两次通过 ⇒ 通过时每次唤醒都在重复同一件事,
 是"仪表替代动作"的另一种形态。故按 cl-211 的自我限制条款降频为 **cron 每 2h**, 把唤醒槽位让回真实动作。
 
-判据(按每目标的 lastActionAt 分界, 改写即重置计时):
-  某目标在**自己的 nextAction 生效之后** 24h 内 唤醒 >=5 且采纳 0 ⇒ 违规, 写言行账本告警(自武装)。
+判据(固定 24h 日历窗; 2026-09-14 cl-344 修正):
+  某目标在**固定 24h 日历窗**内 可计唤醒(投递且非停泊) >=5 且采纳 0 ⇒ 违规, 写言行账本告警;
+  可计唤醒 <5 ⇒ 报"样本不足(covered)", 不算通过。
+  旧口径用"lastActionAt 之后"分界, 但 lastActionAt 被目标**自己的采纳**前移 ⇒ 窗口被成功清零,
+  判据只剩"不可测"(实测 219 个逐小时窗口开火 0 次), 故弃用。
 结果总是追加进 incubation-stats.md(不覆盖历史)。
 退出码: 0 = 无违规; 1 = 有违规(已写告警); 3 = 读数失败
 """
@@ -81,7 +84,14 @@ def main() -> int:
         gw = [(d, r) for d, r in wakes if r.get("goalId") == gid]
         g = latest.get(gid) or {}
         la = dt(g.get("lastActionAt"))
-        post = [(d, r) for d, r in gw if la and d > la]
+        # ── 窗口修正(cl-344, 2026-09-14 04:1x, 由"判据还开得动火吗"这一追问驱动) ──
+        # 旧口径 post = "lastActionAt 之后": lastActionAt 在目标**每次行动时**前移, 而采纳正是一种行动
+        # ⇒ 一个正在转化的目标被自己的成功清零窗口, 可计唤醒恒 <5 ⇒ 只剩"不可测"一条路。实测:
+        # 72h 内逐小时回测 219 个 (goal×hour) 窗口, 判据开火 **0** 次; 而口径改写前的
+        # 09-12T10:00→09-13T10:00 它每 2h 开火共 13 次(分母含停泊唤醒, 停泊唤醒按设计永不采纳
+        # ⇒ 结构性假阳性)。两者是同一混淆(停泊≠空转)的两个产物 ⇒ 改为**固定 24h 日历窗**,
+        # 与"改写即重置"脱钩。判据的可测性守卫仍是 pw < MIN_WAKES, 但其含义从"恒真"变回"真样本不足"。
+        post = gw
         delivered = [(d, r) for d, r in post if not r.get("skipped")]
         parked = [(d, r) for d, r in delivered if parked_at(gid, d)]
         live = [(d, r) for d, r in delivered if not parked_at(gid, d)]
@@ -91,18 +101,21 @@ def main() -> int:
                      len(post) - len(delivered), la.strftime("%H:%M") if la else "无", pw, pa))
         if la and pw >= MIN_WAKES and pa == 0:
             viol.append(gid)
-    # 不可测(covered): 有 lastActionAt 但可计唤醒 < MIN_WAKES ⇒ 分母为空, 判据**不可能**触发。
+    # 不可测(covered): 窗口内**可计唤醒** < MIN_WAKES ⇒ 分母太小, 判据**不可能**有意义地触发。
     # 它既不等于"通过"(没测到), 也不能触发结单(结单=声称"已恢复转化", 而分母为空时无从说起)。
     # 由来(cl-342): 04:00 体检在 pw=0/0/0 下仍打"通过", 且每 2h 给告警补写一条假结单
     # "下次体检无违规(唤醒已恢复转化)"(24h 内无任何可计唤醒转化) ⇒ 盲读数写假结单。
+    # 由来(cl-344): 窗口由 lastActionAt 分界改为固定日历窗后, 这条守卫仍是**唯一**的可测性条件,
+    # 但含义变了 —— 旧窗下它恒真(可计唤醒恒 <5 ⇒ 看不见任何状态), 新窗下它只在真的样本太小时为真
+    # (实测三目标可计唤醒 8/8/29 ⇒ 全部可测)。故不另设样本量旋钮(未登记的旋钮本身就是债)。
     untestable = [gid for gid, _st, _tw, _dlv, _pk, _sk, la, pw, _pa in rows
-                  if la and pw < MIN_WAKES]
+                  if (not la) or pw < MIN_WAKES]
     verdict = "不通过" if viol else ("通过" if not untestable else "不可测(covered)")
 
     sec = ["", "---", "",
-           "## 转化率体检(origin=%s，%s，近 %dh；按 lastActionAt 分界；口径 2026-09-13 修正)" % (
+           "## 转化率体检(origin=%s，%s，固定 %dh 日历窗；口径 2026-09-13 修正 + 2026-09-14 窗口修正 cl-344)" % (
                ORIGIN, now.strftime("%m-%d %H:%M"), WINDOW_H), "",
-           "| 目标 | 池状态 | 触发行 | 投递 | 停泊期投递 | 未投递 | 改写时刻 | 可计唤醒/采纳 |",
+           "| 目标 | 池状态 | 触发行 | 投递 | 停泊期投递 | 未投递 | 末次行动 | 可计唤醒/采纳 |",
            "|---|---|---|---|---|---|---|---|"]
     for gid, st, tw, dlv, pk, sk, la, pw, pa in rows:
         sec.append("| %s | %s | %d | %d | %d | %d | %s | %d / **%d** |" % (gid, st, tw, dlv, pk, sk, la, pw, pa))
@@ -110,9 +123,11 @@ def main() -> int:
                  "停泊期的唤醒注定不能转化(驱动侧不驱动它) ⇒ 单列不进分母"),
             "- 已知偏差(漏报方向): 采纳用插件的 `adopted` 标记, 它只在**被唤醒的那个回合**里比对池快照 ⇒ "
             "推进若发生在别的会话/别的回合, 该标记看不见(会让告警**迟报**, 不会造成误报)",
-            "", "**判据**（改写后 24h 内不得出现'**可计**唤醒 ≥%d 且采纳 0'）：**%s**%s" % (
+            "- 窗口(cl-344): 固定 24h 日历窗。旧口径「lastActionAt 之后」会被目标自己的成功(采纳即行动)清零 ⇒ "
+            "可计唤醒恒 <5, 判据只剩「不可测」; 实测 219 个逐小时窗口开火 0 次, 而分母含停泊唤醒的旧旧口径每 2h 假阳性。",
+            "", "**判据**（固定 24h 窗内: **可计**唤醒 ≥%d 且采纳 0 ⇒ 违规）：**%s**%s" % (
         MIN_WAKES, verdict, (" —— 违规: " + ", ".join(viol)) if viol else ""),
-            ("- **不可测(covered)**: %s 的可计唤醒 < %d ⇒ 判据在构造上不可能触发, 本行**不是通过**;"
+            ("- **样本不足(covered)**: %s 的可计唤醒 < %d ⇒ 分母太小, 本行**不是通过**;"
              " 要让它可测须先修投递(见 投递/触发行 列)" % (", ".join(untestable), MIN_WAKES)) if untestable else "", ""]
     with open(STATS, "a", encoding="utf8") as f:
         f.write("\n".join(sec) + "\n")
