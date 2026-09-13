@@ -110,6 +110,9 @@ def write_witness() -> int:
     bak = target + '.witness-bak'
     shutil.copy(target, bak)
     falsifiable, mpassed, mfailed, mwhy = False, -1, -1, ''
+    # 按**文件**上锁(cl-322 同族): 让闸门能把"本见证正在植入的变异"识别为 **in-flight**(锁被持有),
+    # 而不是"仓库里有一处泄漏的变异标记"。取不到锁不阻塞(见证自身的判据不依赖它)。
+    _lock = _mutation_lock(target)
     try:
         text = open(target, encoding='utf8').read()
         if text.count(MUTANT_OLD) != 1:
@@ -120,6 +123,11 @@ def write_witness() -> int:
             falsifiable = mfailed > 0
     finally:
         shutil.move(bak, target)
+        try:
+            if _lock is not None:
+                _lock.close()
+        except Exception:
+            pass
     if not falsifiable:
         print('[witness] **注入变异后测试没转红**(失败 %s): 覆盖不可证伪 ⇒ 不写见证' % mfailed, file=sys.stderr)
         return 1
@@ -164,6 +172,26 @@ def check() -> int:
     print('[witness] 覆盖见证有效: %d passed, 可证伪=true, %d 个文件哈希一致(记于 %s)'
           % (w.get('passed'), len(WATCHED), str(w.get('at'))[:19]))
     return 0
+
+
+
+def _mutation_lock(path: str):
+    """给"我要临时改这个受版本控制的文件"这件事按**文件**上锁(cl-322 同族)。
+
+    为什么必须: 闸门(dsh-mutant-gate.py)会扫全树找变异标记; 本见证把 MUTANT_OLD 植入 agent-lookup.ts 的这段时间里,
+    若不持锁, 闸门**无法区分"在飞的变异"与"泄漏的变异"** ⇒ 会把它读成真泄漏(T232 判红)。持锁后闸门的
+    in-flight 识别才生效(锁文件存在 + 拿不到 LOCK_EX ⇒ 在飞)。
+    取不到锁不阻塞(返回 None), 因为见证本身的判据不依赖它。
+    """
+    try:
+        import fcntl, hashlib
+        d = os.path.join(os.path.expanduser('~/.dsh/cognitive-pipeline'), '.mutation-locks')
+        os.makedirs(d, exist_ok=True)
+        fh = open(os.path.join(d, hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:16] + '.lock'), 'w')
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        return fh
+    except Exception:
+        return None
 
 
 def main() -> int:
