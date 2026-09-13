@@ -417,6 +417,55 @@ describe('cognitive-inject priming', () => {
     }
   })
 
+  it('serves at most maxPerSession chains per session (链是大块头, 不许慢慢吃预算; cl-358)', async () => {
+    // injectCooldownMs: 0 ⇒ 第二回合的经验侧仍会发生注入(否则"第二回合没有链"是空过, 什么都证明不了)。
+    const { ctx, teardown } = await mount({ injectCooldownMs: 0 })
+    try {
+      // 两条**都**与情境匹配的不同链: 默认 maxPerSession=1 ⇒ 本会话只许服务一条。
+      for (const [chain, prefix] of [['chain-a', '甲'], ['chain-b', '乙']] as const) {
+        seedExperience(ctx.cognitivePipeline.store, `exp_${prefix}1`, '服务重启后需要验证恢复', `重启服务并验证${prefix}`, '恢复成功', undefined, undefined, chain)
+        seedExperience(ctx.cognitivePipeline.store, `exp_${prefix}2`, '服务重启后需要验证恢复', `查看日志确认${prefix}`, '确认无异常', undefined, undefined, chain)
+        seedExperience(ctx.cognitivePipeline.store, `exp_${prefix}3`, '服务重启后需要验证恢复', `跑一次冒烟${prefix}`, '通过', undefined, undefined, chain)
+        await ctx.cognitivePipeline.consolidateChain(chain, '服务重启后验证恢复')
+      }
+      // 第二回合的"经验侧"候选: 不在任何链里, 用来证明**第二回合确实发生了一次注入**(否则"没有链"是空过的)。
+      seedExperience(ctx.cognitivePipeline.store, 'exp_free', '服务重启后需要验证恢复', '再确认一次端口占用', '恢复成功')
+      const { agent, session } = stubAgent('chain-cap')
+      session.append('turn/start', { turn: 1 })
+      const first = await fire(ctx, agent, 1, 1, '服务重启后需要验证恢复')
+      expect(first.some(text => text.includes('【经验链参考】'))).toBe(true)
+      const second = await fire(ctx, agent, 1, 2, '服务重启后需要验证恢复')
+      // 前提: 第二回合真的有注入(经验块在), 否则下面那句"没有链"不能说明任何事。
+      expect(second.some(text => text.includes('【认知经验参考】'))).toBe(true)
+      expect(second.some(text => text.includes('【经验链参考】'))).toBe(false)
+      expect(ctx.cognitivePipeline.store.injectionsSnapshot().filter(r => r.chainId !== null)).toHaveLength(1)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('serves a second chain when maxPerSession is raised (上限是配置, 不是硬编码)', async () => {
+    const { ctx, teardown } = await mount({ injectCooldownMs: 0, chain: { maxPerSession: 2 } })
+    try {
+      for (const [chain, prefix] of [['chain-a', '甲'], ['chain-b', '乙']] as const) {
+        seedExperience(ctx.cognitivePipeline.store, `exp_${prefix}1`, '服务重启后需要验证恢复', `重启服务并验证${prefix}`, '恢复成功', undefined, undefined, chain)
+        seedExperience(ctx.cognitivePipeline.store, `exp_${prefix}2`, '服务重启后需要验证恢复', `查看日志确认${prefix}`, '确认无异常', undefined, undefined, chain)
+        seedExperience(ctx.cognitivePipeline.store, `exp_${prefix}3`, '服务重启后需要验证恢复', `跑一次冒烟${prefix}`, '通过', undefined, undefined, chain)
+        await ctx.cognitivePipeline.consolidateChain(chain, '服务重启后验证恢复')
+      }
+      seedExperience(ctx.cognitivePipeline.store, 'exp_free', '服务重启后需要验证恢复', '再确认一次端口占用', '恢复成功')
+      const { agent, session } = stubAgent('chain-cap-2')
+      session.append('turn/start', { turn: 1 })
+      await fire(ctx, agent, 1, 1, '服务重启后需要验证恢复')
+      const second = await fire(ctx, agent, 1, 2, '服务重启后需要验证恢复')
+      expect(second.some(text => text.includes('【认知经验参考】'))).toBe(true)
+      expect(second.some(text => text.includes('【经验链参考】'))).toBe(true)
+      expect(ctx.cognitivePipeline.store.injectionsSnapshot().filter(r => r.chainId !== null)).toHaveLength(2)
+    } finally {
+      await teardown()
+    }
+  })
+
   it('does NOT serve a chain whose GOAL only shares generic wording (薄边不算命中, cl-356)', async () => {
     const { ctx, teardown } = await mount()
     try {

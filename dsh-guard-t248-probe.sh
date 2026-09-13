@@ -3,6 +3,7 @@
 # 两个变异体必须各自让判据转红:
 #   A 链检索被关掉(chain.enabled -> false)  ⇒ 链永远不被服务 ⇒ 服务类用例红
 #   B 注入记录不带 chainId                   ⇒ 结算侧折不到链 ⇒ hitCount/citedCount 恒 0(回到原病)
+#   C 忽略会话级条数上限(链是大块头)          ⇒ 同一会话把多条链都塞进上下文 ⇒ 预算被吃
 # 干净臂(DSH_PROBE_CLEAN=1): 不改 ⇒ T248 必绿。
 set -uo pipefail
 NAME="经验链进入注入: 能被找到 + 被渲染 + 引用回填到链账本"
@@ -24,7 +25,7 @@ restore() { cp -p "$BAK" "$SRC"; }
 trap 'restore; rm -f "$BAK"' EXIT
 
 survived=""
-for M in A B; do
+for M in A B C; do
   python3 - "$SRC" "$M" <<'MK' || exit 3
 import sys
 p, which = sys.argv[1], sys.argv[2]
@@ -34,6 +35,8 @@ REPL = {
            "      ? null  /* MUTANT A: 链检索被关掉 */")],
     "B": [("      ...chainHit === null ? {} : { chainId: chainHit.chainId },",
            "      /* MUTANT B: 注入记录不再带 chainId */")],
+    "C": [("  if (served.size >= config.maxPerSession) return null",
+           "  if (false) return null  /* MUTANT C: 忽略会话级条数上限 */")],
 }[which]
 for old, new in REPL:
     assert s.count(old) == 1, "结构变了, 探针自身失效(%s): %r" % (which, old[:50])
@@ -49,5 +52,5 @@ MK
 done
 
 if [ -n "$survived" ]; then echo "变异体$survived 存活 ⇒ 判据对这些缺陷无区分力" >&2; exit 4; fi
-echo "[guard-fire] FIRED T248: 链检索关掉 / 注入记录丢 chainId 都被判据抓住" >&2
+echo "[guard-fire] FIRED T248: 链检索关掉 / 注入记录丢 chainId / 忽略会话上限 都被判据抓住" >&2
 exit 1

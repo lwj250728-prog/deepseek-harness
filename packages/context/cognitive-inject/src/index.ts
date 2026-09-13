@@ -149,6 +149,10 @@ export interface ChainInjectionConfig {
    *  抽样显示它们靠**通用词重合**(如"检索/机制")过阈 —— 短文本的偶然重合比成员文本更容易"撞"。
    *  故: 成员键达阈值即可, 链自身的语义要达阈值+本余量(真正"换个说法问同一件事"时该分数接近 1, 不受影响)。 */
   goalMargin?: number
+  /** cl-358: **每个会话最多服务几条链**(默认 1)。链段约 900 字符, 而 topK 只有 1~2 条经验(cl-162 实测加宽会降采纳),
+   *  链是"大块头"; 同会话内每链只服务一次(已有)仍允许一个长会话把 7 条链各注入一次 ⇒ 预算被慢慢吃掉。
+   *  先卡在 1, 等 cl-354 仪表量出链的引用率与成本后再谈放宽(放宽是配置, 不需要改代码)。 */
+  maxPerSession?: number
 }
 
 /** Pre-input review sub-configuration. */
@@ -193,7 +197,8 @@ export const Config: z<Config> = z.object({
     depth: z.number().step(1).min(0).max(5).default(1),
     maxChars: z.number().step(1).min(200).max(4000).default(900),
     goalMargin: z.number().min(0).max(0.5).default(0.05),
-  }).default({ enabled: true, minSimilarity: 0.4, depth: 1, maxChars: 900, goalMargin: 0.05 }),
+    maxPerSession: z.number().step(1).min(0).max(20).default(1),
+  }).default({ enabled: true, minSimilarity: 0.4, depth: 1, maxChars: 900, goalMargin: 0.05, maxPerSession: 1 }),
   failureThresholdFactor: z.number().min(0).max(1).default(0.6),
   failureTopK: z.number().step(1).min(1).max(10).default(3),
   contextDepth: z.number().step(1).min(1).max(20).default(4),
@@ -249,7 +254,7 @@ export interface ResolvedConfig {
   readonly triggerBoost: number
   readonly review: ResolvedReviewConfig
   /** cl-351: 链检索/服务(默认开启, 见 Config.chain)。 */
-  readonly chain: { readonly enabled: boolean, readonly minSimilarity: number, readonly depth: number, readonly maxChars: number, readonly goalMargin: number }
+  readonly chain: { readonly enabled: boolean, readonly minSimilarity: number, readonly depth: number, readonly maxChars: number, readonly goalMargin: number, readonly maxPerSession: number }
 }
 
 /** Resolved pre-input review configuration. */
@@ -300,6 +305,7 @@ export function resolveConfig(config: Config): ResolvedConfig {
       depth: config.chain?.depth ?? 1,
       maxChars: config.chain?.maxChars ?? 900,
       goalMargin: config.chain?.goalMargin ?? 0.05,
+      maxPerSession: config.chain?.maxPerSession ?? 1,
     }),
     review: Object.freeze({
       enabled: review.enabled ?? false,
@@ -792,7 +798,7 @@ function retrieveChain(
   service: CognitivePipelineService,
   situation: string,
   sessionId: string,
-  config: { minSimilarity: number, depth: number, maxChars: number, goalMargin: number },
+  config: { minSimilarity: number, depth: number, maxChars: number, goalMargin: number, maxPerSession: number },
 ): { chainId: string, similarity: number, text: string } | null {
   const chains = service.store.chainsSnapshot()
   if (chains.length === 0) return null
@@ -805,6 +811,8 @@ function retrieveChain(
     if (record.sessionId !== sessionId || record.chainId === null) continue
     served.add(String(record.chainId))
   }
+  // cl-358: 会话级条数上限 —— 达到上限直接不服务(链是大块头, 不能靠"每链一次"把预算慢慢吃光)。
+  if (served.size >= config.maxPerSession) return null
   let best: { chainId: string, similarity: number } | null = null
   for (const chain of chains) {
     if (served.has(chain.chainId)) continue
