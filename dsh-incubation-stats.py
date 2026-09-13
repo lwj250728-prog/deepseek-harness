@@ -442,5 +442,9 @@ else:
         _fh.write(text)
         _fh.flush()
         os.fsync(_fh.fileno())
+    try:  # cl-332: 覆写必须保留权限位
+        os.chmod(_out + '.tmp', os.stat(_out).st_mode & 0o7777)
+    except Exception:
+        pass
     os.replace(_out + '.tmp', _out)
     print(text)

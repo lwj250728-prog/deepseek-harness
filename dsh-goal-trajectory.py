@@ -136,6 +136,10 @@ def main() -> int:
     tmp = args.out + ".tmp"
     with open(tmp, "w", encoding="utf8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=1)
+    try:  # cl-332: 覆写必须保留权限位(临时文件+replace 会带 umask 默认权限)
+        os.chmod(tmp, os.stat(args.out).st_mode & 0o7777)
+    except Exception:
+        pass
     os.replace(tmp, args.out)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False))

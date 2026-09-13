@@ -144,6 +144,10 @@ def write_witness() -> int:
         json.dump(payload, fh, ensure_ascii=False, indent=1)
         fh.flush()
         os.fsync(fh.fileno())
+    try:  # cl-332: 覆写必须保留权限位(临时文件+replace 会带 umask 默认权限)
+        os.chmod(tmp, os.stat(p).st_mode & 0o7777)
+    except Exception:
+        pass
     os.replace(tmp, p)
     print('[witness] 已记录: %d passed, 变异后 %d failed(可证伪), %d 个文件哈希已入册 → %s'
           % (passed, mfailed, len(WATCHED), p))

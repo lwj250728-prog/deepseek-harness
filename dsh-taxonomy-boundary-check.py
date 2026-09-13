@@ -100,6 +100,10 @@ def main() -> int:
                 fh.write('\n'.join(json.dumps(x, ensure_ascii=False) for x in rows) + '\n')
                 fh.flush()
                 os.fsync(fh.fileno())
+            try:  # cl-332: 覆写必须保留权限位(临时文件+replace 会带 umask 默认权限)
+                os.chmod(_tmp, os.stat(LEDGER).st_mode & 0o7777)
+            except Exception:
+                pass
             os.replace(_tmp, LEDGER)
             print('已写入提示条目 %s' % cid)
     if '--json' in args:

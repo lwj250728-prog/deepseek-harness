@@ -118,6 +118,10 @@ def main() -> int:
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
         fh.flush()
         os.fsync(fh.fileno())
+    try:  # cl-332: 覆写必须保留权限位
+        os.chmod(tmp, os.stat(args.ledger).st_mode & 0o7777)
+    except Exception:
+        pass
     os.replace(tmp, args.ledger)            # 原子替换(与 7a61e1d 同一条纪律)
     print("[compact] 已归档 %d 行 → %s; 账本 %d → %d 行(last-wins 校验通过)"
           % (len(moved), archive, len(rows), len(keep)))

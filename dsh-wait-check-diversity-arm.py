@@ -237,6 +237,10 @@ def write_rebaseline(intent: list[str]) -> int:
         json.dump(payload, fh, ensure_ascii=False, indent=1)
         fh.flush()
         os.fsync(fh.fileno())
+    try:  # cl-332: 覆写必须保留权限位(临时文件+replace 会带 umask 默认权限)
+        os.chmod(tmp, os.stat(p).st_mode & 0o7777)
+    except Exception:
+        pass
     os.replace(tmp, p)
     print('[wait-diversity] 已记 δ 基线: %d 个 lib → %s' % (len(hashes), p))
     return 0
@@ -299,6 +303,10 @@ def main() -> int:
                         '这样"本窗口里都有什么"是被声明且可审计的, 而不是把污染冻成假干净(cl-310)。')
         tmp = dst + '.tmp'
         json.dump(data, open(tmp, 'w', encoding='utf8'), ensure_ascii=False, indent=1)
+        try:  # cl-332: 覆写必须保留权限位(临时文件+replace 会带 umask 默认权限)
+            os.chmod(tmp, os.stat(dst).st_mode & 0o7777)
+        except Exception:
+            pass
         os.replace(tmp, dst)
         print('[wait-diversity] 已记 A 臂参照: %d 个 lib → %s' % (len(data.get('hashes') or {}), dst))
         return 0

@@ -139,6 +139,10 @@ def main() -> int:
             json.dump(payload, fh, ensure_ascii=False, indent=1)
             fh.flush()
             os.fsync(fh.fileno())
+        try:  # cl-332: 覆写必须保留权限位(临时文件+replace 会带 umask 默认权限)
+            os.chmod(tmp, os.stat(p).st_mode & 0o7777)
+        except Exception:
+            pass
         os.replace(tmp, p)
         print('[oom] 已记基线: NRestarts=%d → %s' % (nr, p))
         return 0

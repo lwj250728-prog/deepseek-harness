@@ -392,6 +392,11 @@ def main() -> int:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
+        try:  # cl-332: 覆写必须保留权限位
+            os.chmod(os.path.join(D, 'stage-summary.md.tmp'),
+                     os.stat(os.path.join(D, 'stage-summary.md')).st_mode & 0o7777)
+        except Exception:
+            pass
         os.replace(os.path.join(D, 'stage-summary.md.tmp'), os.path.join(D, 'stage-summary.md'))
     print('(md 渲染稿见上; --dry-run 不写盘)')
     print(text)
