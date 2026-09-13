@@ -9997,6 +9997,39 @@ assert "c/gamma(" in low and "d/delta(" in low, "零 spec 清单没有逐条写�
 assert "1 个 .disabled" in low, "没有把 disabled 个数写出来 ⇒ 清单不可解释: %s" % low
 print("T239: tests/ 之外的 spec 被算作有 spec / 只有 disabled 的包进债且写明个数 / 清单可解释")
 '
+# ── T240 构建新鲜度判据的「内容优先」(tp-205 的遗留: T159 自己没有探针) ──
+# 由来: 介入层现在会把 mtime 还回去(dsh-mutation-lock.py 的 _restore_meta), 所以"改回只看 mtime"已经**不能**证明
+# 内容优先检查有效 —— 必须**人工造出现场**: 只推 mtime、内容一个字节不动, 此时 T159 必须仍绿。
+# 探针的变异正是把 T159 退回"只看 mtime" ⇒ 本判据必须红。
+echo "[T240] 构建新鲜度判据的内容优先"
+t "仅 mtime 变新但内容与 HEAD 一致时不得判 src 落后(内容优先)" python3 -c '
+import glob, os, subprocess, sys, time
+ROOT = os.path.expanduser("~/dsh-fork")
+RUNNER = os.path.join(ROOT, "dsh-assert-runner.py")
+NAME = "凡已 emit 的包, src 不得比 lib/types 新(否则打包只会带旧代码)"
+cands = [f for f in sorted(glob.glob(os.path.join(ROOT, "packages/*/*/src/index.ts")))
+         if os.path.exists(os.path.join(os.path.dirname(os.path.dirname(f)), "lib/types/index.js"))]
+assert cands, "没有已 emit 的包 ⇒ 前提不成立"
+def same_as_head(p):
+    return subprocess.run(["git", "-C", ROOT, "diff", "--quiet", "HEAD", "--", os.path.relpath(p, ROOT)],
+                          capture_output=True).returncode == 0
+pick = [p for p in cands if same_as_head(p)]
+assert pick, "没有「内容与 HEAD 一致」的候选 ⇒ 前提不成立(这条判据要测的正是这种情形)"
+target = pick[0]
+st = os.stat(target)
+try:
+    os.utime(target, ns=(st.st_atime_ns, time.time_ns()))     # 只推 mtime, 内容一个字节不动
+    gap = os.path.getmtime(target) - os.path.getmtime(os.path.join(os.path.dirname(os.path.dirname(target)), "lib/types/index.js"))
+    assert gap > 1, "没能造出「src 比 lib 新」的现场(gap=%.1fs)" % gap
+    r = subprocess.run([sys.executable, RUNNER, "--name", NAME], capture_output=True, text=True, timeout=900)
+    out = (r.stdout or "") + (r.stderr or "")
+    assert r.returncode == 0, ("**仅 mtime 变新、内容与 HEAD 一致 ⇒ T159 不该判红**(它必须先判内容, 否则变异机制一碰文件就假红): "
+                               "exit=%d %s" % (r.returncode, out[-300:]))
+finally:
+    os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))      # 复原 mtime
+assert same_as_head(target), "复原后内容应仍与 HEAD 一致"
+print("T240: 仅 mtime 变新(内容与 HEAD 一致)不判 src 落后 —— 内容优先的判据生效(%s)" % os.path.basename(os.path.dirname(os.path.dirname(target))))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
