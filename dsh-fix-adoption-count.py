@@ -15,6 +15,17 @@ log_path = os.path.join(D, 'incubation-log.jsonl')
 base_path = os.path.join(D, 'incubation-baseline.json')
 dry = '--dry-run' in sys.argv
 
+# tp-197 / cl-321: 本脚本是池的**全量重写**写者之一(模式 'w'), 而原实现的文档字符串声称"读-改-写之间不留窗口"
+# ——**其实一个守卫都没有**(锁与指纹皆无): 它若落在压实或写者之间落盘, 就会静默回退那次写入(15:10 事故的同类)。
+# 这里按 tp-197 的约定持 `<pool>.lock` 全程(进程退出自动释放), 与 dsh-goal-pool-write.py / dsh-goal-pool-compact.py 互斥。
+_pool_lock = None
+try:
+    import fcntl
+    _pool_lock = open(pool_path + '.lock', 'w')
+    fcntl.flock(_pool_lock, fcntl.LOCK_EX)
+except Exception:
+    _pool_lock = None      # 非 POSIX / 取不到: 退化为无锁, 不阻塞(风险高于拦住)
+
 base = json.load(open(base_path, encoding='utf8')).get('goals', {})
 logged = {}
 for line in open(log_path, encoding='utf8'):
