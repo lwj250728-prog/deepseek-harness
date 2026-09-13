@@ -62,6 +62,63 @@ def process_start() -> datetime.datetime | None:
         return None
 
 
+def changed_libs() -> tuple[list[str] | None, str]:
+    """自 δ 基线以来**内容真变**的 lib 集 → (集合, 说明)。
+
+    2026-09-13 14:3x(cl-308 的正确批评): 原先只钉 `cognitive-inject` 一个 lib 的 mtime ⇒ **无法发现"同一次
+    重启还带上了别的包"**。实测 14:09 那次全量重建刷新 183 个 lib、内容真变 9 个(含 quiet-driver), 而门照旧
+    报"B 臂已跑 0.3h" ⇒ **读数不可识别**(A/B 差别不止 δ)。故改成看**变更 lib 集**: 集 ⊆ {cognitive-inject} 才算
+    δ 可识别; 基线用 --rebaseline 记(干净的构建+重启之后记一次)。
+    """
+    base_p = os.path.join(D, 'diversity-arm-baseline.json')
+    if not os.path.exists(base_p):
+        return None, '缺 δ 基线(%s) ⇒ 判不了"只有 δ 变了没"; 修法: 干净构建+重启后跑 --rebaseline' % base_p
+    try:
+        base = json.load(open(base_p, encoding='utf8'))
+    except Exception as exc:  # noqa: BLE001
+        return None, 'δ 基线读不了(%s)' % exc
+    hashes = base.get('hashes') or {}
+    if not hashes:
+        return None, 'δ 基线里没有哈希表'
+    import hashlib
+    changed = []
+    for path, want in hashes.items():
+        fp = os.path.expanduser(path)
+        if not os.path.exists(fp):
+            changed.append(path + '(缺失)')
+            continue
+        cur = hashlib.sha256(open(fp, 'rb').read()).hexdigest()
+        if cur != want:
+            changed.append(path)
+    return changed, '基线记于 %s(%d 个 lib)' % (str(base.get('at'))[:19], len(hashes))
+
+
+def write_rebaseline() -> int:
+    """把当前 lib 集哈希记为 δ 窗口的基线(只在**干净构建+重启之后**跑一次)。"""
+    import hashlib, subprocess as sp
+    out = sp.run(['bash', '-lc',
+                  'cd %s && ls -d packages/*/*/lib/index.js 2>/dev/null' % REPO],
+                 capture_output=True, text=True, timeout=120).stdout.split()
+    if not out:
+        print('[wait-diversity] 找不到任何 lib/index.js ⇒ 不记基线', file=sys.stderr)
+        return 3
+    hashes = {p: hashlib.sha256(open(p, 'rb').read()).hexdigest() for p in out}
+    start = process_start()
+    payload = {'at': datetime.datetime.now(TZ).isoformat(),
+               'processStart': start.isoformat() if start else None,
+               'hashes': hashes,
+               'rule': 'δ 可识别的条件: 自此基线以来**变更的 lib 集 ⊆ {cognitive-inject}**; 其它包一变 ⇒ 报不可识别'}
+    p = os.path.join(D, 'diversity-arm-baseline.json')
+    tmp = p + '.tmp'
+    with open(tmp, 'w', encoding='utf8') as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=1)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, p)
+    print('[wait-diversity] 已记 δ 基线: %d 个 lib → %s' % (len(hashes), p))
+    return 0
+
+
 def readable_turns(since: datetime.datetime) -> int:
     """起点之后带 retrievedIds 的审计行数(='可判回合'的机器口径)。"""
     p = os.path.join(D, 'retrieval-audit.jsonl')
@@ -91,7 +148,10 @@ def main() -> int:
     ap.add_argument('--min-hours', type=float, default=12.0)
     ap.add_argument('--min-turns', type=int, default=20)
     ap.add_argument('--json', action='store_true')
+    ap.add_argument('--rebaseline', action='store_true', help='把当前 lib 集记为 δ 基线(干净构建+重启之后跑一次)')
     args = ap.parse_args()
+    if args.rebaseline:
+        return write_rebaseline()
 
     on, why = arm_enabled()
     if not on:
@@ -120,6 +180,16 @@ def main() -> int:
               % (which, newest.strftime('%F %T'), start.strftime('%F %T')))
         return 1
     start = newest
+    changed, why_changed = changed_libs()
+    if changed is None:
+        print('[wait-diversity] %s' % why_changed)
+        return 1
+    foreign = sorted({c for c in changed if 'context/cognitive-inject' not in c})
+    if foreign:
+        print('[wait-diversity] **B 臂不可识别**: 自 δ 基线以来这些包也变了 %s ⇒ A/B 差别不止 δ '
+              '(门此前只钉 cognitive-inject 一个 lib, 看不见同批的其它包) ⇒ 本窗口的读数不可用作 δ 归因'
+              % foreign[:5])
+        return 1
     elapsed_h = (datetime.datetime.now(TZ) - start).total_seconds() / 3600.0
     turns = readable_turns(start)
     payload = {'arm': why, 'armSince': start.isoformat(), 'armSinceBasis': which, 'elapsedHours': round(elapsed_h, 2),
