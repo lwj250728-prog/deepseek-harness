@@ -8825,6 +8825,58 @@ assert r.returncode == 0, "腿驱动器 dry-run 跑不动: " + (r.stderr or r.st
 assert "本轮执行 0" in r.stdout, "dry-run 竟然执行了腿(应当只报不跑): " + r.stdout[:200]
 print(r.stdout.strip().splitlines()[-1][:120])
 '
+
+# ── T221 阶段总结帧: 发帧不算数, 必须真的产出"底座 + 外部分" ──
+# 用户(2026-09-13 12:3x)要求"增加一个阶段总结帧, 从上层观察整体的活动效果, 还可以增加一个外部的观察进行打分"。
+# 这类"总览帧"最容易变成自我表扬, 故它的判据不是"帧有没有发出去", 而是: ①底座由脚本算(dsh-stage-summary.py);
+# ②分必须来自**外部**评审(dsh-stage-summary-review.py, 固定量表, 独立上下文), 且评审必须带证据指针/
+# 无法核实项/最强反假设/下期证伪信号 —— 缺一项即拒收(不然"外部评审"会退化成我自己写一段评语)。
+echo "[T221] 阶段总结帧必须产出底座与外部分(发帧不算数)"
+t "阶段总结帧必须真的产出总结与外部分(且外部分不得空口给分)" python3 -c '
+import json, os, datetime
+D = os.environ.get("DSH_COG_DIR") or os.path.expanduser("~/.dsh/cognitive-pipeline")
+TZ = datetime.timezone(datetime.timedelta(hours=8))
+DIMS = ("artifactTruth", "caliberHonesty", "goalSubstance", "selfCorrection", "anchorConsistency")
+def rows_of(name):
+    fp = os.path.join(D, name)
+    if not os.path.exists(fp):
+        return []
+    out = []
+    for l in open(fp, encoding="utf8"):
+        if l.strip():
+            out.append(json.loads(l))
+    return out
+def newest(name):
+    ts = []
+    for r in rows_of(name):
+        t = r.get("ts")
+        if isinstance(t, str):
+            try:
+                ts.append(datetime.datetime.fromisoformat(t))
+            except Exception:
+                pass
+    return max(ts) if ts else None
+summ = newest("stage-summary.jsonl")
+ext = rows_of("stage-summary-external.jsonl")
+assert summ is not None, "阶段总结底座不存在(stage-summary.jsonl) —— 阶段总结帧没有可搬运的数字"
+assert ext, "没有外部评审分(stage-summary-external.jsonl) —— 该帧的关键要求是**外部**打分, 不是自评"
+row = ext[-1]
+missing = [k for k in DIMS if not isinstance((row.get("scores") or {}).get(k), int)]
+assert not missing, "外部分缺维度: %s" % missing
+bad = [k for k in DIMS if not [x for x in ((row.get("evidence") or {}).get(k) or []) if str(x).strip()]]
+assert not bad, "这些维度没有证据指针(评审不许空口给分): %s" % bad
+assert [x for x in (row.get("unverifiable") or []) if str(x).strip()], "评审没给无法核实项(不许写无)"
+for f in ("counterHypothesis", "falsifierNextPeriod"):
+    assert str(row.get(f) or "").strip(), "评审缺 %s" % f
+frames = [r for r in rows_of("quiet-driver-frames.jsonl") if r.get("kind") == "stage-summary-frame"]
+if frames and isinstance(frames[-1].get("ts"), (int, float)):
+    t0 = datetime.datetime.fromtimestamp(frames[-1]["ts"] / 1000, TZ)
+    age = (datetime.datetime.now(TZ) - t0).total_seconds() / 60
+    if age >= 60:
+        assert summ > t0, "最近一次阶段总结帧(%.0f 分钟前)之后没有新底座 ⇒ 帧发了但没人理" % age
+print("底座 %s; 外部分 %s 均分 %s(评审者 %s), 帧 %d 次" % (
+    summ.strftime("%m-%d %H:%M"), str(row.get("ts"))[:16], row.get("meanScore"), row.get("reviewer"), len(frames)))
+'
 # ── T220 "停驱"必须是被行为消费的状态, 而不是一句口头停止 ──
 # 起因(2026-09-13 11:2x, 用户指令"停止这个会话的驱动"): 驱动器(quiet-driver)一次只驱动**一个**目标会话
 # (`targetSessionId` + 运行时绑定文件), 所以"停驱"在实现上=**目标不是它** + **此后没有帧派给它**。

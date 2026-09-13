@@ -15,7 +15,7 @@
 
 import { execSync } from 'node:child_process'
 import { hostname } from 'node:os'
-import { appendFile, mkdir } from 'node:fs/promises'
+import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -97,6 +97,12 @@ export interface Config {
   openQuestionsPath: string
   /** #005 北极星候选池路径(candidates.jsonl)——目标全等待时孵化 pending 候选防空转. */
   candidatesPath: string
+  /** 阶段总结帧(2026-09-13 用户要求): 间隔(ms)——从上层看整体活动效果, 并带一份**外部评审**分。 */
+  stageSummaryIntervalMs: number
+  /** 阶段总结帧: 机器生成的阶段总结路径(dsh-stage-summary.py 的产物). */
+  stageSummaryPath: string
+  /** 阶段总结帧: 外部分账本路径(dsh-stage-summary-review.py 的产物). */
+  stageSummaryExternalPath: string
   /** #006 测试计划帧: 待办测试路径(test-pending.jsonl)——检测到新推进且有pending测试时, 主动要求主会话规划并执行(测试带返回, 非cron定时). */
   testPendingPath: string
 }
@@ -122,6 +128,12 @@ export const Config: z<Config> = z.object({
   openQuestionsPath: z.string().default('~/.dsh/cognitive-pipeline/open-questions.jsonl'),
   candidatesPath: z.string().default('~/.dsh/cognitive-pipeline/candidates.jsonl'),
   testPendingPath: z.string().default('~/.dsh/cognitive-pipeline/test-pending.jsonl'),
+  // 阶段总结帧(用户 2026-09-13 要求"从上层观察整体活动效果 + 外部观察打分"): 默认 6h 一次。
+  // 为什么是**间隔触发**而不是"检测到异常才触发": 异常检测本身要先有总览; 而总览若是被异常触发,
+  // 就只能看见已经爆掉的部分。间隔 + 外部分双轨: 间隔保证"总会看", 外部分保证"不是我自己看"。
+  stageSummaryIntervalMs: z.number().default(6 * 60 * 60 * 1000),
+  stageSummaryPath: z.string().default('~/.dsh/cognitive-pipeline/stage-summary.jsonl'),
+  stageSummaryExternalPath: z.string().default('~/.dsh/cognitive-pipeline/stage-summary-external.jsonl'),
 })
 
 function expandHome(p: string): string {
@@ -676,6 +688,99 @@ function buildActionFrameText(carrier: CarrierIdentity, goal: { title: string; n
 /** #005 候选孵化帧文本: 目标池无 ready 可执行目标时, 把北极星候选池的 pending 候选
  *  作为本轮执行任务注入——由主会话真实执行/裁决并写回 candidates.jsonl。
  *  区别于评估帧: 这是"做"通道的延伸——候选不是用来"确认无变化"的, 是用来推进 A 的。 */
+/** 阶段总结帧(用户 2026-09-13 要求): 读机器生成的阶段总与**外部分**; 读不到就如实说读不到。 */
+async function readStageSummary(path: string, externalPath: string): Promise<{
+  summary: Record<string, unknown> | null, external: Record<string, unknown> | null,
+  summaryAgeMin: number | null, externalAgeMin: number | null }> {
+  const readLast = async (p: string): Promise<Record<string, unknown> | null> => {
+    try {
+      // 配置里的路径带 '~'(与其它路径同一约定) ⇒ 必须过 expandHome, 否则 readFile('~/...') 直接 ENOENT,
+      // 而帧文本只会说"读不到总结" —— 那种"机制看起来在跑、其实一直读空"正是本项目反复吃过的形态。
+      const text = await readFile(expandHome(p), 'utf8')
+      const lines = text.split('\n').filter(l => l.trim().length > 0)
+      if (lines.length === 0) return null
+      return JSON.parse(lines[lines.length - 1]!) as Record<string, unknown>
+    } catch {
+      return null
+    }
+  }
+  const summary = await readLast(path)
+  const external = await readLast(externalPath)
+  const age = (row: Record<string, unknown> | null): number | null => {
+    const t = row === null ? null : (row.ts as string | undefined)
+    if (typeof t !== 'string') return null
+    const ms = Date.parse(t)
+    return Number.isNaN(ms) ? null : Math.round((Date.now() - ms) / 60000)
+  }
+  return { summary, external, summaryAgeMin: age(summary), externalAgeMin: age(external) }
+}
+
+/** 上次阶段总结帧的时刻(0 = 从未)。 */
+async function readLastStageSummaryFrameAt(thinkLogPath: string): Promise<number> {
+  try {
+    const text = await readFile(expandHome(thinkLogPath), 'utf8')
+    let last = 0
+    for (const line of text.split('\n')) {
+      if (line.trim().length === 0) continue
+      try {
+        const e = JSON.parse(line) as { kind?: string; ts?: number }
+        if (e.kind === 'stage-summary-frame' && typeof e.ts === 'number' && e.ts > last) last = e.ts
+      } catch { /* 坏行跳过 */ }
+    }
+    return last
+  } catch {
+    return 0
+  }
+}
+
+/** 阶段总结帧文本: **数字由脚本算, 帧只搬运**, 并强制要求一次外部评审(不许自评)。 */
+function buildStageSummaryFrameText(carrier: CarrierIdentity, data: {
+  summary: Record<string, unknown> | null, external: Record<string, unknown> | null,
+  summaryAgeMin: number | null, externalAgeMin: number | null }): string {
+  const lines = [
+    '【阶段总结帧】(source: plugin/quiet-driver, form: stage-summary-frame)',
+    `载体: PID ${carrier.pid} | 启动 ${carrier.startedAt} | 模型 ${carrier.model}`,
+    '',
+    '这是一次**上层观察**: 不看单个目标的一步, 看整段时间里这套机制产出了什么、代价是什么、哪些结论其实没证据。',
+    '底座由脚本算好(dsh-stage-summary.py), 你只负责解读与处置, **不得自己另算一套更好看的数**。',
+    '',
+  ]
+  if (data.summary === null) {
+    lines.push('**读不到阶段总结**(stage-summary.jsonl 缺失或为空) ⇒ 第一件事是先生成本期: `python3 ~/dsh-fork/dsh-stage-summary.py`。')
+  } else {
+    const s = data.summary
+    const cost = (s.cost ?? {}) as Record<string, unknown>
+    const arts = (s.artifacts ?? {}) as Record<string, unknown>
+    const frames = (s.frames ?? {}) as Record<string, unknown>
+    lines.push('机器算出的本期底座(原样搬运, 未加工):')
+    lines.push(`- 期: ${String(s.periodStart ?? '?')} → ${String(s.periodEnd ?? '?')} (${String(s.hours ?? '?')}h), 生成于 ${String(s.ts ?? '?')}${data.summaryAgeMin === null ? '' : ` (${data.summaryAgeMin} 分钟前)`}`)
+    lines.push(`- 帧: 共 ${String(frames.total ?? '?')} 条, 分形态 ${JSON.stringify(frames.byKind ?? {})}`)
+    lines.push(`- 产物: 提交 ${String(arts.commits ?? '?')}(触及 packages/ ${String(arts.productCommits ?? '?')})、账本新开/变动 ${Array.isArray(arts.claimsOpenedOrTouched) ? (arts.claimsOpenedOrTouched as unknown[]).length : '?'}、结单 ${Array.isArray(arts.claimsClosed) ? (arts.claimsClosed as unknown[]).length : '?'}、测试入账 ${Array.isArray(arts.testEntriesNew) ? (arts.testEntriesNew as unknown[]).length : '?'}`)
+    lines.push(`- 成本: 帧消耗回合 ${String(cost.turnsConsumedByFrames ?? '?')}, 每帧落地产物 ${String(cost.artifactsPerFrame ?? '?')} 件`)
+    lines.push(`- 外部锚: git ${String(((s.externalAnchors ?? {}) as Record<string, unknown>).gitHead ?? '?')}; 套件 ${String(((s.externalAnchors ?? {}) as Record<string, unknown>).suiteVerdict ?? '?')}`)
+    const unproven = Array.isArray(s.unproven) ? (s.unproven as string[]) : []
+    lines.push(`- **本期未证项(${unproven.length} 条, 不得被上面的计数盖掉)**:`)
+    for (const u of unproven) lines.push(`  - ${u}`)
+  }
+  lines.push('')
+  if (data.external === null) {
+    lines.push('**尚无外部评审分** ⇒ 必须做一次(dsh-stage-summary-review.py):')
+  } else {
+    const e = data.external
+    lines.push(`已有外部分: 均分 ${String(e.meanScore ?? '?')} (评审者 ${String(e.reviewer ?? '?')}, ${data.externalAgeMin === null ? '时间未知' : `${data.externalAgeMin} 分钟前`})`)
+    lines.push(`- 最强反假设(评审者): ${String(e.counterHypothesis ?? '?')}`)
+    lines.push(`- 下期证伪信号(评审者): ${String(e.falsifierNextPeriod ?? '?')}`)
+    lines.push('若这份外部分已陈旧(比如上一期之后就再没更新) ⇒ 重新做一次; 否则直接读分并处置不一致。')
+  }
+  lines.push('')
+  lines.push('要求(逐条给出可核产出):')
+  lines.push('1. **外部观察打分**(不是我自己打): 用 `python3 ~/dsh-fork/dsh-stage-summary-review.py --request` 生成评审请求, 交给一个**独立上下文的子代理**(它没有本会话记忆)按固定量表打分; 用 `--record <file>` 收分。缺"无法核实项/最强反假设/下期证伪信号"的评审视为无效, 要重来。')
+  lines.push('2. **处置不一致**: 外部分低在哪一维, 本期就修哪一维 —— 但**不得**为了提分去改量表或删未证项。')
+  lines.push('3. **写回常驻段**: 本期底座 + 外部分 + 反假设写入 ~/.dsh/cognitive-pipeline/stage-summary.md 的常驻段(由脚本渲染, 不手改正文)。')
+  lines.push('4. 如实标注: 若本期"帧多但产物少"或"套件红", 直接说, 不要用叙事盖住。')
+  return lines.join('\n')
+}
+
 function buildCandidateHatchText(carrier: CarrierIdentity, cand: { id: string; title: string; relationToA: string }): string {
   return [
     '【候选孵化帧】(source: plugin/quiet-driver, form: candidate-hatch)',
@@ -1667,6 +1772,34 @@ export function apply(ctx: Context, config: Config): (() => void) | void {
                 // v27 P0-2: 执行后反思——候选执行产出 → 新 oq/候选再生
                 await triggerReflectAfterExec(ctx, 'candidate-hatch', hatchResponse)
                 return  // 本次 tick 已用于候选孵化, 不再发评估帧
+              }
+            }
+            // 阶段总结帧(用户 2026-09-13 要求: "增加一个阶段总结帧, 从上层观察整体的活动效果, 还可以增加
+            // 一个外部的观察进行打分")。三条设计约束:
+            //   ① 间隔触发(默认 6h)而非"异常才触发": 异常检测本身要先有总览, 被异常触发的总览只能看见已经爆掉的部分;
+            //   ② 数字由脚本(dsh-stage-summary.py)算好, 帧只搬运 —— 不给我"临场挑好看的数"的空间;
+            //   ③ **强制外部评审**(独立上下文子代理 + 固定量表), 因为我自评不可靠(exp_150: 独立视角的价值在判定端)。
+            // 位置: 行动帧之后(真能推进目标时先推目标, 那是有外部产物的动作), 测试帧之前(否则测试队列长期非空会
+            // 把总览永远饿掉)。
+            {
+              const lastStage = await readLastStageSummaryFrameAt(config.thinkLogPath)
+              if (now - lastStage >= config.stageSummaryIntervalMs) {
+                const stageData = await readStageSummary(config.stageSummaryPath, config.stageSummaryExternalPath)
+                const stageMessage = createUserMessage({
+                  content: [{ type: 'text', text: buildStageSummaryFrameText(carrier, stageData) }],
+                  source: { kind: 'plugin', plugin: 'quiet-driver', form: 'notice' as const,
+                            summary: `阶段总结 #${frames}: 整体效果 + 外部评审` },
+                })
+                ctx.logger.info('[quiet-driver] stage-summary-frame #%d', frames)
+                agent.followup(stageMessage)
+                const stageResponse = await extractAssistantResponse(ctx, agent)
+                await logFrame(config.thinkLogPath, {
+                  ts: Date.now(), kind: 'stage-summary-frame', frameNo: frames,
+                  goalId: 'stage-summary', goalTitle: '阶段总结: 整体活动效果 + 外部评审',
+                  nextAction: '生成阶段总结 → 外部评审打分 → 处置不一致 → 写回常驻段',
+                  session: targetSessionId, output: stageResponse,
+                })
+                return  // 本次 tick 已用于阶段总结
               }
             }
             // #006 测试计划帧: 有未验证的机制推进(测试账本有 pending) → 主动要求主会话规划并执行测试。
