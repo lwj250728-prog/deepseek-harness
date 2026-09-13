@@ -35,6 +35,11 @@ D = os.path.expanduser('~/.dsh/cognitive-pipeline')
 REPLAY = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dsh-library-replay.py')
 OUT = os.path.join(D, 'threshold-sweep.json')
 CURRENT_GATE = 0.5          # directSimilarityThreshold 默认值(cognitive-inject:153)
+# 2026-09-13 11:2x(cl-294, **试过又回滚**): 按"锚该取自活配置"改成读 cordis.patch.yml 的 minSimilarity(0.4),
+# 4 条判据当场转红 —— 两条是真后果(该目标的门 dsh-wait-check-sweep.py 在本窗口阈下候选 0 个 ⇒ 判 inconclusive
+# ⇒ 门变死门), 两条是沙箱 fixture 隐含依赖 0.5。语义上确实该改成 minSimilarity(sweep 问的是"放松**硬门限**能否
+# 增加可排序集", 而 directSimilarityThreshold 是**路由**门限, 不是硬过滤 —— 硬过滤在 cognitive-inject:486),
+# 但改动面(工具语义 + 4 条判据 + 一个活门)没在一次内验证完 ⇒ 按可逆纪律回滚, 由 cl-294 带证据重做。
 PREREG = ('R1 widen-gate: 可排序集占比 +>=10pp 且 A 档 MRR/top-1 不降 >0.02 ⇒ 预登记判据后改配置; '
           'R2 tradeoff-ceiling: 占比升但 A 档质量降 >0.02 ⇒ 真实权衡, 停止在此旋钮上试; '
           'R3 no-headroom: 占比不随门限变化 ⇒ 天花板不在门限上; '

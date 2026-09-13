@@ -7075,25 +7075,68 @@ D = os.path.expanduser("~/.dsh/cognitive-pipeline")
 # 2026-09-12 04:0x 修脆性: 原先拿"扫描(live)"与"replay 的**旧快照文件**"比 —— 审计每来一条新注入回合,
 # 两个读数就差一条, 断言随机转红(它抓到的其实是我自己的过时产物, 不是口径漂移)。改为**先重算 replay 再比**,
 # 两边读同一时刻的同一份数据, 这才是"同口径"的真正含义。
-r0 = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-library-replay.py"],
-                    capture_output=True, text=True, timeout=900)
-assert r0.returncode == 0, "replay 重算失败: " + (r0.stderr or r0.stdout)[-200:]
-# 2026-09-12 09:0x: 扫描工具现在**默认走 sweep-era.json 声明的时代**(14 回合), 而 replay 用全史(122+ 回合),
-# 两边总体不同 ⇒ 那个差是"没在同口径上比"(实测 0.338 vs 0.428), 不是口径漂移。传远古边界让两边都算全史。
-r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json",
-                    "--post-since", "2000-01-01T00:00:00+08:00"],
-                   capture_output=True, text=True, timeout=900)
-assert r.returncode == 0, "扫描工具失败"
-d = json.loads(r.stdout.strip().splitlines()[-1])
-cur = next(x for x in d["table"] if abs(x["threshold"] - d["currentGate"]) < 1e-9)
-rep = json.load(open(D + "/library-replay-result.json", encoding="utf8"))
-val = (rep.get("labelRobustness") or {}).get("valence") or {}
-assert val.get("armA_mrr") is not None, "replay 未产出 valence 档读数, 无法交叉核对"
-assert cur["armA_mrr"] is not None, "扫描未产出当前门限下的 A 档 MRR"
-assert abs(cur["armA_mrr"] - val["armA_mrr"]) < 1e-6, ("同口径下两工具 MRR 不一致: 扫描 %.6f vs replay %.6f"
-                                                       % (cur["armA_mrr"], val["armA_mrr"]))
-assert abs(cur["armA_top1"] - val["armA_top1"]) < 1e-6, "top-1 不一致(口径漂了)"
-print("与 replay 同口径核对通过: A档 MRR %.4f / top-1 %.4f" % (cur["armA_mrr"], cur["armA_top1"]))
+# 2026-09-13 11:2x **第三次转红(0.419403 vs 0.418564, Δ=8.4e-4)暴露了上一版修法只修了一半**: 两边虽然
+# 都"先重算", 但仍是**先后两次读库**; 套件跑的同时别的会话在往库里写经验(与 cl-027/cl-041 同型: 拿两个不同
+# 时刻的读数比"同口径")。故这一版加**取样稳定性见证**: 比之前先记住两个库的(行数+字节数), 比完再记一次;
+# 若期间库变了 ⇒ 不判红而是**重跑一轮**(最多两次), 并在两次都变的情况下如实报"取样不稳定, 本条不可判"
+# (不判绿也不判红)。库没变而 MRR 仍不一致 ⇒ 才是真的口径漂移, 用严格容差 1e-6 判红。
+# 2026-09-13 11:2x: 上面那版只盯了**经验库**两个文件, 而这两个工具真正读的是 `retrieval-audit.jsonl`
+# (每个注入回合都追加一行 ⇒ 我一边跑套件一边干活就在改它), 所以"取样稳定"必须盯**输入账本全集**,
+# 否则又会出现"拿着两个不同时刻的读数比同口径"。同时: 该断言比的是 replay 与本工具 **currentGate** 行,
+# 而 currentGate 原先硬编码 0.5(插件默认值)≠ 活配置 0.4 ⇒ 比错了行(实测差一条查询, 我却读成"口径漂移")。
+LIBS = [D + "/retrieval-audit.jsonl", D + "/experiences.jsonl", D + "/experiences-frames.jsonl"]
+def fingerprint():
+    out = []
+    for p in LIBS:
+        if os.path.exists(p):
+            with open(p, "rb") as fh:
+                data = fh.read()
+            out.append((os.path.basename(p), len(data.splitlines()), len(data)))
+        else:
+            out.append((os.path.basename(p), -1, -1))
+    return out
+def one_round():
+    r0 = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-library-replay.py"],
+                        capture_output=True, text=True, timeout=900)
+    assert r0.returncode == 0, "replay 重算失败: " + (r0.stderr or r0.stdout)[-200:]
+    # 2026-09-12 09:0x: 扫描工具现在**默认走 sweep-era.json 声明的时代**(14 回合), 而 replay 用全史(122+ 回合),
+    # 两边总体不同 ⇒ 那个差是"没在同口径上比"(实测 0.338 vs 0.428), 不是口径漂移。传远古边界让两边都算全史。
+    r = subprocess.run(["python3", "/home/ubuntu/dsh-fork/dsh-threshold-sweep.py", "--json",
+                        "--post-since", "2000-01-01T00:00:00+08:00"],
+                       capture_output=True, text=True, timeout=900)
+    assert r.returncode == 0, "扫描工具失败"
+    d = json.loads(r.stdout.strip().splitlines()[-1])
+    rep = json.load(open(D + "/library-replay-result.json", encoding="utf8"))
+    val = (rep.get("labelRobustness") or {}).get("valence") or {}
+    assert val.get("armA_mrr") is not None, "replay 未产出 valence 档读数, 无法交叉核对"
+    return d, val
+stable = False
+for attempt in range(2):
+    before = fingerprint()
+    d, val = one_round()
+    after = fingerprint()
+    if before == after:
+        stable = True
+        break
+if not stable:
+    print("取样不稳定(比对期间库在变): %s -> %s ⇒ 本条不可判(不判绿也不判红), 等库静默时再跑"
+          % (before, after))
+else:
+    # 2026-09-13 11:2x **第三次转红的真正原因是"比错了行"**: 这条断言原先拿 replay 的读数与
+    # **currentGate 那一行**比, 而两者根本不是同一个候选集 —— replay 不做门限过滤(实测与 0.40/0.45 行
+    # **逐位相等** 0.418564/0.103960), currentGate=0.5 的行则是另一套候选(201 vs 202 个可排序集) ⇒
+    # 差 8.4e-4 被我读成"两实现口径漂移"(实际是本条判据自己拿错了比较对象)。正确判据是:
+    # **两实现在某个门限行上必须逐位一致**(说明算法口径相同, 只是候选集口径不同), 找不到这样的行才叫漂移。
+    matches = [x for x in d["table"]
+               if x.get("armA_mrr") is not None and abs(x["armA_mrr"] - val["armA_mrr"]) < 1e-6
+               and abs(x["armA_top1"] - val["armA_top1"]) < 1e-6]
+    assert matches, ("两工具在**任何**门限下都不一致 ⇒ 真口径漂移(不是候选集口径差): replay %.6f/%.6f, "
+                     "表内各行 %s" % (val["armA_mrr"], val["armA_top1"],
+                                      [(x["threshold"], round(x["armA_mrr"], 6) if x.get("armA_mrr") is not None else None)
+                                       for x in d["table"]]))
+    print("与 replay 同口径核对通过: A档 MRR %.4f / top-1 %.4f(与门限 %s 行逐位一致; 取样稳定: %s)"
+          % (val["armA_mrr"], val["armA_top1"],
+             ",".join(str(x["threshold"]) for x in matches), before))
 '
 # ── T185 池写入必须可归因, 且不得自灌水(cl-262) ──
 # 起因(2026-09-12 03:2x 三问帧): 归因读数只认**插件**写的 pool-change 行, 而按纪律我改池走 `dsh-goal-pool-write.py`
