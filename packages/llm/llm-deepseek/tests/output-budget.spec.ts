@@ -12,11 +12,14 @@ import {
 } from '../src/output-budget.ts'
 
 describe('estimateInputTokens', () => {
-  it('errs upward for ASCII and is exact-enough for CJK', () => {
-    // ASCII: 1/3 token per byte (over-estimated, which is the safe direction).
-    expect(estimateInputTokens('a'.repeat(300))).toBe(100)
+  it('tracks the provider real ratio for ASCII and counts CJK per character', () => {
+    // Calibration point: the provider counted 793,101 input tokens for a payload
+    // JSON of ~3.14MB, so ASCII-ish traffic runs ~4 bytes per token.
+    expect(estimateInputTokens('a'.repeat(4000))).toBe(1000)
     // CJK: three UTF-8 bytes per character ≈ one token per character.
     expect(estimateInputTokens('中'.repeat(300))).toBe(300)
+    // Mixed content counts each class on its own scale.
+    expect(estimateInputTokens(`${'a'.repeat(400)}${'中'.repeat(100)}`)).toBe(200)
   })
 })
 

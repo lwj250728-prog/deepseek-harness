@@ -27,17 +27,31 @@ const RESERVE_RATIO = 0.02
 const MIN_RESERVE_TOKENS = 1024
 
 /**
+ * Count characters that occupy roughly one token each in this provider's
+ * vocabulary: CJK ideographs, kana, and Hangul syllables.
+ */
+const DENSE_CHARACTER = /[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/gu
+
+/**
  * Estimate the input tokens of one serialized payload.
  *
- * UTF-8 bytes over three is deliberately conservative in both directions this
- * harness sees: ASCII costs ~1/3 token per byte (over-estimated, safe) and CJK
- * costs ~1 token per three bytes (exact). Under-estimating would hand the
- * provider an over-budget request, so the estimate errs upward.
+ * Calibrated against this deployment's own traffic rather than guessed: the
+ * provider reported 793,101 input tokens for a request whose message payload
+ * JSON weighed ~3.14MB, i.e. ≈4 bytes per token. Chinese text is denser (about
+ * one token per character, three UTF-8 bytes each), so the two are counted
+ * separately. An earlier revision divided ALL bytes by three "to be safe",
+ * which over-estimated this ASCII-heavy traffic by a third — enough to make
+ * every request look over budget and get its reply capped at the floor, which
+ * in turn kept sessions under the compaction threshold and stopped compaction
+ * from ever firing.
  * @param text - the serialized request body.
  * @returns an estimated input-token count.
  */
 export function estimateInputTokens(text: string): number {
-  return Math.ceil(Buffer.byteLength(text, 'utf8') / 3)
+  const dense = text.match(DENSE_CHARACTER)?.length ?? 0
+  const denseBytes = dense * 3
+  const restBytes = Math.max(0, Buffer.byteLength(text, 'utf8') - denseBytes)
+  return Math.ceil(restBytes / 4) + dense
 }
 
 /** What one clamp decision needs to know. */
