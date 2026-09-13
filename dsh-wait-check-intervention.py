@@ -59,7 +59,28 @@ def main() -> int:
     args = ap.parse_args()
 
     recs = load(IV)
+    # 2026-09-13 12:5x(行动帧执行时抓出): 本门**不认识预登记的窗口** —— 我 12:34 用 plan-disable 把窗口改期到
+    # 09-14 03:12, 而门只看"最后一条 disable", 于是它盯着**上一轮已经判读并处置完的窗口**报"条件已满足"
+    # ⇒ 驱动侧会为一步明天才可执行的工作反复催办(与 cl-126/cl-215 同型), 且对**尚未开启**的新窗口毫无感知。
+    # 补两条: ①有未取消、未到点的 plan-disable ⇒ 继续等待(报出 dueAt); ②最新窗口**已处置过**(判读账本里有
+    # 该窗口的裁决行) ⇒ 也继续等待(没有可读的东西了, 别再催)。
     dis = [r for r in recs if r.get('goal') == args.target and r.get('event') == 'disable']
+    plans = [r for r in recs if r.get('goal') == args.target and r.get('event') == 'plan-disable']
+    cancelled = {str(r.get('planKey')) for r in recs if r.get('event') == 'plan-cancel'}
+    pending = [r for r in plans if str(r.get('ts')) not in cancelled]
+    now_ms = datetime.datetime.now().timestamp() * 1000
+    if pending:
+        last_plan = max(pending, key=lambda r: str(r.get('ts')))
+        due = ms_of(last_plan.get('dueAt'))
+        if due is not None and now_ms < due:
+            print('[wait-check-intervention] 预登记窗口**尚未开启**(plan-disable dueAt=%s, 还剩 %.1f 小时) '
+                  '⇒ 继续等待, 不打扰' % (str(last_plan.get('dueAt'))[:19], (due - now_ms) / 3600000.0))
+            return 1
+        after = [r for r in dis if (ms_of(r.get('ts')) or 0) > (ms_of(last_plan.get('ts')) or 0)]
+        if not after:
+            print('[wait-check-intervention] 预登记窗口已到点但**没有开窗记录**(开窗腿失败或尚未跑) ⇒ 继续等待; '
+                  '查腿账本 wake-intervention-legs.jsonl 的 plan-disable 行')
+            return 1
     if not dis:
         print('[wait-check-intervention] 尚未开始: 没有 disable 记录 ⇒ 继续等待(不打扰)')
         return 1
@@ -90,7 +111,13 @@ def main() -> int:
     if not fresh:
         print('[wait-check-intervention] 窗口已结束但**本窗口**的判读行还没出(判读器应于结束 +5 分钟跑) ⇒ 继续等待')
         return 1
-    print('[wait-check-intervention] 条件已满足: 本窗口判读已产出(verdict=%s)' % fresh[-1].get('verdict'))
+    adj = load(os.path.join(D, 'wake-intervention-adjudication.jsonl'))
+    key = str(d.get('ts'))[:19]
+    if any(key in str(r.get('windowId') or '') for r in adj):
+        print('[wait-check-intervention] 本窗口**已判读并处置**(判读账本已有该窗口的裁决行, 见 wake-intervention-adjudication.jsonl) '
+              '⇒ 无可读之物, 继续等待/不打扰')
+        return 1
+    print('[wait-check-intervention] 条件已满足: 本窗口判读已产出(verdict=%s)且**尚未处置**' % fresh[-1].get('verdict'))
     return 0
 
 
