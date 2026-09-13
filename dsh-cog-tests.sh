@@ -10115,6 +10115,15 @@ for line in open(os.path.join(D, "subgoal-applications.jsonl"), encoding="utf8")
         if a.get("id"):
             apps[a["id"]] = a
 accepted = [a for a in apps.values() if a.get("status") == "accepted"]
+# 规划视图必须可消费(用户: 子目标按重要性和紧急性排序规划): --plan 必须能渲染且每条的象限齐备
+_r = subprocess.run([sys.executable, TOOL, "--plan", "--json"], capture_output=True, text=True, timeout=300)
+assert _r.returncode == 0, "规划视图渲染失败: %s" % ((_r.stdout or "") + (_r.stderr or ""))[-200:]
+_plan = json.loads([l for l in (_r.stdout or "").strip().splitlines() if l.strip().startswith("[")][-1])
+assert _plan, "accepted 子目标为空 ⇒ 规划视图没东西可排(通道空转)"
+assert all(x.get("quadrant") and isinstance(x.get("importance"), int) and isinstance(x.get("urgency"), int) for x in _plan), \
+    "规划里有条目缺象限/重要度/紧急度 ⇒ 排序是假的"
+print("        规划: %d 条 accepted 子目标按 重要×紧急 排出象限(最高 %s/%s)" % (len(_plan), _plan[0].get("quadrant"), _plan[0].get("urgency")))
+
 covered = set()
 for a in accepted:
     for m in re.findall(r"T[0-9]{3}", json.dumps(a, ensure_ascii=False)):
