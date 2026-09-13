@@ -9,6 +9,7 @@ import { z as zod } from 'zod'
 import type { Branded } from '@deepseek-ai/dsh-brand'
 import { assertNever, deepFreeze, isAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { nextSuccessorTitle } from './successor-sequence.ts'
 import type {
   Session,
   SessionEvent,
@@ -83,6 +84,14 @@ export interface Config {
   readonly fallbackMaxBytes: number
   /** Maximum UTF-8 bytes in any accepted title. */
   readonly maxTitleBytes: number
+  /**
+   * Counter file behind the `<MMDD>-<n>` title an inherited session receives
+   * (`$DSH_HOME/session-handover-sequence.json` by default).
+   *
+   * Numbering is skipped — and the ordinary first-message fallback applies —
+   * when this resolves to no path at all.
+   */
+  readonly successorSequencePath?: string
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -220,6 +229,7 @@ interface ResolvedConfig {
   readonly fallbackMaxWords: number
   readonly fallbackMaxBytes: number
   readonly maxTitleBytes: number
+  readonly successorSequencePath?: string
 }
 
 /** One exact provider registration generation. */
@@ -264,6 +274,7 @@ export class SessionTitleService extends Service {
     fallbackMaxWords: z.number().step(1).min(1).required(),
     fallbackMaxBytes: z.number().step(1).min(1).required(),
     maxTitleBytes: z.number().step(1).min(1).required(),
+    successorSequencePath: z.string().description('Counter file for inherited-session serials; defaults to $DSH_HOME/session-handover-sequence.json.'),
   })
 
   private readonly config: ResolvedConfig
@@ -756,13 +767,33 @@ export class SessionTitleService extends Service {
     this.assertServiceActive()
     const current = this.get(session)
     if (current !== undefined) return current
-    const [first] = collectSessionTitleMessages(session.events)
-    if (first === undefined) return undefined
-    const title = fallbackSessionTitle(
-      first.text,
-      this.config.fallbackMaxWords,
-      this.config.fallbackMaxBytes,
-    )
+    // An inherited session is named by its place in the succession sequence —
+    // `<MMDD>-<n>`, the n-th succession of the day it was created — not by the
+    // text it carries: a handover inherits either its predecessor's own title
+    // event or the checkpoint summary, so successive generations of one
+    // conversation end up looking like duplicates in the session list. The
+    // serial is pinned (`source: { kind: 'user' }`, the only source allowed to
+    // cite no message seqs) so no later automatic revision renames it.
+    const inherited = session.header.parentSession !== undefined
+    let title: string | undefined
+    let cite: number[] = []
+    let source: SessionTitleSource = { kind: 'user' }
+    if (inherited) {
+      title = await nextSuccessorTitle(this.config.successorSequencePath, session.header.createdAt)
+    }
+    if (title === undefined) {
+      // Ordinary sessions — and inherited ones with numbering unavailable — take
+      // their title from the first human message.
+      const [first] = collectSessionTitleMessages(session.events)
+      if (first === undefined) return undefined
+      title = fallbackSessionTitle(
+        first.text,
+        this.config.fallbackMaxWords,
+        this.config.fallbackMaxBytes,
+      )
+      cite = [first.seq]
+      source = { kind: 'fallback' }
+    }
     if (title.length === 0) return undefined
     const state = this.stateFor(session)
     if (state.fallback !== undefined) return state.fallback
@@ -775,8 +806,8 @@ export class SessionTitleService extends Service {
       if (accepted !== undefined) return accepted
       session.append('session/title', {
         title,
-        messageSeqs: [first.seq],
-        source: { kind: 'fallback' },
+        messageSeqs: cite,
+        source,
       })
       return this.get(session)
     })
