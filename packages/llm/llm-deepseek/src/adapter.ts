@@ -23,6 +23,7 @@ import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { AnonymousUserId } from '@deepseek-ai/dsh-anonymous-user-id'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { serializeRequest, serializeRequestWithImages } from './serialize.ts'
+import { clampOutputBudget, estimateInputTokens } from './output-budget.ts'
 import type { RequestDefaults } from './serialize.ts'
 import { parseSse } from './sse.ts'
 import { translate } from './translate.ts'
@@ -314,6 +315,30 @@ export class DeepSeekAdapter extends LlmAdapter {
         maxRequestImageBytes: connection.maxRequestImageBytes,
         signal,
       }, connection.defaults)
+    // Reserve room for the output budget before the provider has to: a request
+    // whose input plus declared output exceeds the window is rejected outright,
+    // so a long conversation would fail every turn instead of compacting. The
+    // window is the model's resolved capacity; an unknown window leaves the
+    // caller's budget alone.
+    const budget = clampOutputBudget({
+      ...options.maxTokens === undefined ? {} : { requestedMaxTokens: options.maxTokens },
+      ...connection.defaultContextWindow === undefined
+        ? {}
+        : { contextWindow: connection.defaultContextWindow },
+      estimatedInputTokens: estimateInputTokens(JSON.stringify(body.messages)),
+    })
+    if (budget.clampedFrom !== undefined) {
+      // Observable on purpose: a silently shrinking reply budget is exactly the
+      // kind of behaviour an operator later has to reverse-engineer.
+      console.warn(
+        `[llm-deepseek] output budget clamped ${budget.clampedFrom} → ${String(budget.maxTokens)} `
+        + `(window ${String(connection.defaultContextWindow)}, input ~${estimateInputTokens(JSON.stringify(body.messages))}, `
+        + `free ${String(budget.remaining)}): this conversation needs compaction`,
+      )
+      // `clampedFrom` is only set alongside a concrete budget.
+      body.max_tokens = budget.maxTokens as number
+    }
+
     // Prepared outside the try so the TRANSPORT label below covers exactly the
     // transport boundary, never a serialization failure.
     const payload = JSON.stringify(body)

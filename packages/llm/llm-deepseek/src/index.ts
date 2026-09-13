@@ -48,20 +48,19 @@ const DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY'
 /** The single provider route this plugin owns. */
 const PROVIDER = 'deepseek-official'
 
+// 目录来源: 供应商实时清单 `GET https://api.deepseek.com/v1/models`。
+// 2026-09-10 21:4x 实查目录 = ['deepseek-flash', 'deepseek-v4-pro'](凭据在 ~/.dsh/.credentials.yaml)。
+// 本次更新(cl-158): ①移除已到期的灰测 id `deepseek-v4.1-flash-expires-on-0910`(09-10 到期, 供应商目录已无此项,
+// 响应侧日志显示服务端自 21:10:36 起实际返回 `deepseek-v4-flash`); ②补入供应商目录里的 `deepseek-flash`。
+// 保留 `deepseek-v4-flash` 与 `deepseek-v4-pro`(前者是 profile 默认, 仍在用; 后者在供应商目录内),
+// 保留 vision-exp(实验项, 未在本次实查目录中, 但被既有配置引用, 故不擅自删)。
 const DEFAULT_MODELS: DeepSeekCatalogModel[] = [
+  { id: 'deepseek-flash', name: 'DeepSeek-Flash', contextWindow: DEFAULT_CONTEXT_WINDOW },
   { id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', contextWindow: DEFAULT_CONTEXT_WINDOW },
   { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', contextWindow: DEFAULT_CONTEXT_WINDOW },
   {
     id: 'deepseek-v4-flash-vision-exp',
     name: 'DeepSeek-V4-Flash-Vision-Exp',
-    contextWindow: DEFAULT_CONTEXT_WINDOW,
-    inputModalities: ['text', 'image'],
-  },
-  {
-    // 灰测模型(2026-09-08 用户加入): v4.1 Flash 内测版, 原生多模态, expires-on-0910 = 09-10 到期
-    // 到期后需从目录移除(见 identity 灰测台账/claims-ledger)
-    id: 'deepseek-v4.1-flash-expires-on-0910',
-    name: 'DeepSeek-V4.1-Flash (灰测, 至09-10)',
     contextWindow: DEFAULT_CONTEXT_WINDOW,
     inputModalities: ['text', 'image'],
   },
