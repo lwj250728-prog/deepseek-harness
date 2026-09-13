@@ -73,10 +73,26 @@ def record_reading(data: dict) -> str | None:
     path = os.environ.get('DSH_CHAIN_READINESS_LEDGER') or os.path.join(
         os.path.expanduser('~/.dsh/cognitive-pipeline'), 'chain-readiness.jsonl')
     keep = int(os.environ.get('DSH_CHAIN_READINESS_KEEP') or 2000)
+    # cl-368: 读数必须能回答"**重启会交付什么**" —— 只报我这两个包的 pending 会把分母缩小,
+    # 而真正待决策的问题是: 哪些包重启就能生效(carrier-stale)、哪些**还得先构建**(build-stale)。
+    repo = None
+    try:
+        rc2, payload, _ = run_json([sys.executable, os.environ.get('DSH_READY_DEPLOY_LAG') or DEPLOY_LAG, '--json'], dict(os.environ))
+        if payload is not None:
+            verdicts = [(r.get('package'), r.get('verdict')) for r in payload.get('rows', [])]
+            repo = {
+                'scanned': len(verdicts),
+                'deliverableOnRestart': sorted(p for p, v in verdicts if v == 'carrier-stale'),
+                'needsBuildFirst': sorted(p for p, v in verdicts if v in ('build-stale', 'missing')),
+            }
+    except Exception:
+        repo = None      # 附属信息, 拿不到就留空(不许影响主判定)
+
     try:
         line = json.dumps({
             'ts': datetime.datetime.now(TZ).isoformat(),
             'state': data.get('state'),
+            'repo': repo,
             'next': data.get('next'),
             'vendorVerdicts': data.get('vendorVerdicts'),
             # "待加载/待构建"的包名清单: 这是"还差什么"的可判读部分
