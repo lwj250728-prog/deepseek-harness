@@ -70,7 +70,11 @@ def main() -> int:
     if cur is None:
         print('目标池里没有 id=%s(新目标请先建行)' % args.id, file=sys.stderr)
         return 3
-    if args.show:
+    # 2026-09-13 11:0x **实测事故**: `--write --show` 是**静默空操作** —— --show 在写入之前就 return 0,
+    # 于是"写了并给我看看"变成"只看了看"。取证: cl-265 干预恢复腿我用了这张组合, 工具打印正常、exit 0,
+    # 而池里没有任何新行(只留下我随后手补的笔记), 恢复**没发生**; /tmp 的 before-write 备份也证明那次
+    # 根本没走到写盘。故: --show 只在**纯读**(无 --write)时短路; 带 --write 时写入后回显新行。
+    if args.show and not args.write:
         print(json.dumps(cur, ensure_ascii=False, indent=1))
         return 0
 
@@ -135,6 +139,8 @@ def main() -> int:
     shutil.copy(args.pool, '/tmp/dormant-goals.before-write-%s.jsonl' % datetime.datetime.now().strftime('%H%M%S'))
     with open(args.pool, 'a', encoding='utf8') as f:
         f.write(json.dumps(row, ensure_ascii=False) + '\n')
+    if args.show:  # --write --show: 写入后**回显落盘的那一行**(否则"写了并看看"又变回"只看了看")
+        print(json.dumps(row, ensure_ascii=False, indent=1))
     # cl-262(2026-09-12 03:2x 三问帧所得): **归因读数只认插件写的 pool-change**, 而我改池走的是这个写入口
     # ⇒ 我真正执行过的步骤在归因读数里根本不存在, 严格归因率被系统性低估(实测: 02:52 本写入口推进过
     # goal-experience-library 的 nextAction, 而该目标的最后一条 pool-change 停在 09-11 20:02)。故写入成功后
