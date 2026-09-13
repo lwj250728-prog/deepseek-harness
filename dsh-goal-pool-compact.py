@@ -44,6 +44,11 @@ def main() -> int:
     if not os.path.exists(args.pool):
         print('读不到目标池: %s' % args.pool, file=sys.stderr)
         return 3
+    # 2026-09-13 15:2x **实测事故(tp-197)**: 15:10 用唯一写入口写入三个目标的 waitChecker(逐条回读 ✓),
+    # 15:11:34 本工具重写池子后**那三行全部消失**且无任何报警 —— 读-改-写竞态: 本工具读到的是**写入之前**的
+    # 快照, 落盘时把快照写回 ⇒ 并发写入被静默回退。故读入时记下 (mtime_ns, size) 指纹, 落盘前复核。
+    _st = os.stat(args.pool)
+    _fingerprint = (_st.st_mtime_ns, _st.st_size)
     rows = [json.loads(l) for l in open(args.pool, encoding='utf8') if l.strip()]
     by_id: dict[str, list[dict]] = collections.defaultdict(list)
     for r in rows:
@@ -68,6 +73,22 @@ def main() -> int:
         'ts': datetime.datetime.now().astimezone().isoformat(),
     }
     if args.write:
+        # **仅用于测试**的竞态窗口: 设 DSH_COMPACT_DEBUG_SLEEP=<秒> 则在"读入之后、落盘之前"停一会儿,
+        # 让测试能在这段窗口里插一次并发写入, 从而**确定性地**复现读-改-写竞态(tp-197)。
+        _sleep = float(os.environ.get('DSH_COMPACT_DEBUG_SLEEP') or 0)
+        if _sleep > 0:
+            import time as _t
+            _t.sleep(_sleep)
+        _st2 = os.stat(args.pool)
+        if (_st2.st_mtime_ns, _st2.st_size) != _fingerprint:
+            print('拒绝压实: 读入之后目标池被**并发写入**过(mtime/size 变了) ⇒ 现在落盘会把那次写入静默回退'
+                  '(实测事故: 2026-09-13 15:10 的三条门声明就是这样丢的)。请重新运行一次。',
+                  file=sys.stderr)
+            payload['written'] = False
+            payload['refused'] = 'concurrent-write-detected'
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False))
+            return 2
         backup = '/tmp/dormant-goals.before-compact-%s.jsonl' % datetime.datetime.now().strftime('%H%M%S')
         shutil.copy(args.pool, backup)
         with open(args.pool, 'w', encoding='utf8') as f:

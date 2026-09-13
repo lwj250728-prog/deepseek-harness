@@ -9162,6 +9162,35 @@ assert not bad, "停驱未被行为消费: " + "; ".join(bad)
 print("停驱核验: %d 条声明; 驱动器当前目标 %s(来源 %s) ≠ 被停驱会话; 帧账本(共 %d 行)中停驱后 0 帧"
       % (len(excs), eff, src, len(rows)))
 '
+# ── T227 池压实不得吃掉并发写入(tp-197: 今天真丢过三条门声明) ──
+# 实测事故: 15:10 用唯一写入口写入三个目标的 waitChecker(逐条回读 ✓), 15:11:34 dsh-goal-pool-compact.py 重写池子后
+# 三行**全部消失**且无任何报警 —— 读-改-写竞态。修法: 压实读入时记 (mtime_ns,size) 指纹, 落盘前复核, 变了就**拒绝**。
+# 本组用 DSH_COMPACT_DEBUG_SLEEP(仅测试用的确定性窗口)复现竞态: 窗口内插一次并发写入 ⇒ 必须 exit 2 且末行保住。
+echo "[T227] 池压实不得吃掉并发写入(检测到并发即拒绝)"
+t "池压实遇到并发写入必须拒绝且不得吃掉末行" python3 -c '
+import json, os, subprocess, sys, tempfile, time
+TOOL = os.environ.get("DSH_COMPACT_TOOL") or os.path.expanduser("~/dsh-fork/dsh-goal-pool-compact.py")
+tmp = tempfile.mkdtemp(); pool = os.path.join(tmp, "pool.jsonl")
+rows = [{"id": "g1", "status": "active", "lastActionAt": "2026-09-13T10:00:00+08:00", "waitChecker": "old.py"},
+        {"id": "g1", "status": "active", "lastActionAt": "2026-09-13T11:00:00+08:00", "waitChecker": "old2.py"}]
+with open(pool, "w", encoding="utf8") as f:
+    for r in rows:
+        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+env = dict(os.environ, DSH_COMPACT_DEBUG_SLEEP="2")
+p = subprocess.Popen([sys.executable, TOOL, "--pool", pool, "--write"],
+                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+time.sleep(0.8)
+with open(pool, "a", encoding="utf8") as f:
+    f.write(json.dumps({"id": "g1", "status": "active", "lastActionAt": "2026-09-13T15:10:00+08:00",
+                        "waitChecker": "NEW-with-deadline.py"}, ensure_ascii=False) + "\n")
+out, err = p.communicate(timeout=180)
+assert p.returncode == 2, ("检测到并发写入时压实必须拒绝(exit 2), 实得 %d: %s"
+                          % (p.returncode, (err or out).strip()[-160:]))
+last = json.loads(open(pool, encoding="utf8").read().strip().splitlines()[-1])
+assert last.get("waitChecker") == "NEW-with-deadline.py", (
+    "并发写入被压实吃掉了(末行成了 %r) —— 声明丢失且无人报警" % last.get("waitChecker"))
+print("并发写入被拒(exit 2), 末行保住: %s" % last.get("waitChecker"))
+'
 echo "═══ 结果: $PASS 通过 / $FAIL 失败 ═══"
 # cl-175: 裁决行直写规范日志(不依赖 tee 的尾部 flush)——"这次跑是绿是红"必须留在日志里可核。
 # 先 sleep 半秒: 实测 tee 是异步写, 不等待会出现"裁决行排在本块正文之前"的错序。
